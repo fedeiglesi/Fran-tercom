@@ -14,7 +14,7 @@ OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 GOOGLE_SHEETS_ID = '1K3TNQ9A9ZNTA5JNgQT1pMG-n-Oo8s45s'
 EXCHANGE_API_URL = 'https://dolarapi.com/v1/dolares/oficial'
 
-client = OpenAI()
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Base de datos
 def init_db():
