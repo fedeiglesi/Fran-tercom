@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # Configuracion
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-GOOGLE_SHEETS_ID = '1K3TNQ9A9ZNTA5JNgQT1pMG-n-Oo8s45s'
+GOOGLE_SHEETS_ID = '1gpWqjUX3xda5LJc0spWvgO0pPxM05U1j'
 EXCHANGE_API_URL = 'https://dolarapi.com/v1/dolares/oficial'
 
 client = OpenAI(
