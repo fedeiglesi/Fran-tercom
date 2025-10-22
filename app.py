@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import csv
 from datetime import datetime
 from flask import Flask, request, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
@@ -13,8 +14,8 @@ app = Flask(__name__)
 # CONFIGURACIÓN
 # =========================
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-GOOGLE_SHEETS_ID = '1gpWqjUX3xda5LJc0spWvgO0pPxM05U1j'
 EXCHANGE_API_URL = 'https://dolarapi.com/v1/dolares/oficial'
+OPENAI_FILE_ID = 'file-KP8Qc9rNTAZbxzNc4fzkWp'  # 📂 ID del archivo subido al Storage de OpenAI
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -47,42 +48,48 @@ def get_exchange_rate():
         return 1200.0
 
 
-def load_catalog():
-    """Carga el catálogo desde Google Sheets"""
+def load_catalog_from_openai():
+    """Carga el catálogo desde el archivo alojado en OpenAI Storage"""
     try:
-        url = f'https://docs.google.com/spreadsheets/d/{GOOGLE_SHEETS_ID}/export?format=csv'
-        response = requests.get(url, timeout=10)
-        lines = response.text.strip().split('\n')
+        print("📦 Cargando catálogo desde OpenAI Storage...")
+        response = client.files.content(OPENAI_FILE_ID)
+        csv_data = response.text.strip().split('\n')
+        reader = csv.reader(csv_data)
+        next(reader)  # Salta la fila de encabezado
 
         catalog = []
         exchange_rate = get_exchange_rate()
 
-        for i, line in enumerate(lines[1:]):  # salta el encabezado
-            parts = line.split(',')
-            if len(parts) >= 4:
-                code = parts[0].strip()
-                name = parts[1].strip()
-                price_usd = parts[2].strip()
-                price_ars = parts[3].strip()
+        for row in reader:
+            if len(row) < 4:
+                continue
 
-                if price_usd and price_usd != '' and price_usd != '0':
-                    final_price = float(price_usd) * exchange_rate
-                    currency = 'USD'
-                else:
-                    final_price = float(price_ars) if price_ars else 0
-                    currency = 'ARS'
+            code = row[0].strip()
+            name = row[1].strip()
+            price_usd = row[2].replace('$', '').replace(',', '').strip()
+            price_ars = row[3].replace('$', '').replace(',', '').strip()
 
-                catalog.append({
-                    'code': code,
-                    'name': name,
-                    'price_usd': float(price_usd) if price_usd else 0,
-                    'price_ars': final_price,
-                    'currency': currency
-                })
+            # Si hay precio en USD, lo convierte
+            if price_usd and price_usd not in ['0', '']:
+                final_price = float(price_usd) * exchange_rate
+                currency = 'USD'
+            else:
+                final_price = float(price_ars) if price_ars else 0
+                currency = 'ARS'
 
+            catalog.append({
+                'code': code,
+                'name': name,
+                'price_usd': float(price_usd) if price_usd else 0,
+                'price_ars': final_price,
+                'currency': currency
+            })
+
+        print(f"✅ Catálogo cargado: {len(catalog)} productos")
         return catalog, exchange_rate
+
     except Exception as e:
-        print(f"Error loading catalog: {e}")
+        print(f"❌ Error cargando catálogo: {e}")
         return [], 1200.0
 
 
@@ -153,9 +160,12 @@ def create_system_prompt(catalog, exchange_rate):
     except Exception as e:
         base_prompt = "Sos Fran, vendedor humano de Tercom."
 
+    # Mostrar solo los primeros 200 productos para no saturar al modelo
+    subset = catalog[:200]
+
     catalog_text = "\n".join([
         f"- Codigo: {p['code']} | {p['name']} | ${p['price_ars']:,.2f} ARS"
-        for p in catalog
+        for p in subset
     ])
 
     return f"""{base_prompt}
@@ -176,7 +186,7 @@ def webhook():
 
         save_message(from_number, incoming_msg, 'user')
 
-        catalog, exchange_rate = load_catalog()
+        catalog, exchange_rate = load_catalog_from_openai()
         history = get_conversation_history(from_number)
 
         messages = [
