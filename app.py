@@ -18,29 +18,30 @@ import openai
 from rapidfuzz import process, fuzz
 
 # -----------------------------------
-# Logging
-# -----------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# -----------------------------------
-# Configuración general
+# CONFIGURACIÓN GENERAL
 # -----------------------------------
 app = Flask(__name__)
-
 openai.api_key = os.environ.get("OPENAI_API_KEY")
+
 CATALOG_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/refs/heads/main/LISTA_TERCOM_LIMPIA.csv"
 EXCHANGE_API_URL = "https://dolarapi.com/v1/dolares/oficial"
 
+# Logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+# Rate limiting
 user_requests = defaultdict(list)
 RATE_LIMIT = 10
 RATE_WINDOW = 60
 
+# Memorias temporales
+last_context = {}
+last_product = {}
+last_moto = {}
+
 # -----------------------------------
-# Base de datos
+# BASE DE DATOS
 # -----------------------------------
 @contextmanager
 def get_db_connection():
@@ -62,8 +63,31 @@ def init_db():
                      (phone TEXT, message TEXT, role TEXT, timestamp TEXT)''')
 init_db()
 
+def save_message(phone, message, role):
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute('INSERT INTO conversations VALUES (?, ?, ?, ?)',
+                      (phone, message, role, datetime.now().isoformat()))
+    except Exception as e:
+        logger.error(f"Error guardando mensaje: {e}")
+
+def get_conversation_history(phone, limit=10):
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute(
+                'SELECT message, role FROM conversations WHERE phone = ? ORDER BY timestamp DESC LIMIT ?',
+                (phone, limit)
+            )
+            history = c.fetchall()
+        return list(reversed(history))
+    except Exception as e:
+        logger.error(f"Error obteniendo historial: {e}")
+        return []
+
 # -----------------------------------
-# Utilidades
+# UTILIDADES
 # -----------------------------------
 def rate_limit_check(phone):
     now = time()
@@ -92,6 +116,7 @@ def load_catalog_structured():
             return []
 
         header = [h.strip().lower() for h in rows[0]]
+
         def col_idx(keys):
             for i, h in enumerate(header):
                 h_norm = h.replace("ó","o").replace("á","a").replace("é","e").replace("í","i").replace("ú","u")
@@ -143,7 +168,7 @@ def load_catalog_structured():
         logger.error(f"Error cargando catálogo: {e}")
         return []
 
-def fuzzy_candidates(query, limit=12, threshold=55):
+def fuzzy_candidates(query, limit=10, threshold=60):
     catalog = load_catalog_structured()
     if not catalog:
         return []
@@ -151,59 +176,102 @@ def fuzzy_candidates(query, limit=12, threshold=55):
     results = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
     return [catalog[idx] for name, score, idx in results if score >= threshold]
 
+def get_context_summary(phone):
+    """Resume los últimos mensajes del cliente"""
+    history = get_conversation_history(phone, limit=8)
+    if not history:
+        return ""
+    msgs = " ".join([m for m, r in history if r == 'user'])
+    return msgs[-700:]
+
+def infer_context(incoming_msg, phone):
+    """Agrega el contexto del último producto o moto mencionada"""
+    if "mismo" in incoming_msg.lower() and phone in last_moto:
+        return incoming_msg + " " + last_moto[phone]
+    return incoming_msg
+
 # -----------------------------------
-# Prompt base
+# PROMPT BASE
 # -----------------------------------
 def load_prompt():
     try:
         with open("prompt_fran.txt", "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "Sos Fran, el agente de ventas de Tercom. Ayudá al cliente con el catálogo."
+        return (
+            "Sos Fran, el agente de ventas de Tercom, una empresa de motopartes.\n"
+            "Sos amable, profesional y respondés como una persona real, no como un bot.\n"
+            "Tu tarea es ayudar al cliente a encontrar los productos que necesita y gestionar su carrito.\n\n"
+            "Recordá mantener siempre el contexto de la conversación (modelo de moto, marca, etc.) "
+            "y ofrecer solo productos reales del catálogo.\n"
+        )
 
 # -----------------------------------
-# Webhook
+# WEBHOOK
 # -----------------------------------
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(silent=True)
-        if data:
-            incoming_msg = data.get('Body', '').strip()
-            from_number = data.get('From', '')
-        else:
-            incoming_msg = request.values.get('Body', '').strip()
-            from_number = request.values.get('From', '')
-
-        if not incoming_msg:
-            resp = MessagingResponse()
-            resp.message("Disculpá, no entendí tu mensaje. ¿Podés repetirlo?")
-            return str(resp)
+        incoming_msg = request.values.get('Body', '').strip()
+        from_number = request.values.get('From', '')
+        logger.info(f"Mensaje de {from_number}: {incoming_msg}")
 
         if not rate_limit_check(from_number):
             resp = MessagingResponse()
-            resp.message("Por favor esperá un momento antes de enviar más mensajes 😊")
+            resp.message("📨 Estás enviando muchos mensajes. Esperá unos segundos y seguimos 😉")
             return str(resp)
 
+        # Guardar mensaje del usuario
+        save_message(from_number, incoming_msg, 'user')
+
+        # Aplicar contexto previo
+        incoming_msg = infer_context(incoming_msg, from_number)
         base_prompt = load_prompt()
+        context_summary = get_context_summary(from_number)
+
+        # Búsqueda en catálogo
         candidates = fuzzy_candidates(incoming_msg)
-        catalog_text = "\n".join([f"{p['code']} | {p['name']} | ${p['price_ars']:.2f}" for p in candidates]) if candidates else "No se encontraron coincidencias."
+        catalog_text = ""
+        if candidates:
+            catalog_text = "\n".join([
+                f"{p['code']} | {p['name']} | ${p['price_ars']:.2f}" for p in candidates[:8]
+            ])
+            last_product[from_number] = candidates[0]['name']
+
+            # Detectar si menciona moto
+            for c in candidates:
+                if any(word in c['name'].lower() for word in ['honda', 'yamaha', 'biz', 'crypton', 'cg', 'cbf']):
+                    last_moto[from_number] = c['name']
+
+        # Armar prompt completo
+        system_prompt = f"""{base_prompt}
+
+Contexto previo del cliente:
+{context_summary}
+
+Productos relevantes encontrados:
+{catalog_text if catalog_text else "Ninguno exacto, pero buscá alternativas."}
+"""
 
         messages = [
-            {"role": "system", "content": f"{base_prompt}\n\n{catalog_text}"},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": incoming_msg}
         ]
 
+        # Llamada a OpenAI
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.7,
-            max_tokens=500
+            temperature=0.6,
+            max_tokens=600
         )
 
         answer = response.choices[0].message.content.strip()
-        logger.info(f"Respuesta: {answer[:100]}")
 
+        # Guardar respuesta
+        save_message(from_number, answer, 'assistant')
+
+        # Enviar a WhatsApp
         twilio_resp = MessagingResponse()
         twilio_resp.message(answer)
         return str(twilio_resp)
@@ -215,7 +283,7 @@ def webhook():
         return str(resp)
 
 # -----------------------------------
-# Healthcheck
+# HEALTHCHECK
 # -----------------------------------
 @app.route('/health', methods=['GET'])
 def health():
