@@ -3,5 +3,5 @@ twilio==8.10.0
 openai==0.28.1
 requests==2.31.0
 rapidfuzz==3.6.1
-faiss-cpu==1.8.0
+faiss-cpu==1.7.4
 gunicorn==21.2.0
