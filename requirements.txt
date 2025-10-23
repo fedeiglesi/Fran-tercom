@@ -1,6 +1,6 @@
 flask==3.0.3
 twilio==8.11.0
-openai==1.40.0
+openai==0.28.1
 requests==2.32.3
 rapidfuzz==3.9.0
 gunicorn==21.2.0
