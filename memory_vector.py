@@ -1,45 +1,91 @@
 import os
-import json
-import faiss
 import numpy as np
-import openai
+import faiss
+from functools import lru_cache
+from openai import OpenAI
 
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-INDEX_PATH = "fran_memory.faiss"
-META_PATH = "fran_metadata.json"
+# -----------------------------------
+# CONFIGURACIÓN DEL CLIENTE OPENAI
+# -----------------------------------
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-DIM = 1536
-index = faiss.IndexFlatL2(DIM)
-memory = {}
-
-if os.path.exists(INDEX_PATH):
-    index = faiss.read_index(INDEX_PATH)
-    if os.path.exists(META_PATH):
-        with open(META_PATH, "r", encoding="utf-8") as f:
-            memory = json.load(f)
-
-def embed(text):
-    emb = openai.Embedding.create(model="text-embedding-3-large", input=text)
-    return np.array(emb["data"][0]["embedding"], dtype=np.float32)
-
-def add_memory(user, text):
-    vec = embed(text)
-    index.add(np.array([vec]))
-    memory[len(memory)] = {"user": user, "text": text}
-    save_index()
-
-def query_memory(user, text, k=5):
-    if index.ntotal == 0:
+# -----------------------------------
+# GENERACIÓN DE EMBEDDINGS
+# -----------------------------------
+def generar_embeddings(textos):
+    """
+    Genera embeddings para una lista de textos usando el modelo text-embedding-3-small.
+    """
+    try:
+        response = client.embeddings.create(
+            input=textos,
+            model="text-embedding-3-small"
+        )
+        return [d.embedding for d in response.data]
+    except Exception as e:
+        print(f"⚠️ Error generando embeddings: {e}")
         return []
-    vec = embed(text)
-    D, I = index.search(np.array([vec]), k)
-    results = []
-    for i in I[0]:
-        if i < len(memory) and memory[i]["user"] == user:
-            results.append(memory[i]["text"])
-    return results
 
-def save_index():
-    faiss.write_index(index, INDEX_PATH)
-    with open(META_PATH, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
+
+# -----------------------------------
+# CREACIÓN DEL ÍNDICE FAISS
+# -----------------------------------
+@lru_cache(maxsize=1)
+def construir_indice_faiss(lista_productos):
+    """
+    Crea un índice FAISS a partir de una lista de productos con campo 'name'.
+    """
+    try:
+        textos = [p["name"] for p in lista_productos]
+        embeddings = generar_embeddings(textos)
+
+        if not embeddings:
+            print("⚠️ No se generaron embeddings.")
+            return None, None
+
+        vecs = np.array(embeddings).astype("float32")
+        index = faiss.IndexFlatL2(vecs.shape[1])
+        index.add(vecs)
+        print(f"✅ Índice FAISS creado con {len(lista_productos)} productos.")
+        return index, lista_productos
+    except Exception as e:
+        print(f"⚠️ Error creando índice FAISS: {e}")
+        return None, None
+
+
+# -----------------------------------
+# BÚSQUEDA SEMÁNTICA
+# -----------------------------------
+def buscar_semantico(query, lista_productos, top_k=8):
+    """
+    Busca productos similares en el catálogo usando FAISS y embeddings semánticos.
+    """
+    try:
+        index, catalogo = construir_indice_faiss(tuple(lista_productos))  # lru_cache requiere tipos hashables
+        if index is None:
+            return []
+
+        emb = generar_embeddings([query])[0]
+        emb_np = np.array([emb]).astype("float32")
+        D, I = index.search(emb_np, top_k)
+        resultados = [catalogo[i] for i in I[0] if i < len(catalogo)]
+        return resultados
+    except Exception as e:
+        print(f"⚠️ Error en búsqueda semántica: {e}")
+        return []
+
+
+# -----------------------------------
+# TEST LOCAL (opcional)
+# -----------------------------------
+if __name__ == "__main__":
+    # Pequeña prueba local (se ejecuta solo si corrés este archivo directo)
+    productos = [
+        {"code": "001", "name": "Filtro de aire Honda Biz 125", "price_ars": 2500},
+        {"code": "002", "name": "Manubrio Yamaha YBR", "price_ars": 6000},
+        {"code": "003", "name": "Acrílico tablero Honda Biz 125 Revolution", "price_ars": 280000},
+    ]
+
+    resultados = buscar_semantico("acrilico tablero honda biz", productos)
+    for r in resultados:
+        print(f"🔹 {r['name']} - ${r['price_ars']}")
