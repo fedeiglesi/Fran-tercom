@@ -1,7 +1,7 @@
 flask==3.0.0
 twilio==8.10.0
-openai==0.28.1
+openai>=1.0.0  # Última versión estable (ej: 1.6.x en 2025)
 requests==2.31.0
 rapidfuzz==3.6.1
-faiss-cpu==1.7.4
+faiss-cpu>=1.8.0  # Última versión compatible (ej: 1.8.0 en 2025)
 gunicorn==21.2.0
