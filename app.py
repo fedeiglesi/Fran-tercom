@@ -4,6 +4,8 @@ import csv
 import io
 import sqlite3
 import logging
+import re
+import unicodedata
 from datetime import datetime
 from collections import defaultdict
 from functools import lru_cache
@@ -22,8 +24,7 @@ import numpy as np
 # CONFIGURACIÓN GENERAL
 # -----------------------------------
 app = Flask(__name__)
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -31,14 +32,12 @@ CATALOG_URL = os.environ.get(
     "CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
 )
-EXCHANGE_API_URL = os.environ.get(
-    "EXCHANGE_API_URL", "https://dolarapi.com/v1/dolares/oficial"
-)
+EXCHANGE_API_URL = os.environ.get("EXCHANGE_API_URL", "https://dolarapi.com/v1/dolares/oficial")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -----------------------------------
-# BASE DE DATOS LOCAL
+# BASE DE DATOS
 # -----------------------------------
 @contextmanager
 def get_db_connection():
@@ -52,7 +51,6 @@ def get_db_connection():
     finally:
         conn.close()
 
-
 def init_db():
     with get_db_connection() as conn:
         c = conn.cursor()
@@ -60,6 +58,8 @@ def init_db():
                      (phone TEXT, message TEXT, role TEXT, timestamp TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS carts
                      (phone TEXT, code TEXT, quantity INTEGER, name TEXT, price_usd REAL, price_ars REAL)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)''')
+        c.execute('''CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)''')
 init_db()
 
 # -----------------------------------
@@ -68,7 +68,6 @@ init_db()
 user_requests = defaultdict(list)
 RATE_LIMIT = 10
 RATE_WINDOW = 60
-
 
 def rate_limit_check(phone):
     now = time()
@@ -81,26 +80,53 @@ def rate_limit_check(phone):
 # -----------------------------------
 # UTILIDADES
 # -----------------------------------
+def strip_accents(s: str) -> str:
+    if not s:
+        return ""
+    return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
+
+def to_float(s: str) -> float:
+    """Convierte strings tipo 'USD 2,41' / '$ 1.234,56' / '-' a float ARS/USD seguro."""
+    if s is None:
+        return 0.0
+    s = str(s)
+    if s.strip() in ("", "-", "—", "–"):
+        return 0.0
+    # quitar etiquetas y símbolos
+    s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
+    # casos '2.241,50' -> quitar miles y normalizar decimal
+    # primero quitar puntos de miles y luego cambiar coma por punto
+    s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
 def get_exchange_rate():
     try:
         res = requests.get(EXCHANGE_API_URL, timeout=5)
+        res.raise_for_status()
         data = res.json()
         return float(data.get("venta", 1200.0))
     except Exception as e:
         logger.warning(f"Fallo tasa cambio: {e}")
         return 1200.0
 
-
 @lru_cache(maxsize=1)
 def load_catalog():
-    """Lee el catálogo CSV desde GitHub."""
+    """Lee y normaliza el catálogo CSV desde CATALOG_URL."""
     try:
-        r = requests.get(CATALOG_URL, timeout=15)
+        r = requests.get(CATALOG_URL, timeout=20)
         r.raise_for_status()
-        csv_data = io.StringIO(r.text)
-        reader = csv.reader(csv_data)
+        r.encoding = "utf-8"
+        reader = csv.reader(io.StringIO(r.text))
+
         rows = list(reader)
-        header = [h.lower().strip() for h in rows[0]]
+        if not rows:
+            return []
+
+        header_raw = rows[0]
+        header = [strip_accents(h) for h in header_raw]
 
         def find_index(keys):
             for i, h in enumerate(header):
@@ -109,37 +135,38 @@ def load_catalog():
             return None
 
         idx_code = find_index(["codigo", "code"])
-        idx_name = find_index(["producto", "descripcion", "description"])
-        idx_usd = find_index(["usd", "dolar"])
-        idx_ars = find_index(["ars", "peso"])
+        idx_name = find_index(["producto", "descripcion", "description", "nombre"])
+        idx_usd  = find_index(["usd", "dolar", "precio en dolares"])
+        idx_ars  = find_index(["ars", "pesos", "precio en pesos"])
 
         exchange = get_exchange_rate()
         catalog = []
         for line in rows[1:]:
-            code = (line[idx_code] if idx_code is not None else "").strip()
-            name = (line[idx_name] if idx_name is not None else "").strip()
-            try:
-                usd = float(str(line[idx_usd]).replace(",", ".").replace("$", "")) if idx_usd is not None else 0.0
-                ars = float(str(line[idx_ars]).replace(",", ".").replace("$", "")) if idx_ars is not None else usd * exchange
-            except:
-                usd, ars = 0.0, 0.0
-            if name:
-                catalog.append({"code": code, "name": name, "price_usd": usd, "price_ars": ars})
+            if not line:
+                continue
+            code = line[idx_code].strip() if idx_code is not None and idx_code < len(line) else ""
+            name = line[idx_name].strip() if idx_name is not None and idx_name < len(line) else ""
+            usd  = to_float(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else 0.0
+            ars  = to_float(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else 0.0
+
+            # si no hay ARS y hay USD, convertir
+            if ars == 0.0 and usd > 0.0:
+                ars = round(usd * exchange, 2)
+
+            if name and (usd > 0.0 or ars > 0.0):
+                catalog.append({
+                    "code": code,
+                    "name": name,
+                    "price_usd": usd,
+                    "price_ars": ars
+                })
+
+        logger.info(f"Catálogo cargado: {len(catalog)} productos")
         return catalog
+
     except Exception as e:
-        logger.error(f"Error cargando catálogo: {e}")
+        logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
-
-
-def fuzzy_search(query, limit=10):
-    catalog = load_catalog()
-    if not catalog:
-        return []
-    names = [p["name"] for p in catalog]
-    matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
-    results = [catalog[i] for _, score, i in matches if score > 60]
-    return results
-
 
 def save_message(phone, msg, role):
     try:
@@ -151,8 +178,7 @@ def save_message(phone, msg, role):
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
 
-
-def get_history(phone, limit=6):
+def get_history(phone, limit=8):
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -166,66 +192,174 @@ def get_history(phone, limit=6):
         logger.error(f"Error leyendo historial: {e}")
         return []
 
+# -----------------------------------
+# BÚSQUEDA: FUZZY + SEMÁNTICA (FAISS)
+# -----------------------------------
+def fuzzy_search(query, limit=10):
+    catalog = load_catalog()
+    if not catalog:
+        return []
+    names = [p["name"] for p in catalog]
+    matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
+    results = [catalog[i] for _, score, i in matches if score >= 60]
+    return results
 
-# -----------------------------------
-# EMBEDDINGS (para memoria vectorial FAISS)
-# -----------------------------------
 @lru_cache(maxsize=1)
 def build_faiss_index():
     catalog = load_catalog()
     if not catalog:
         return None, None
-    texts = [p["name"] for p in catalog]
-    emb = client.embeddings.create(input=texts, model="text-embedding-3-small").data
-    vecs = np.array([e.embedding for e in emb]).astype("float32")
+
+    texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
+    # batch embeddings por seguridad
+    vectors = []
+    batch = 512
+    for i in range(0, len(texts), batch):
+        chunk = texts[i:i+batch]
+        resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
+        vectors.extend([d.embedding for d in resp.data])
+
+    if not vectors:
+        return None, None
+
+    vecs = np.array(vectors).astype("float32")
     index = faiss.IndexFlatL2(vecs.shape[1])
     index.add(vecs)
+    logger.info(f"Índice FAISS creado: {len(texts)} vectores")
     return index, catalog
 
-
 def semantic_search(query, top_k=8):
+    if not query:
+        return []
     index, catalog = build_faiss_index()
     if not index:
         return []
-    emb = client.embeddings.create(input=[query], model="text-embedding-3-small").data[0].embedding
-    emb_np = np.array([emb]).astype("float32")
-    D, I = index.search(emb_np, top_k)
-    return [catalog[i] for i in I[0] if i < len(catalog)]
-
+    q = str(query).strip()
+    resp = client.embeddings.create(input=[q], model="text-embedding-3-small")
+    emb = np.array([resp.data[0].embedding]).astype("float32")
+    D, I = index.search(emb, top_k)
+    return [catalog[i] for i in I[0] if 0 <= i < len(catalog)]
 
 # -----------------------------------
-# PROMPT BASE
+# PROMPT
 # -----------------------------------
 def load_prompt():
     try:
         with open("prompt_fran.txt", "r", encoding="utf-8") as f:
             return f.read()
     except:
-        return "Sos Fran, el agente de ventas de Tercom. Respondé como una persona real, amable y profesional."
-
-
-# -----------------------------------
-# ACCIONES DEL CARRITO
-# -----------------------------------
-def add_to_cart(phone, code, qty, name, usd, ars):
-    with get_db_connection() as conn:
-        conn.execute(
-            'INSERT INTO carts VALUES (?, ?, ?, ?, ?, ?)',
-            (phone, code, qty, name, usd, ars)
+        return (
+            "Sos Fran, el agente de ventas de Tercom. Respondé como una persona real, amable y profesional.\n"
+            "Cuando quieras ejecutar una acción de carrito, devolvé SOLO un JSON con la acción indicada."
         )
 
+# -----------------------------------
+# CARRITO + ACCIONES
+# -----------------------------------
+def add_to_cart(phone, code, qty, name, usd, ars):
+    qty = max(1, min(int(qty or 1), 100))
+    with get_db_connection() as conn:
+        # si ya está, acumular cantidad
+        cur = conn.cursor()
+        cur.execute('SELECT quantity FROM carts WHERE phone=? AND code=?', (phone, code))
+        row = cur.fetchone()
+        if row:
+            newq = row[0] + qty
+            conn.execute('UPDATE carts SET quantity=? WHERE phone=? AND code=?', (newq, phone, code))
+        else:
+            conn.execute(
+                'INSERT INTO carts VALUES (?, ?, ?, ?, ?, ?)',
+                (phone, code, qty, name, float(usd or 0.0), float(ars or 0.0))
+            )
 
 def get_cart(phone):
     with get_db_connection() as conn:
         cur = conn.cursor()
-        cur.execute('SELECT code, name, quantity, price_ars FROM carts WHERE phone=?', (phone,))
+        cur.execute('SELECT code, quantity, name, price_ars FROM carts WHERE phone=?', (phone,))
         return cur.fetchall()
-
 
 def clear_cart(phone):
     with get_db_connection() as conn:
         conn.execute('DELETE FROM carts WHERE phone=?', (phone,))
 
+def cart_totals(phone):
+    items = get_cart(phone)
+    total = sum(q * price for _, q, __, price in items)
+    discount = 0.0
+    if total > 10_000_000:
+        discount = total * 0.05
+    return total - discount, discount
+
+def extract_json_action(text):
+    # Busca un JSON con "action" de forma robusta
+    pattern = r'\{[^{}]*"action"[^{}]*(?:\[[^\[\]]*\])?[^{}]*\}'
+    try:
+        matches = re.findall(pattern, text, re.DOTALL)
+        for m in reversed(matches):
+            try:
+                obj = json.loads(m)
+                if "action" in obj:
+                    return obj
+            except json.JSONDecodeError:
+                continue
+    except Exception:
+        pass
+    return None
+
+def process_actions(bot_response, phone):
+    action_json = extract_json_action(bot_response)
+    if not action_json:
+        return bot_response  # nada que ejecutar
+
+    action = action_json.get("action")
+    if action == "add_to_cart":
+        products = action_json.get("products", [])
+        if not products:
+            return "No entendí qué producto agregar. ¿Me pasás el código y la cantidad?"
+        catalog = load_catalog()
+        added = []
+        for p in products:
+            code = str(p.get("code", "")).strip()
+            qty = int(p.get("quantity", 1))
+            prod = next((x for x in catalog if x["code"] == code), None)
+            if prod:
+                add_to_cart(phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
+                added.append(f"{prod['name']} (x{qty})")
+        if added:
+            return "✅ Agregué al carrito:\n• " + "\n• ".join(added) + "\n\n¿Querés ver el carrito?"
+        return "No encontré esos códigos en el catálogo. ¿Podés revisarlos?"
+
+    elif action == "show_cart":
+        items = get_cart(phone)
+        if not items:
+            return "Tu carrito está vacío. ¿Te muestro opciones?"
+        lines = ["*🛒 Tu Carrito:*", ""]
+        for code, qty, name, price in items:
+            lines.append(f"• {name} (cód {code}) x{qty} — ${price*qty:,.2f}")
+        total, disc = cart_totals(phone)
+        if disc > 0:
+            lines.append(f"\n*Descuento 5%:* -${disc:,.2f}")
+        lines.append(f"*TOTAL:* ${total:,.2f}\n")
+        lines.append("¿Confirmamos el pedido?")
+        return "\n".join(lines)
+
+    elif action == "confirm_order":
+        items = get_cart(phone)
+        if not items:
+            return "No tenés productos en el carrito."
+        total, disc = cart_totals(phone)
+        clear_cart(phone)
+        line = f"*✅ Pedido confirmado.* Total: ${total:,.2f}"
+        if disc > 0:
+            line += " (incluye 5% de descuento)"
+        line += "\nTe escribimos por acá para coordinar pago y envío. ¡Gracias!"
+        return line
+
+    elif action == "clear_cart":
+        clear_cart(phone)
+        return "🗑️ Listo, limpié tu carrito. ¿Qué más necesitas?"
+
+    return bot_response
 
 # -----------------------------------
 # WEBHOOK DE TWILIO
@@ -243,22 +377,25 @@ def webhook():
 
         save_message(phone, msg_in, "user")
 
-        # --- buscar coincidencias
-        results = fuzzy_search(msg_in)
+        # 1) Buscamos coincidencias
+        results = fuzzy_search(msg_in, limit=12)
         if not results:
-            results = semantic_search(msg_in)
+            results = semantic_search(msg_in, top_k=12)
 
-        catalog_text = "\n".join(
-            [f"{r['code']} | {r['name']} | ${r['price_ars']:.2f}" for r in results]
-        )
+        frag = "\n".join(
+            [f"{r['code']} | {r['name']} | ARS ${r['price_ars']:,.2f}" for r in results[:12]]
+        ) if results else "— (sin coincidencias directas)"
 
         system_prompt = f"""{load_prompt()}
 
-Productos similares encontrados:
-{catalog_text}
+CATÁLOGO (coincidencias relevantes):
+{frag}
+
+Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO el JSON de acción.
 """
 
-        history = get_history(phone)
+        # historial reciente
+        history = get_history(phone, limit=8)
         messages = [{"role": "system", "content": system_prompt}]
         for m, r in history:
             messages.append({"role": r, "content": m})
@@ -267,11 +404,13 @@ Productos similares encontrados:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.7,
+            temperature=0.6,
             max_tokens=600
         )
 
-        text = response.choices[0].message.content
+        raw = response.choices[0].message.content
+        logger.info(f"LLM: {raw[:160].replace(chr(10),' ')}...")
+        text = process_actions(raw, phone)
         save_message(phone, text, "assistant")
 
         resp = MessagingResponse()
@@ -284,9 +423,8 @@ Productos similares encontrados:
         resp.message("Disculpá, tuve un problema técnico. ¿Podés repetir tu consulta?")
         return str(resp)
 
-
 # -----------------------------------
-# HEALTH CHECK
+# HEALTH
 # -----------------------------------
 @app.route("/health", methods=["GET"])
 def health():
@@ -296,9 +434,8 @@ def health():
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
 
-
 # -----------------------------------
-# INICIO APP
+# INICIO
 # -----------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
