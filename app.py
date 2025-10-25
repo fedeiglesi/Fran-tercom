@@ -24,7 +24,9 @@ from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
 
-# Twilio REST (para mensajes fuera de banda) y validador de firma
+# ============================================================
+# Twilio REST (para mensajes fuera de banda) y validador firma
+# ============================================================
 try:
     from twilio.rest import Client as TwilioClient
     from twilio.request_validator import RequestValidator
@@ -32,16 +34,15 @@ except Exception:
     TwilioClient = None
     RequestValidator = None
 
-# -----------------------------------
+# =======================
 # CONFIGURACIÓN GENERAL
-# -----------------------------------
+# =======================
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# URLs sin espacios finales (además aplicamos .strip() por seguridad)
 CATALOG_URL = (os.environ.get(
     "CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
@@ -52,13 +53,12 @@ EXCHANGE_API_URL = (os.environ.get(
     "https://dolarapi.com/v1/dolares/oficial"
 ) or "").strip()
 
-# Fallback configurable del dólar
 DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", 1600.0))
 
-# Twilio (opcional: para delay-msgs y validación de firma)
+# Twilio (opcional)
 TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")  # ej: "whatsapp:+14155238886"
+TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
 
 twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
@@ -66,9 +66,9 @@ twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and 
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# -----------------------------------
-# MENSAJE DE ESPERA (delay inteligente)
-# -----------------------------------
+# ===========================
+# MENSAJE DE ESPERA (delay)
+# ===========================
 DELAY_SECONDS = 12
 delay_messages = [
     "Dale 👌",
@@ -92,9 +92,9 @@ def send_out_of_band_message(to_number: str, body: str):
     except Exception as e:
         logger.error(f"Error enviando mensaje fuera de banda: {e}")
 
-# -----------------------------------
-# VALIDACIÓN DE FIRMA TWILIO (seguridad opcional)
-# -----------------------------------
+# ==================================
+# VALIDACIÓN DE FIRMA TWILIO (opcional)
+# ==================================
 @app.before_request
 def validate_twilio_signature():
     if request.path == "/webhook" and twilio_validator:
@@ -105,12 +105,14 @@ def validate_twilio_signature():
             logger.warning("⚠️ Solicitud rechazada: firma Twilio inválida")
             return Response("Invalid signature", status=403)
 
-# -----------------------------------
+# =================
 # BASE DE DATOS
-# -----------------------------------
+# =================
+DB_PATH = "tercom.db"
+
 @contextmanager
 def get_db_connection():
-    conn = sqlite3.connect('tercom.db')
+    conn = sqlite3.connect(DB_PATH)
     try:
         yield conn
         conn.commit()
@@ -129,21 +131,21 @@ def init_db():
                      (phone TEXT, code TEXT, quantity INTEGER, name TEXT, price_usd REAL, price_ars REAL)''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)''')
-        # Estado del usuario (último producto mencionado)
         c.execute('''CREATE TABLE IF NOT EXISTS user_state
                      (phone TEXT PRIMARY KEY,
                       last_code TEXT,
                       last_name TEXT,
                       last_price_ars REAL,
                       updated_at TEXT)''')
+
 init_db()
 
-# -----------------------------------
+# =================
 # RATE LIMIT
-# -----------------------------------
+# =================
 user_requests = defaultdict(list)
 RATE_LIMIT = 10
-RATE_WINDOW = 60
+RATE_WINDOW = 60  # segundos
 
 def rate_limit_check(phone):
     now = time()
@@ -153,15 +155,15 @@ def rate_limit_check(phone):
     user_requests[phone].append(now)
     return True
 
-# -----------------------------------
+# =================
 # UTILIDADES
-# -----------------------------------
+# =================
 def strip_accents(s: str) -> str:
     if not s:
         return ""
     return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
 
-# (1) CORRECCIÓN: to_float robusto (formato AR, evita multiplicaciones erróneas)
+# (1) CORRECCIÓN - to_float robusto
 def to_float(s: str) -> float:
     """Convierte texto a float manejando formatos argentinos y evita multiplicaciones erróneas."""
     if s is None:
@@ -171,14 +173,14 @@ def to_float(s: str) -> float:
         return 0.0
     s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
     if "," in s and "." in s:
-        # Caso "51.499,31" → "51499.31"
+        # "51.499,31" -> "51499.31"
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
-        # Caso "51499,31" → "51499.31"
+        # "51499,31" -> "51499.31"
         s = s.replace(",", ".")
     try:
         val = float(s)
-        # Corrige errores de escala tipo 5149931 → 51499.31
+        # Corrige 5149931 -> 51499.31
         if val > 1_000_000 and len(s) <= 7:
             val = val / 100
         return round(val, 2)
@@ -195,15 +197,21 @@ def get_exchange_rate():
         logger.warning(f"Fallo tasa cambio: {e}")
         return DEFAULT_EXCHANGE
 
-# -----------------------------------
-# CATÁLOGO + FAISS (carga atómica y segura)
-# -----------------------------------
+# =================================
+# CATÁLOGO + FAISS (índice semántico)
+# =================================
 _catalog_and_index_cache = {
     "catalog": None,
     "index": None,
     "built_at": None
 }
 _catalog_lock = Lock()
+
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except:
+        return default
 
 def _build_faiss_index_from_catalog(catalog):
     """
@@ -220,7 +228,6 @@ def _build_faiss_index_from_catalog(catalog):
             logger.warning("No hay nombres válidos en catálogo para embeddings.")
             return None, 0
 
-        # Embeddings por lotes
         vectors = []
         batch = 512
         for i in range(0, len(texts), batch):
@@ -228,7 +235,7 @@ def _build_faiss_index_from_catalog(catalog):
             resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
             vectors.extend([d.embedding for d in resp.data])
 
-        # (2) CORRECCIÓN: validaciones robustas de embeddings
+        # (2) CORRECCIÓN - Validaciones robustas
         if not vectors or len(vectors) == 0:
             logger.warning("⚠️ No se generaron embeddings. FAISS no se construye.")
             return None, 0
@@ -248,9 +255,6 @@ def _build_faiss_index_from_catalog(catalog):
 
 @lru_cache(maxsize=1)
 def _load_raw_csv():
-    """
-    Carga raw del CSV para minimizar llamadas y permitir reuso.
-    """
     r = requests.get(CATALOG_URL, timeout=20)
     r.raise_for_status()
     r.encoding = "utf-8"
@@ -259,7 +263,6 @@ def _load_raw_csv():
 def load_catalog():
     """
     Parsea el CSV crudo a objetos normalizados.
-    Cacheado por proceso (si el CSV no cambia).
     """
     try:
         text = _load_raw_csv()
@@ -309,8 +312,7 @@ def load_catalog():
 
 def get_catalog_and_index():
     """
-    Devuelve (catalog, index) de forma atómica y cacheada.
-    Solo reconstruye si el cache está vacío o si se fuerza manualmente.
+    Devuelve (catalog, index) cacheado y atómico.
     """
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None and _catalog_and_index_cache["index"] is not None:
@@ -323,9 +325,9 @@ def get_catalog_and_index():
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         return catalog, index
 
-# -----------------------------------
+# ============================
 # MEMORIA: GUARDADO Y ESTADO
-# -----------------------------------
+# ============================
 def save_message(phone, msg, role):
     try:
         with get_db_connection() as conn:
@@ -352,14 +354,15 @@ def get_history(phone, limit=8):
 
 def get_history_today(phone, limit=12):
     """
-    Memoria del día (portable en SQLite): filtramos por prefijo de fecha (YYYY-MM-DD)
+    Memoria del día: filtra por prefijo de fecha (YYYY-MM-DD)
     """
     try:
         today_prefix = datetime.now().strftime("%Y-%m-%d")
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
-                'SELECT message, role FROM conversations WHERE phone = ? AND substr(timestamp,1,10)=? ORDER BY timestamp ASC LIMIT ?',
+                'SELECT message, role FROM conversations WHERE phone = ? AND substr(timestamp,1,10)=? '
+                'ORDER BY timestamp ASC LIMIT ?',
                 (phone, today_prefix, limit)
             )
             rows = cur.fetchall()
@@ -369,6 +372,9 @@ def get_history_today(phone, limit=12):
         return []
 
 def save_user_state(phone, prod):
+    """
+    Guarda el último producto mencionado por el usuario (para fast-path de cantidades).
+    """
     try:
         with get_db_connection() as conn:
             conn.execute(
@@ -378,8 +384,15 @@ def save_user_state(phone, prod):
                        last_code=excluded.last_code,
                        last_name=excluded.last_name,
                        last_price_ars=excluded.last_price_ars,
-                       updated_at=excluded.updated_at''',
-                (phone, prod.get("code",""), prod.get("name",""), float(prod.get("price_ars",0.0)), datetime.now().isoformat())
+                       updated_at=excluded.updated_at
+                ''',
+                (
+                    phone,
+                    prod.get("code", ""),
+                    prod.get("name", ""),
+                    float(prod.get("price_ars", 0.0)),
+                    datetime.now().isoformat()
+                )
             )
     except Exception as e:
         logger.error(f"Error guardando user_state: {e}")
@@ -392,14 +405,19 @@ def get_user_state(phone):
             row = cur.fetchone()
             if not row:
                 return None
-            return {"last_code": row[0], "last_name": row[1], "last_price_ars": row[2], "updated_at": row[3]}
+            return {
+                "last_code": row[0],
+                "last_name": row[1],
+                "last_price_ars": row[2],
+                "updated_at": row[3]
+            }
     except Exception as e:
         logger.error(f"Error leyendo user_state: {e}")
         return None
 
-# -----------------------------------
+# =========================================
 # BÚSQUEDA: FUZZY + SEMÁNTICA + HÍBRIDA
-# -----------------------------------
+# =========================================
 def fuzzy_search(query, limit=12):
     catalog, _ = get_catalog_and_index()
     if not catalog:
@@ -416,7 +434,13 @@ def semantic_search(query, top_k=12):
     try:
         resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
         emb = np.array([resp.data[0].embedding]).astype("float32")
-        if emb.ndim != 2 or emb.shape[1] != index.d:
+        # Dimensión compatible con índice
+        try:
+            dim_index = index.d
+        except Exception:
+            # fallback para índices planos
+            dim_index = index.ntotal and len(index.reconstruct(0)) or len(emb[0])
+        if emb.ndim != 2 or len(emb[0]) != dim_index:
             logger.warning("Embedding query con dimensión incompatible para FAISS.")
             return []
         D, I = index.search(emb, top_k)
@@ -443,15 +467,15 @@ def hybrid_search(query, limit=8):
         combined.setdefault(code, {"prod": prod, "fuzzy": 0.0, "sem": 0.0})
         combined[code]["sem"] = max(combined[code]["sem"], float(s))
     out = []
-    for code, d in combined.items():
+    for _, d in combined.items():
         score = 0.6*d["sem"] + 0.4*d["fuzzy"]
         out.append((d["prod"], score))
     out.sort(key=lambda x: x[1], reverse=True)
     return [p for p, _ in out[:limit]]
 
-# -----------------------------------
+# =========
 # PROMPT
-# -----------------------------------
+# =========
 def load_prompt():
     try:
         with open("prompt_fran.txt", "r", encoding="utf-8") as f:
@@ -473,9 +497,9 @@ def load_prompt():
             '{"action":"update_qty","items":[{"code":"ABC123","quantity":3}]}\n'
         )
 
-# -----------------------------------
-# CARRITO + ACCIONES (con lock)
-# -----------------------------------
+# ==================================
+# CARRITO + ACCIONES (con locking)
+# ==================================
 cart_lock = Lock()
 
 def add_to_cart(phone, code, qty, name, usd, ars):
@@ -519,7 +543,9 @@ def cart_totals(phone):
         discount = total * 0.05
     return total - discount, discount
 
-# Parser robusto de JSON acción (sin regex)
+# ======================================
+# Parser robusto de JSON acción (no regex)
+# ======================================
 def extract_json_action(text):
     if not text:
         return None
@@ -552,6 +578,7 @@ def process_actions(bot_response, phone):
         return bot_response
 
     action = action_json.get("action")
+
     if action == "add_to_cart":
         products = action_json.get("products", [])
         if not products:
@@ -623,9 +650,9 @@ def process_actions(bot_response, phone):
 
     return bot_response
 
-# -----------------------------------
-# WEBHOOK (con delay inteligente y envío fuera de banda si tarda)
-# -----------------------------------
+# ===========================================
+# WEBHOOK (con delay y fallback fuera de banda)
+# ===========================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     start_ts = time_mod.time()
@@ -649,10 +676,11 @@ def webhook():
                 waited += 0.2
             if not cancel_event.is_set():
                 send_out_of_band_message(phone, random.choice(delay_messages))
+
         if twilio_rest_available:
             threading.Thread(target=delayed_notice, daemon=True).start()
 
-        # Fast-path: si el usuario manda sólo un número, interpretarlo como cantidad del último producto
+        # Fast-path: si manda sólo un número -> cantidad para último producto
         if re.fullmatch(r"\d+", msg_in):
             qty = int(msg_in)
             state = get_user_state(phone)
@@ -668,7 +696,7 @@ def webhook():
                     resp.message(text)
                     return str(resp)
 
-        # Búsqueda híbrida y estado
+        # Búsqueda híbrida + estado
         results = hybrid_search(msg_in, limit=8)
         if results:
             save_user_state(phone, results[0])
@@ -677,7 +705,7 @@ def webhook():
             [f"{r['code']} | {r['name']} | ARS ${r['price_ars']:,.2f}" for r in results]
         ) if results else "— (sin coincidencias directas)"
 
-        # Estado/Carrito resumido para el prompt
+        # Estado para el prompt
         state = get_user_state(phone)
         state_line = ""
         if state and state.get("last_code"):
@@ -697,7 +725,7 @@ CATÁLOGO (coincidencias relevantes, máx 8):
 Recordá: si tenés que agregar/ver/confirmar/limpiar/actualizar cantidades del carrito, devolvés SOLO el JSON de acción.
 """
 
-        # historial del día (contexto selectivo)
+        # Historial del día
         history = get_history_today(phone, limit=12)
         messages = [{"role": "system", "content": system_prompt}]
         for m, r in history:
@@ -713,7 +741,7 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar/actualizar cantidades del 
 
         raw = response.choices[0].message.content
         logger.info(f"LLM: {raw[:200].replace(chr(10),' ')}...")
-        # (3) CORRECCIÓN: logueo de longitud y tiempo de respuesta del LLM
+        # (3) CORRECCIÓN - log de longitud y tiempo
         logger.info(f"LLM respondió ({len(raw)} chars, {round(time_mod.time()-start_ts,2)}s)")
 
         text = process_actions(raw, phone)
@@ -746,9 +774,9 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar/actualizar cantidades del 
         resp.message(err_msg)
         return str(resp)
 
-# -----------------------------------
+# =========
 # HEALTH
-# -----------------------------------
+# =========
 @app.route("/health", methods=["GET"])
 def health():
     try:
@@ -762,9 +790,9 @@ def health():
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
 
-# -----------------------------------
-# INICIO
-# -----------------------------------
+# =========
+# MAIN
+# =========
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
