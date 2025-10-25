@@ -14,6 +14,7 @@ from collections import defaultdict
 from functools import lru_cache
 from contextlib import contextmanager
 from time import time
+from threading import Lock
 
 import requests
 from flask import Flask, request, jsonify, Response
@@ -23,11 +24,13 @@ from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
 
-# Twilio REST client para mensajes fuera de banda (opcional)
+# Twilio REST (para mensajes fuera de banda) y validador de firma
 try:
     from twilio.rest import Client as TwilioClient
+    from twilio.request_validator import RequestValidator
 except Exception:
     TwilioClient = None
+    RequestValidator = None
 
 # -----------------------------------
 # CONFIGURACIÓN GENERAL
@@ -41,30 +44,29 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 CATALOG_URL = os.environ.get(
     "CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
-)
+).strip()
 
 EXCHANGE_API_URL = os.environ.get(
     "EXCHANGE_API_URL",
     "https://dolarapi.com/v1/dolares/oficial"
-)
+).strip()
 
-# Dólar de respaldo (si falla la API externa)
 DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", 1600.0))
 
-# Credenciales Twilio (opcional, para enviar mensajes fuera de banda)
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN", "")
+TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")  # ej: "whatsapp:+14155238886"
 
 twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
+twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -----------------------------------
-# FRASES ALEATORIAS DE ESPERA (si IA demora)
+# MENSAJE DE ESPERA (delay inteligente)
 # -----------------------------------
-DELAY_SECONDS = 12  # a los 12s mandamos aviso si la IA no respondió
+DELAY_SECONDS = 12
 delay_messages = [
     "Dale 👌",
     "Ok, ya te ayudo…",
@@ -74,14 +76,9 @@ delay_messages = [
 ]
 
 def send_out_of_band_message(to_number: str, body: str):
-    """
-    Envía un mensaje de WhatsApp/SMS usando la REST API de Twilio (fuera del webhook).
-    Requiere TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN y TWILIO_WHATSAPP_FROM.
-    """
     if not twilio_rest_available:
-        logger.info("Twilio REST no disponible (faltan credenciales o librería). No se envía mensaje fuera de banda.")
+        logger.info("Twilio REST no disponible. No se envía mensaje fuera de banda.")
         return
-
     try:
         twilio_rest_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
@@ -91,6 +88,19 @@ def send_out_of_band_message(to_number: str, body: str):
         logger.info(f"Mensaje fuera de banda enviado a {to_number}: {body}")
     except Exception as e:
         logger.error(f"Error enviando mensaje fuera de banda: {e}")
+
+# -----------------------------------
+# VALIDACIÓN DE FIRMA TWILIO (seguridad)
+# -----------------------------------
+@app.before_request
+def validate_twilio_signature():
+    if request.path == "/webhook" and twilio_validator:
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.url
+        params = request.form.to_dict()
+        if not twilio_validator.validate(url, params, signature):
+            logger.warning("⚠️ Solicitud rechazada: firma Twilio inválida")
+            return Response("Invalid signature", status=403)
 
 # -----------------------------------
 # BASE DE DATOS
@@ -142,15 +152,12 @@ def strip_accents(s: str) -> str:
     return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
 
 def to_float(s: str) -> float:
-    """Convierte strings tipo 'USD 2,41' / '$ 1.234,56' / '-' a float ARS/USD seguro."""
     if s is None:
         return 0.0
     s = str(s)
     if s.strip() in ("", "-", "—", "–"):
         return 0.0
-    # quitar etiquetas y símbolos
     s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
-    # primero quitar puntos de miles y luego cambiar coma por punto
     s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -169,7 +176,6 @@ def get_exchange_rate():
 
 @lru_cache(maxsize=1)
 def load_catalog():
-    """Lee y normaliza el catálogo CSV desde CATALOG_URL."""
     try:
         r = requests.get(CATALOG_URL, timeout=20)
         r.raise_for_status()
@@ -203,11 +209,8 @@ def load_catalog():
             name = line[idx_name].strip() if idx_name is not None and idx_name < len(line) else ""
             usd  = to_float(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else 0.0
             ars  = to_float(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else 0.0
-
-            # si no hay ARS y hay USD, convertir
             if ars == 0.0 and usd > 0.0:
                 ars = round(usd * exchange, 2)
-
             if name and (usd > 0.0 or ars > 0.0):
                 catalog.append({
                     "code": code,
@@ -215,10 +218,8 @@ def load_catalog():
                     "price_usd": usd,
                     "price_ars": ars
                 })
-
         logger.info(f"Catálogo cargado: {len(catalog)} productos")
         return catalog
-
     except Exception as e:
         logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
@@ -248,7 +249,7 @@ def get_history(phone, limit=8):
         return []
 
 # -----------------------------------
-# BÚSQUEDA: FUZZY + SEMÁNTICA (FAISS)
+# BÚSQUEDA: FUZZY + SEMÁNTICA + HÍBRIDA
 # -----------------------------------
 def fuzzy_search(query, limit=12):
     catalog = load_catalog()
@@ -256,15 +257,14 @@ def fuzzy_search(query, limit=12):
         return []
     names = [p["name"] for p in catalog]
     matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
-    results = [catalog[i] for _, score, i in matches if score >= 60]
-    return results
+    results = [(catalog[i], score) for _, score, i in matches if score >= 60]
+    return results  # (producto, score_fuzzy)
 
 @lru_cache(maxsize=1)
 def build_faiss_index():
     catalog = load_catalog()
     if not catalog:
         return None, None
-
     texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
     vectors = []
     batch = 512
@@ -272,10 +272,8 @@ def build_faiss_index():
         chunk = texts[i:i+batch]
         resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
         vectors.extend([d.embedding for d in resp.data])
-
     if not vectors:
         return None, None
-
     vecs = np.array(vectors).astype("float32")
     index = faiss.IndexFlatL2(vecs.shape[1])
     index.add(vecs)
@@ -288,11 +286,37 @@ def semantic_search(query, top_k=12):
     index, catalog = build_faiss_index()
     if not index:
         return []
-    q = str(query).strip()
-    resp = client.embeddings.create(input=[q], model="text-embedding-3-small")
+    resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
     emb = np.array([resp.data[0].embedding]).astype("float32")
     D, I = index.search(emb, top_k)
-    return [catalog[i] for i in I[0] if 0 <= i < len(catalog)]
+    # transformamos distancia L2 en score simple (inverso) para ponderar
+    sem_results = []
+    for dist, idx in zip(D[0], I[0]):
+        if 0 <= idx < len(catalog):
+            score = 1.0 / (1.0 + float(dist))
+            sem_results.append((catalog[idx], score))
+    return sem_results  # (producto, score_sem)
+
+def hybrid_search(query, limit=8):
+    fuzzy = fuzzy_search(query, limit=limit*2)         # más holgado para fusionar
+    sem   = semantic_search(query, top_k=limit*2)
+    # combinamos por code
+    combined = {}
+    for prod, s in fuzzy:
+        code = prod.get("code", f"id_{id(prod)}")
+        combined.setdefault(code, {"prod": prod, "fuzzy": 0.0, "sem": 0.0})
+        combined[code]["fuzzy"] = max(combined[code]["fuzzy"], float(s)/100.0)  # normalizo 0..1
+    for prod, s in sem:
+        code = prod.get("code", f"id_{id(prod)}")
+        combined.setdefault(code, {"prod": prod, "fuzzy": 0.0, "sem": 0.0})
+        combined[code]["sem"] = max(combined[code]["sem"], float(s))  # ya 0..1 aprox
+    # score final con pesos (ajustables)
+    out = []
+    for code, d in combined.items():
+        score = 0.6*d["sem"] + 0.4*d["fuzzy"]
+        out.append((d["prod"], score))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return [p for p, _ in out[:limit]]
 
 # -----------------------------------
 # PROMPT
@@ -308,11 +332,13 @@ def load_prompt():
         )
 
 # -----------------------------------
-# CARRITO + ACCIONES
+# CARRITO + ACCIONES (con lock)
 # -----------------------------------
+cart_lock = Lock()
+
 def add_to_cart(phone, code, qty, name, usd, ars):
     qty = max(1, min(int(qty or 1), 100))
-    with get_db_connection() as conn:
+    with cart_lock, get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute('SELECT quantity FROM carts WHERE phone=? AND code=?', (phone, code))
         row = cur.fetchone()
@@ -332,7 +358,7 @@ def get_cart(phone):
         return cur.fetchall()
 
 def clear_cart(phone):
-    with get_db_connection() as conn:
+    with cart_lock, get_db_connection() as conn:
         conn.execute('DELETE FROM carts WHERE phone=?', (phone,))
 
 def cart_totals(phone):
@@ -343,26 +369,37 @@ def cart_totals(phone):
         discount = total * 0.05
     return total - discount, discount
 
+# Parser robusto de JSON acción (sin regex)
 def extract_json_action(text):
-    # Busca un JSON con "action" de forma robusta
-    pattern = r'\{[^{}]*"action"[^{}]*(?:\[[^\[\]]*\])?[^{}]*\}'
-    try:
-        matches = re.findall(pattern, text, re.DOTALL)
-        for m in reversed(matches):
-            try:
-                obj = json.loads(m)
-                if "action" in obj:
-                    return obj
-            except json.JSONDecodeError:
-                continue
-    except Exception:
-        pass
+    if not text:
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    stack = []
+    buf = ""
+    for ch in text[start:]:
+        if ch == "{":
+            stack.append("{")
+        if stack:
+            buf += ch
+        if ch == "}":
+            if stack:
+                stack.pop()
+            if not stack:
+                try:
+                    obj = json.loads(buf)
+                    if isinstance(obj, dict) and "action" in obj:
+                        return obj
+                except Exception:
+                    pass
+                buf = ""
     return None
 
 def process_actions(bot_response, phone):
     action_json = extract_json_action(bot_response)
     if not action_json:
-        return bot_response  # nada que ejecutar
+        return bot_response
 
     action = action_json.get("action")
     if action == "add_to_cart":
@@ -415,7 +452,7 @@ def process_actions(bot_response, phone):
     return bot_response
 
 # -----------------------------------
-# WEBHOOK DE TWILIO (con “delay inteligente”)
+# WEBHOOK (con delay inteligente y envío fuera de banda si tarda)
 # -----------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -431,40 +468,30 @@ def webhook():
 
         save_message(phone, msg_in, "user")
 
-        # Timer que, si la IA tarda >12s, envía un aviso aleatorio por la API de Twilio (fuera de banda)
         cancel_event = threading.Event()
-
         def delayed_notice():
-            # duerme hasta DELAY_SECONDS, si antes se setea el evento, no envía
             waited = 0
             while waited < DELAY_SECONDS and not cancel_event.is_set():
                 time_mod.sleep(0.2)
                 waited += 0.2
             if not cancel_event.is_set():
-                msg = random.choice(delay_messages)
-                send_out_of_band_message(phone, msg)
-
+                send_out_of_band_message(phone, random.choice(delay_messages))
         t = threading.Thread(target=delayed_notice, daemon=True)
         t.start()
 
-        # 1) Buscamos coincidencias
-        results = fuzzy_search(msg_in, limit=12)
-        if not results:
-            results = semantic_search(msg_in, top_k=12)
-
+        results = hybrid_search(msg_in, limit=8)
         frag = "\n".join(
-            [f"{r['code']} | {r['name']} | ARS ${r['price_ars']:,.2f}" for r in results[:12]]
+            [f"{r['code']} | {r['name']} | ARS ${r['price_ars']:,.2f}" for r in results]
         ) if results else "— (sin coincidencias directas)"
 
         system_prompt = f"""{load_prompt()}
 
-CATÁLOGO (coincidencias relevantes):
+CATÁLOGO (coincidencias relevantes, máx 8):
 {frag}
 
 Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO el JSON de acción.
 """
 
-        # historial reciente
         history = get_history(phone, limit=8)
         messages = [{"role": "system", "content": system_prompt}]
         for m, r in history:
@@ -483,17 +510,12 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO
         text = process_actions(raw, phone)
         save_message(phone, text, "assistant")
 
-        # Si la IA terminó, cancelamos el mensaje de delay
         cancel_event.set()
 
         elapsed = time_mod.time() - start_ts
-
-        # Si tardamos demasiado (p.ej. > 11.5s), además de devolver TwiML,
-        # mandamos la respuesta final por REST para asegurar entrega.
         if elapsed > 11.5 and twilio_rest_available:
             send_out_of_band_message(phone, text)
 
-        # Devolvemos TwiML igual (si Twilio no cortó, se entrega por canal normal)
         resp = MessagingResponse()
         resp.message(text)
         return str(resp)
@@ -501,11 +523,9 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO
     except Exception as e:
         logger.error(f"Error en webhook: {e}", exc_info=True)
         try:
-            # intento de cancelación del aviso si hubo excepción rápida
             cancel_event.set()
         except Exception:
             pass
-        # Mensaje de error: también lo intentamos por REST para no quedarnos mudos
         err_msg = "Disculpá, tuve un problema técnico. ¿Podés repetir tu consulta?"
         if twilio_rest_available:
             try:
