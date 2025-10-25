@@ -63,7 +63,12 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Inicialización de OpenAI sin proxies (fix para Railway)
+import httpx
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    http_client=httpx.Client(proxies=None)
+)
 
 DELAY_SECONDS = 12
 delay_messages = ["Dale 👌", "Ok, ya te ayudo…", "Un seg…", "No hay drama, esperá un toque", "Ya vuelvo con vos 😉"]
