@@ -1,109 +1,125 @@
 import os
+import csv
+import io
+import requests
 import numpy as np
 import faiss
 from functools import lru_cache
 from openai import OpenAI
 
 # -----------------------------------
-# CONFIGURACIÓN DEL CLIENTE OPENAI
+# CONFIGURACIÓN
 # -----------------------------------
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+CATALOG_URL = os.getenv(
+    "CATALOG_URL",
+    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
+).strip()
+
 
 # -----------------------------------
-# GENERACIÓN DE EMBEDDINGS
+# EMBEDDINGS
 # -----------------------------------
 def generar_embeddings(textos):
-    """
-    Genera embeddings para una lista de textos usando el modelo text-embedding-3-small.
-    Se asegura de que todas las entradas sean cadenas válidas.
-    """
+    """Genera embeddings con limpieza de texto y manejo de errores."""
     try:
-        # 🔧 Limpieza de datos: forzamos a string y filtramos vacíos
         textos = [str(t).strip() for t in textos if t and str(t).strip()]
-
         if not textos:
-            print("⚠️ Lista de textos vacía o inválida para generar embeddings.")
+            print("⚠️ Lista vacía para embeddings.")
             return []
-
-        response = client.embeddings.create(
-            input=textos,
-            model="text-embedding-3-small"
-        )
-        return [d.embedding for d in response.data]
-
+        resp = client.embeddings.create(input=textos, model="text-embedding-3-small")
+        return [d.embedding for d in resp.data]
     except Exception as e:
         print(f"⚠️ Error generando embeddings: {e}")
         return []
 
 
 # -----------------------------------
-# CREACIÓN DEL ÍNDICE FAISS
+# CARGA CATÁLOGO + ÍNDICE FAISS (ATÓMICO)
 # -----------------------------------
 @lru_cache(maxsize=1)
-def construir_indice_faiss(lista_productos):
+def get_catalog_and_index():
     """
-    Crea un índice FAISS a partir de una lista de productos con campo 'name'.
-    Se cachea para evitar recomputar embeddings en cada consulta.
+    Carga el catálogo y construye el índice FAISS en una única operación.
+    - Solo se ejecuta una vez por ciclo de vida del proceso.
+    - Thread-safe y atómico: nunca hay estado parcial.
     """
     try:
-        textos = [p.get("name", "") for p in lista_productos]
-        embeddings = generar_embeddings(textos)
+        r = requests.get(CATALOG_URL, timeout=20)
+        r.raise_for_status()
+        reader = csv.reader(io.StringIO(r.text))
+        rows = list(reader)
+        if not rows:
+            print("⚠️ Catálogo vacío.")
+            return [], None
 
+        header = [h.lower() for h in rows[0]]
+        idx_code = header.index("codigo") if "codigo" in header else 0
+        idx_name = header.index("producto") if "producto" in header else 1
+        idx_ars = header.index("ars") if "ars" in header else 2
+
+        catalogo = []
+        for line in rows[1:]:
+            if len(line) < 3:
+                continue
+            catalogo.append({
+                "code": line[idx_code].strip(),
+                "name": line[idx_name].strip(),
+                "price_ars": float(line[idx_ars] or 0)
+            })
+
+        print(f"✅ Catálogo cargado: {len(catalogo)} productos")
+
+        textos = [p["name"] for p in catalogo]
+        embeddings = generar_embeddings(textos)
         if not embeddings:
-            print("⚠️ No se generaron embeddings. Verificá los datos del catálogo.")
-            return None, None
+            print("⚠️ Fallo generación de embeddings.")
+            return catalogo, None
 
         vecs = np.array(embeddings).astype("float32")
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
-        print(f"✅ Índice FAISS creado con {len(lista_productos)} productos.")
-        return index, lista_productos
+        print("✅ Índice FAISS construido y cacheado.")
+        return catalogo, index
 
     except Exception as e:
-        print(f"⚠️ Error creando índice FAISS: {e}")
-        return None, None
+        print(f"⚠️ Error construyendo índice FAISS: {e}")
+        return [], None
 
 
 # -----------------------------------
 # BÚSQUEDA SEMÁNTICA
 # -----------------------------------
-def buscar_semantico(query, lista_productos, top_k=8):
-    """
-    Busca productos similares en el catálogo usando FAISS y embeddings semánticos.
-    """
-    try:
-        if not query or not lista_productos:
-            print("⚠️ Parámetros vacíos en búsqueda semántica.")
-            return []
-
-        index, catalogo = construir_indice_faiss(tuple(lista_productos))  # lru_cache requiere hashable
-        if index is None:
-            return []
-
-        query_emb = generar_embeddings([query])
-        if not query_emb:
-            return []
-
-        emb_np = np.array([query_emb[0]]).astype("float32")
-        D, I = index.search(emb_np, top_k)
-        resultados = [catalogo[i] for i in I[0] if i < len(catalogo)]
-        return resultados
-
-    except Exception as e:
-        print(f"⚠️ Error en búsqueda semántica: {e}")
+def buscar_semantico(query, top_k=8):
+    """Busca productos similares al query en el catálogo cacheado."""
+    catalogo, index = get_catalog_and_index()
+    if not index or not catalogo or not query:
         return []
 
+    query_emb = generar_embeddings([query])
+    if not query_emb:
+        return []
+
+    emb_np = np.array([query_emb[0]]).astype("float32")
+    D, I = index.search(emb_np, top_k)
+    return [catalogo[i] for i in I[0] if 0 <= i < len(catalogo)]
+
 
 # -----------------------------------
-# TEST LOCAL (opcional)
+# RECARGA MANUAL
+# -----------------------------------
+def recargar_todo():
+    """Invalida la caché y reconstruye el catálogo + índice FAISS."""
+    get_catalog_and_index.cache_clear()
+    print("♻️ Caché invalidada. Reconstruyendo índice...")
+    return get_catalog_and_index()
+
+
+# -----------------------------------
+# TEST LOCAL
 # -----------------------------------
 if __name__ == "__main__":
-    productos = [
-        {"code": "001", "name": "Filtro de aire Honda Biz 125", "price_ars": 2500},
-        {"code": "002", "name": "Manubrio Yamaha YBR", "price_ars": 6000},
-        {"code": "003", "name": "Acrílico tablero Honda Biz 125 Revolution", "price_ars": 280000},
-    ]
-
-    resultados = buscar_semantico("acrilico tablero honda biz", productos)
+    catalogo, index = get_catalog_and_index()
+    resultados = buscar_semantico("acrilico tablero honda biz", top_k=5)
     for r in resultados:
         print(f"🔹 {r['name']} - ${r['price_ars']}")
