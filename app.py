@@ -161,16 +161,27 @@ def strip_accents(s: str) -> str:
         return ""
     return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
 
+# (1) CORRECCIÓN: to_float robusto (formato AR, evita multiplicaciones erróneas)
 def to_float(s: str) -> float:
+    """Convierte texto a float manejando formatos argentinos y evita multiplicaciones erróneas."""
     if s is None:
         return 0.0
-    s = str(s)
-    if s.strip() in ("", "-", "—", "–"):
+    s = str(s).strip()
+    if s in ("", "-", "—", "–"):
         return 0.0
     s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
-    s = s.replace(".", "").replace(",", ".")
+    if "," in s and "." in s:
+        # Caso "51.499,31" → "51499.31"
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        # Caso "51499,31" → "51499.31"
+        s = s.replace(",", ".")
     try:
-        return float(s)
+        val = float(s)
+        # Corrige errores de escala tipo 5149931 → 51499.31
+        if val > 1_000_000 and len(s) <= 7:
+            val = val / 100
+        return round(val, 2)
     except Exception:
         return 0.0
 
@@ -217,13 +228,14 @@ def _build_faiss_index_from_catalog(catalog):
             resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
             vectors.extend([d.embedding for d in resp.data])
 
-        if not vectors:
-            logger.warning("No se generaron embeddings. FAISS no se construye.")
+        # (2) CORRECCIÓN: validaciones robustas de embeddings
+        if not vectors or len(vectors) == 0:
+            logger.warning("⚠️ No se generaron embeddings. FAISS no se construye.")
             return None, 0
 
         vecs = np.array(vectors).astype("float32")
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
-            logger.warning(f"Dimensión inválida de embeddings: {vecs.shape}")
+            logger.warning(f"⚠️ Dimensión inválida de embeddings: {vecs.shape}")
             return None, 0
 
         index = faiss.IndexFlatL2(vecs.shape[1])
@@ -551,7 +563,7 @@ def process_actions(bot_response, phone):
             qty = int(p.get("quantity", 1))
             prod = next((x for x in catalog if x["code"] == code), None)
             if prod:
-                add_to_cart(phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
+                add_to_cart(phone, prod["code"], qty, prod["name"], prod["price_usd"], prod["price_ars"])
                 added.append(f"{prod['name']} (x{qty})")
                 save_user_state(phone, prod)
         if added:
@@ -701,6 +713,9 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar/actualizar cantidades del 
 
         raw = response.choices[0].message.content
         logger.info(f"LLM: {raw[:200].replace(chr(10),' ')}...")
+        # (3) CORRECCIÓN: logueo de longitud y tiempo de respuesta del LLM
+        logger.info(f"LLM respondió ({len(raw)} chars, {round(time_mod.time()-start_ts,2)}s)")
+
         text = process_actions(raw, phone)
         save_message(phone, text, "assistant")
 
