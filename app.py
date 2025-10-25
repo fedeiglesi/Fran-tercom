@@ -41,18 +41,21 @@ logger = logging.getLogger(__name__)
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-CATALOG_URL = os.environ.get(
+# URLs sin espacios finales (además aplicamos .strip() por seguridad)
+CATALOG_URL = (os.environ.get(
     "CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
-).strip()
+) or "").strip()
 
-EXCHANGE_API_URL = os.environ.get(
+EXCHANGE_API_URL = (os.environ.get(
     "EXCHANGE_API_URL",
     "https://dolarapi.com/v1/dolares/oficial"
-).strip()
+) or "").strip()
 
+# Fallback configurable del dólar
 DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", 1600.0))
 
+# Twilio (opcional: para delay-msgs y validación de firma)
 TWILIO_ACCOUNT_SID   = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN    = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")  # ej: "whatsapp:+14155238886"
@@ -90,7 +93,7 @@ def send_out_of_band_message(to_number: str, body: str):
         logger.error(f"Error enviando mensaje fuera de banda: {e}")
 
 # -----------------------------------
-# VALIDACIÓN DE FIRMA TWILIO (seguridad)
+# VALIDACIÓN DE FIRMA TWILIO (seguridad opcional)
 # -----------------------------------
 @app.before_request
 def validate_twilio_signature():
@@ -126,6 +129,13 @@ def init_db():
                      (phone TEXT, code TEXT, quantity INTEGER, name TEXT, price_usd REAL, price_ars REAL)''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)''')
         c.execute('''CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)''')
+        # Estado del usuario (último producto mencionado)
+        c.execute('''CREATE TABLE IF NOT EXISTS user_state
+                     (phone TEXT PRIMARY KEY,
+                      last_code TEXT,
+                      last_name TEXT,
+                      last_price_ars REAL,
+                      updated_at TEXT)''')
 init_db()
 
 # -----------------------------------
@@ -174,16 +184,77 @@ def get_exchange_rate():
         logger.warning(f"Fallo tasa cambio: {e}")
         return DEFAULT_EXCHANGE
 
-@lru_cache(maxsize=1)
-def load_catalog():
-    try:
-        r = requests.get(CATALOG_URL, timeout=20)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        reader = csv.reader(io.StringIO(r.text))
+# -----------------------------------
+# CATÁLOGO + FAISS (carga atómica y segura)
+# -----------------------------------
+_catalog_and_index_cache = {
+    "catalog": None,
+    "index": None,
+    "built_at": None
+}
+_catalog_lock = Lock()
 
+def _build_faiss_index_from_catalog(catalog):
+    """
+    Construye índice FAISS de manera segura.
+    Devuelve (index, size) o (None, 0) si no hay datos suficientes.
+    """
+    try:
+        if not catalog:
+            logger.warning("Catálogo vacío: no se construye FAISS.")
+            return None, 0
+
+        texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
+        if not texts:
+            logger.warning("No hay nombres válidos en catálogo para embeddings.")
+            return None, 0
+
+        # Embeddings por lotes
+        vectors = []
+        batch = 512
+        for i in range(0, len(texts), batch):
+            chunk = texts[i:i+batch]
+            resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
+            vectors.extend([d.embedding for d in resp.data])
+
+        if not vectors:
+            logger.warning("No se generaron embeddings. FAISS no se construye.")
+            return None, 0
+
+        vecs = np.array(vectors).astype("float32")
+        if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
+            logger.warning(f"Dimensión inválida de embeddings: {vecs.shape}")
+            return None, 0
+
+        index = faiss.IndexFlatL2(vecs.shape[1])
+        index.add(vecs)
+        logger.info(f"Índice FAISS creado: {vecs.shape[0]} vectores, dim={vecs.shape[1]}")
+        return index, vecs.shape[0]
+    except Exception as e:
+        logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
+        return None, 0
+
+@lru_cache(maxsize=1)
+def _load_raw_csv():
+    """
+    Carga raw del CSV para minimizar llamadas y permitir reuso.
+    """
+    r = requests.get(CATALOG_URL, timeout=20)
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    return r.text
+
+def load_catalog():
+    """
+    Parsea el CSV crudo a objetos normalizados.
+    Cacheado por proceso (si el CSV no cambia).
+    """
+    try:
+        text = _load_raw_csv()
+        reader = csv.reader(io.StringIO(text))
         rows = list(reader)
         if not rows:
+            logger.warning("CSV sin filas.")
             return []
 
         header_raw = rows[0]
@@ -224,6 +295,25 @@ def load_catalog():
         logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
 
+def get_catalog_and_index():
+    """
+    Devuelve (catalog, index) de forma atómica y cacheada.
+    Solo reconstruye si el cache está vacío o si se fuerza manualmente.
+    """
+    with _catalog_lock:
+        if _catalog_and_index_cache["catalog"] is not None and _catalog_and_index_cache["index"] is not None:
+            return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+
+        catalog = load_catalog()
+        index, _ = _build_faiss_index_from_catalog(catalog)
+        _catalog_and_index_cache["catalog"] = catalog
+        _catalog_and_index_cache["index"] = index
+        _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
+        return catalog, index
+
+# -----------------------------------
+# MEMORIA: GUARDADO Y ESTADO
+# -----------------------------------
 def save_message(phone, msg, role):
     try:
         with get_db_connection() as conn:
@@ -248,11 +338,58 @@ def get_history(phone, limit=8):
         logger.error(f"Error leyendo historial: {e}")
         return []
 
+def get_history_today(phone, limit=12):
+    """
+    Memoria del día (portable en SQLite): filtramos por prefijo de fecha (YYYY-MM-DD)
+    """
+    try:
+        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT message, role FROM conversations WHERE phone = ? AND substr(timestamp,1,10)=? ORDER BY timestamp ASC LIMIT ?',
+                (phone, today_prefix, limit)
+            )
+            rows = cur.fetchall()
+            return rows
+    except Exception as e:
+        logger.error(f"Error leyendo historial diario: {e}")
+        return []
+
+def save_user_state(phone, prod):
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                '''INSERT INTO user_state (phone, last_code, last_name, last_price_ars, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(phone) DO UPDATE SET
+                       last_code=excluded.last_code,
+                       last_name=excluded.last_name,
+                       last_price_ars=excluded.last_price_ars,
+                       updated_at=excluded.updated_at''',
+                (phone, prod.get("code",""), prod.get("name",""), float(prod.get("price_ars",0.0)), datetime.now().isoformat())
+            )
+    except Exception as e:
+        logger.error(f"Error guardando user_state: {e}")
+
+def get_user_state(phone):
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute('SELECT last_code, last_name, last_price_ars, updated_at FROM user_state WHERE phone=?', (phone,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {"last_code": row[0], "last_name": row[1], "last_price_ars": row[2], "updated_at": row[3]}
+    except Exception as e:
+        logger.error(f"Error leyendo user_state: {e}")
+        return None
+
 # -----------------------------------
 # BÚSQUEDA: FUZZY + SEMÁNTICA + HÍBRIDA
 # -----------------------------------
 def fuzzy_search(query, limit=12):
-    catalog = load_catalog()
+    catalog, _ = get_catalog_and_index()
     if not catalog:
         return []
     names = [p["name"] for p in catalog]
@@ -260,57 +397,39 @@ def fuzzy_search(query, limit=12):
     results = [(catalog[i], score) for _, score, i in matches if score >= 60]
     return results  # (producto, score_fuzzy)
 
-@lru_cache(maxsize=1)
-def build_faiss_index():
-    catalog = load_catalog()
-    if not catalog:
-        return None, None
-    texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
-    vectors = []
-    batch = 512
-    for i in range(0, len(texts), batch):
-        chunk = texts[i:i+batch]
-        resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
-        vectors.extend([d.embedding for d in resp.data])
-    if not vectors:
-        return None, None
-    vecs = np.array(vectors).astype("float32")
-    index = faiss.IndexFlatL2(vecs.shape[1])
-    index.add(vecs)
-    logger.info(f"Índice FAISS creado: {len(texts)} vectores")
-    return index, catalog
-
 def semantic_search(query, top_k=12):
-    if not query:
+    catalog, index = get_catalog_and_index()
+    if not catalog or index is None or not query:
         return []
-    index, catalog = build_faiss_index()
-    if not index:
+    try:
+        resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
+        emb = np.array([resp.data[0].embedding]).astype("float32")
+        if emb.ndim != 2 or emb.shape[1] != index.d:
+            logger.warning("Embedding query con dimensión incompatible para FAISS.")
+            return []
+        D, I = index.search(emb, top_k)
+        sem_results = []
+        for dist, idx in zip(D[0], I[0]):
+            if 0 <= idx < len(catalog):
+                score = 1.0 / (1.0 + float(dist))
+                sem_results.append((catalog[idx], score))
+        return sem_results
+    except Exception as e:
+        logger.error(f"Error en búsqueda semántica: {e}", exc_info=True)
         return []
-    resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
-    emb = np.array([resp.data[0].embedding]).astype("float32")
-    D, I = index.search(emb, top_k)
-    # transformamos distancia L2 en score simple (inverso) para ponderar
-    sem_results = []
-    for dist, idx in zip(D[0], I[0]):
-        if 0 <= idx < len(catalog):
-            score = 1.0 / (1.0 + float(dist))
-            sem_results.append((catalog[idx], score))
-    return sem_results  # (producto, score_sem)
 
 def hybrid_search(query, limit=8):
-    fuzzy = fuzzy_search(query, limit=limit*2)         # más holgado para fusionar
+    fuzzy = fuzzy_search(query, limit=limit*2)
     sem   = semantic_search(query, top_k=limit*2)
-    # combinamos por code
     combined = {}
     for prod, s in fuzzy:
         code = prod.get("code", f"id_{id(prod)}")
         combined.setdefault(code, {"prod": prod, "fuzzy": 0.0, "sem": 0.0})
-        combined[code]["fuzzy"] = max(combined[code]["fuzzy"], float(s)/100.0)  # normalizo 0..1
+        combined[code]["fuzzy"] = max(combined[code]["fuzzy"], float(s)/100.0)
     for prod, s in sem:
         code = prod.get("code", f"id_{id(prod)}")
         combined.setdefault(code, {"prod": prod, "fuzzy": 0.0, "sem": 0.0})
-        combined[code]["sem"] = max(combined[code]["sem"], float(s))  # ya 0..1 aprox
-    # score final con pesos (ajustables)
+        combined[code]["sem"] = max(combined[code]["sem"], float(s))
     out = []
     for code, d in combined.items():
         score = 0.6*d["sem"] + 0.4*d["fuzzy"]
@@ -324,11 +443,22 @@ def hybrid_search(query, limit=8):
 def load_prompt():
     try:
         with open("prompt_fran.txt", "r", encoding="utf-8") as f:
-            return f.read()
-    except:
+            txt = f.read().strip()
+            if not txt:
+                logger.warning("prompt_fran.txt está vacío. Usando prompt por defecto.")
+                raise Exception("empty")
+            return txt
+    except Exception:
+        logger.warning("No se encontró prompt_fran.txt o está vacío. Usando prompt por defecto.")
         return (
             "Sos Fran, el agente de ventas de Tercom. Respondé como una persona real, amable y profesional.\n"
-            "Cuando quieras ejecutar una acción de carrito, devolvé SOLO un JSON con la acción indicada."
+            "No inventes productos ni precios: usá sólo el catálogo provisto en el contexto.\n"
+            "Si tenés que operar el carrito, devolvé SOLO uno de estos JSON:\n"
+            '{"action":"add_to_cart","products":[{"code":"ABC123","quantity":2}]}\n'
+            '{"action":"show_cart"}\n'
+            '{"action":"confirm_order"}\n'
+            '{"action":"clear_cart"}\n'
+            '{"action":"update_qty","items":[{"code":"ABC123","quantity":3}]}\n'
         )
 
 # -----------------------------------
@@ -356,6 +486,14 @@ def get_cart(phone):
         cur = conn.cursor()
         cur.execute('SELECT code, quantity, name, price_ars FROM carts WHERE phone=?', (phone,))
         return cur.fetchall()
+
+def update_cart_qty(phone, code, qty):
+    qty = max(0, min(int(qty or 0), 999))
+    with cart_lock, get_db_connection() as conn:
+        if qty == 0:
+            conn.execute('DELETE FROM carts WHERE phone=? AND code=?', (phone, code))
+        else:
+            conn.execute('UPDATE carts SET quantity=? WHERE phone=? AND code=?', (qty, phone, code))
 
 def clear_cart(phone):
     with cart_lock, get_db_connection() as conn:
@@ -406,7 +544,7 @@ def process_actions(bot_response, phone):
         products = action_json.get("products", [])
         if not products:
             return "No entendí qué producto agregar. ¿Me pasás el código y la cantidad?"
-        catalog = load_catalog()
+        catalog, _ = get_catalog_and_index()
         added = []
         for p in products:
             code = str(p.get("code", "")).strip()
@@ -415,9 +553,31 @@ def process_actions(bot_response, phone):
             if prod:
                 add_to_cart(phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
                 added.append(f"{prod['name']} (x{qty})")
+                save_user_state(phone, prod)
         if added:
             return "✅ Agregué al carrito:\n• " + "\n• ".join(added) + "\n\n¿Querés ver el carrito?"
         return "No encontré esos códigos en el catálogo. ¿Podés revisarlos?"
+
+    elif action == "update_qty":
+        items = action_json.get("items", [])
+        if not items:
+            return "Decime el código y la nueva cantidad."
+        catalog, _ = get_catalog_and_index()
+        changed = []
+        for it in items:
+            code = str(it.get("code", "")).strip()
+            qty = int(it.get("quantity", 0))
+            prod = next((x for x in catalog if x["code"] == code), None)
+            if prod:
+                update_cart_qty(phone, code, qty)
+                if qty == 0:
+                    changed.append(f"❌ {prod['name']} eliminado")
+                else:
+                    changed.append(f"✏️ {prod['name']} ahora x{qty}")
+                save_user_state(phone, prod)
+        if changed:
+            return "Actualicé el carrito:\n• " + "\n• ".join(changed) + "\n\n¿Querés ver el total?"
+        return "No pude actualizar cantidades. ¿Podés chequear los códigos?"
 
     elif action == "show_cart":
         items = get_cart(phone)
@@ -447,7 +607,7 @@ def process_actions(bot_response, phone):
 
     elif action == "clear_cart":
         clear_cart(phone)
-        return "🗑️ Listo, limpié tu carrito. ¿Qué más necesitas?"
+        return "🗑️ Listo, limpié tu carrito. ¿Qué más necesitás?"
 
     return bot_response
 
@@ -457,8 +617,9 @@ def process_actions(bot_response, phone):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     start_ts = time_mod.time()
+    cancel_event = threading.Event()
     try:
-        msg_in = request.values.get("Body", "").strip()
+        msg_in = (request.values.get("Body", "") or "").strip()
         phone = request.values.get("From", "")
 
         if not rate_limit_check(phone):
@@ -468,7 +629,7 @@ def webhook():
 
         save_message(phone, msg_in, "user")
 
-        cancel_event = threading.Event()
+        # Delay humano asíncrono
         def delayed_notice():
             waited = 0
             while waited < DELAY_SECONDS and not cancel_event.is_set():
@@ -476,23 +637,56 @@ def webhook():
                 waited += 0.2
             if not cancel_event.is_set():
                 send_out_of_band_message(phone, random.choice(delay_messages))
-        t = threading.Thread(target=delayed_notice, daemon=True)
-        t.start()
+        if twilio_rest_available:
+            threading.Thread(target=delayed_notice, daemon=True).start()
 
+        # Fast-path: si el usuario manda sólo un número, interpretarlo como cantidad del último producto
+        if re.fullmatch(r"\d+", msg_in):
+            qty = int(msg_in)
+            state = get_user_state(phone)
+            if state and state.get("last_code"):
+                catalog, _ = get_catalog_and_index()
+                prod = next((x for x in catalog if x["code"] == state["last_code"]), None)
+                if prod:
+                    add_to_cart(phone, prod["code"], qty, prod["name"], prod["price_usd"], prod["price_ars"])
+                    text = f"✅ Agregué *{prod['name']}* (x{qty}) al carrito.\n¿Querés ver el resumen?"
+                    save_message(phone, text, "assistant")
+                    cancel_event.set()
+                    resp = MessagingResponse()
+                    resp.message(text)
+                    return str(resp)
+
+        # Búsqueda híbrida y estado
         results = hybrid_search(msg_in, limit=8)
+        if results:
+            save_user_state(phone, results[0])
+
         frag = "\n".join(
             [f"{r['code']} | {r['name']} | ARS ${r['price_ars']:,.2f}" for r in results]
         ) if results else "— (sin coincidencias directas)"
 
+        # Estado/Carrito resumido para el prompt
+        state = get_user_state(phone)
+        state_line = ""
+        if state and state.get("last_code"):
+            state_line = f"- Último producto mencionado: {state['last_name']} (cód {state['last_code']}) — ${state['last_price_ars']:,.2f}"
+        cart_items = get_cart(phone)
+        cart_line = f"- Carrito: {sum(q for _, q, __, ___ in cart_items)} ítems." if cart_items else "- Carrito: vacío."
+
         system_prompt = f"""{load_prompt()}
+
+ESTADO ACTUAL:
+{cart_line}
+{state_line}
 
 CATÁLOGO (coincidencias relevantes, máx 8):
 {frag}
 
-Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO el JSON de acción.
+Recordá: si tenés que agregar/ver/confirmar/limpiar/actualizar cantidades del carrito, devolvés SOLO el JSON de acción.
 """
 
-        history = get_history(phone, limit=8)
+        # historial del día (contexto selectivo)
+        history = get_history_today(phone, limit=12)
         messages = [{"role": "system", "content": system_prompt}]
         for m, r in history:
             messages.append({"role": r, "content": m})
@@ -514,6 +708,7 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO
 
         elapsed = time_mod.time() - start_ts
         if elapsed > 11.5 and twilio_rest_available:
+            # En caso de tardanza, mandamos el texto por fuera también
             send_out_of_band_message(phone, text)
 
         resp = MessagingResponse()
@@ -542,8 +737,13 @@ Recordá: si tenés que agregar/ver/confirmar/limpiar el carrito, devolvés SOLO
 @app.route("/health", methods=["GET"])
 def health():
     try:
-        catalog = load_catalog()
-        return jsonify({"status": "ok", "products": len(catalog)})
+        catalog, index = get_catalog_and_index()
+        return jsonify({
+            "status": "ok",
+            "products": len(catalog) if catalog else 0,
+            "faiss": bool(index),
+            "built_at": _catalog_and_index_cache["built_at"]
+        })
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
 
