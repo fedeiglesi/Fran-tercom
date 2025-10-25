@@ -1,33 +1,26 @@
-# Fran 2.0 - Agente Autónomo
-
+Fran 2.0 - Agente Autónomo
 # Python 3.11
 
 # Web Framework
-
 flask==3.0.3
 gunicorn==21.2.0
 
 # Twilio para WhatsApp
-
 twilio==9.0.4
 
 # OpenAI (versión compatible con function calling)
-
 openai==1.54.0
+httpx==0.27.0
 
 # Búsqueda y matching
-
 rapidfuzz==3.10.0
 
 # Vector search (FAISS)
-
 faiss-cpu==1.8.0
 numpy==1.26.4
 
 # HTTP requests
-
 requests==2.32.3
 
 # Utilidades
-
 python-dotenv==1.0.1
