@@ -48,7 +48,7 @@ def init_db():
         c.execute('''CREATE INDEX IF NOT EXISTS idx_cart_phone
                      ON carts(phone)''')
 
-        logger.info("Base de datos inicializada correctamente.")
+        logger.info("✅ Base de datos inicializada correctamente.")
 
 
 # -----------------------------------
@@ -119,7 +119,7 @@ def save_user_state(phone, prod):
                     prod.get("name", ""),
                     float(prod.get("price_ars", 0.0)),
                     datetime.now().isoformat()
-                )
+                )  # 👈 Paréntesis final correcto
             )
     except Exception as e:
         logger.error(f"Error guardando user_state: {e}")
