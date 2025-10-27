@@ -1,4 +1,3 @@
-```python
 # -*- coding: utf-8 -*-
 """
 FRAN 2.3 FULL — Railway Production Ready
