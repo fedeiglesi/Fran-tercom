@@ -4,16 +4,6 @@ Arquitectura moderna con function calling de OpenAI
 """
 
 import os
-
-# ========================================
-# FIX CRÍTICO: Eliminar proxies ANTES de importar OpenAI
-# Railway inyecta HTTP_PROXY automáticamente y OpenAI 1.54+ no lo soporta
-# ========================================
-for proxy_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
-                   'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy']:
-    os.environ.pop(proxy_var, None)
-
-# Imports regulares DESPUÉS de limpiar proxies
 import json
 import csv
 import io
