@@ -1,4 +1,19 @@
+"""
+FRAN 2.0 - Agente de Ventas Autónomo con IA
+Arquitectura moderna con function calling de OpenAI
+"""
+
 import os
+
+# ========================================
+# FIX CRÍTICO: Eliminar proxies ANTES de importar OpenAI
+# Railway inyecta HTTP_PROXY automáticamente y OpenAI 1.54+ no lo soporta
+# ========================================
+for proxy_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+                   'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy']:
+    os.environ.pop(proxy_var, None)
+
+# Imports regulares DESPUÉS de limpiar proxies
 import json
 import csv
 import io
@@ -21,7 +36,6 @@ import requests
 from flask import Flask, request, jsonify, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from openai import OpenAI
-import httpx  # Para fix de proxies en Railway
 from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
@@ -64,12 +78,8 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-# Inicialización de OpenAI sin proxies (fix para Railway)
-import httpx
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    http_client=httpx.Client(proxies=None)
-)
+# Inicialización de OpenAI (simple - los proxies ya se limpiaron arriba)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 DELAY_SECONDS = 12
 delay_messages = ["Dale 👌", "Ok, ya te ayudo…", "Un seg…", "No hay drama, esperá un toque", "Ya vuelvo con vos 😉"]
