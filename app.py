@@ -1,6 +1,11 @@
 """
-FRAN 2.0 - Agente de Ventas Autónomo con IA
-Arquitectura moderna con function calling de OpenAI
+FRAN 2.2 - Agente de Ventas Autónomo con IA
+Mejoras: Fix "X de cada uno" + Preview pedidos + Ejecutar recomendaciones
+Changelog v2.2:
+- ✅ get_last_search_results devuelve product_codes explícitos
+- ✅ Logging detallado de tool calls
+- ✅ System prompt optimizado con instrucciones #6, #7, #8
+- ✅ Mejor manejo de errores con mensajes contextuales
 """
 
 import os
@@ -62,7 +67,7 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-# Inicialización de OpenAI (simple - los proxies ya se limpiaron arriba)
+# Inicialización de OpenAI
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 DELAY_SECONDS = 12
@@ -141,7 +146,6 @@ def init_db():
         c.execute('''CREATE TABLE IF NOT EXISTS user_state
                      (phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT, 
                       last_price_ars REAL, updated_at TEXT)''')
-        # Nueva tabla para guardar última búsqueda completa
         c.execute('''CREATE TABLE IF NOT EXISTS last_search
                      (phone TEXT PRIMARY KEY, 
                       products_json TEXT,
@@ -312,7 +316,7 @@ def save_message(phone, msg, role):
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
 
-def get_history_today(phone, limit=12):
+def get_history_today(phone, limit=20):
     try:
         today_prefix = datetime.now().strftime("%Y-%m-%d")
         with get_db_connection() as conn:
@@ -420,19 +424,14 @@ def semantic_search(query, top_k=12):
 
 # Aliases y correcciones de búsqueda comunes
 SEARCH_ALIASES = {
-    # Marcas comunes
     "yama": "yamaha",
     "gilera": "gilera",
     "zan": "zanella",
     "hond": "honda",
-    
-    # Productos comunes con typos
     "acrilico": "acrilico tablero",
     "aceite 2t": "aceite pride 2t",
     "aceite 4t": "aceite moto 4t",
     "aceite moto": "aceite",
-    
-    # Proveedores
     "vc": "VC",
     "af": "AF", 
     "nsu": "NSU",
@@ -443,16 +442,12 @@ SEARCH_ALIASES = {
 def normalize_search_query(query):
     """Normaliza queries de búsqueda aplicando aliases"""
     query_lower = query.lower()
-    
-    # Aplicar aliases
     for alias, replacement in SEARCH_ALIASES.items():
         if alias in query_lower:
             query_lower = query_lower.replace(alias, replacement)
-    
     return query_lower
 
 def hybrid_search(query, limit=8):
-    # Normalizar query con aliases
     query = normalize_search_query(query)
     fuzzy = fuzzy_search(query, limit=limit*2)
     sem = semantic_search(query, top_k=limit*2)
@@ -666,36 +661,48 @@ TOOLS = [
 ]
 
 # ============================================================
-# 🛠️ EJECUTOR DE HERRAMIENTAS
+# 🛠️ EJECUTOR DE HERRAMIENTAS - VERSIÓN 2.2 MEJORADA
 # ============================================================
 
 class ToolExecutor:
-    """Ejecuta las herramientas que el modelo solicita"""
+    """
+    Ejecuta las herramientas que el modelo solicita
+    V2.2 - Con logging detallado y mejoras críticas
+    """
     
     def __init__(self, phone: str):
         self.phone = phone
     
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Router principal de herramientas"""
+        """Router principal de herramientas con logging mejorado"""
         method = getattr(self, tool_name, None)
         if not method:
+            logger.error(f"❌ Tool not found: {tool_name}")
             return {"error": f"Herramienta '{tool_name}' no encontrada"}
         
         try:
-            logger.info(f"🔧 {tool_name}({json.dumps(arguments, ensure_ascii=False)[:100]})")
-            return method(**arguments)
+            # 🔍 LOGGING DETALLADO (v2.2)
+            logger.info(f"🔧 Tool: {tool_name}")
+            args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
+            logger.info(f"   Args: {args_preview}{'...' if len(str(arguments)) > 200 else ''}")
+            
+            result = method(**arguments)
+            
+            # Log resultado (truncado)
+            result_str = json.dumps(result, ensure_ascii=False)
+            logger.info(f"   Result: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
+            
+            return result
         except Exception as e:
-            logger.error(f"Error ejecutando {tool_name}: {e}", exc_info=True)
-            return {"error": str(e)}
+            logger.error(f"❌ {tool_name} error: {e}", exc_info=True)
+            return {"error": str(e), "tool": tool_name}
     
     def search_products(self, query: str, limit: int = 5) -> Dict:
         """Búsqueda híbrida de productos"""
         results = hybrid_search(query, limit=limit)
         
-        # Guardar última búsqueda COMPLETA con todos los códigos
         if results:
             save_user_state(self.phone, results[0])
-            # Guardar lista completa para referencia posterior
             save_last_search(self.phone, results, query)
         
         return {
@@ -711,11 +718,14 @@ class ToolExecutor:
                 for p in results
             ],
             "count": len(results),
-            "message": f"Encontré {len(results)} productos para '{query}'. Cuando quieras agregar alguno, referite al código o decime 'agrega todos' / 'X unidades de cada uno'." if results else f"No encontré productos para '{query}'. Probá con otro término."
+            "message": f"Encontré {len(results)} productos para '{query}'." if results else f"No encontré productos para '{query}'. Probá con otro término."
         }
     
     def add_to_cart(self, items: List[Dict]) -> Dict:
-        """Agrega productos al carrito"""
+        """
+        Agrega productos al carrito
+        V2.2 - Mejor logging y mensajes contextuales
+        """
         catalog, _ = get_catalog_and_index()
         added = []
         not_found = []
@@ -725,55 +735,61 @@ class ToolExecutor:
             code = str(item.get("code", "")).strip()
             qty = int(item.get("quantity", 1))
             
-            # Validar formato de código
+            logger.info(f"   Procesando: {code} x{qty}")
+            
+            # Validar formato
             is_valid, normalized_code = validate_tercom_code(code)
             if not is_valid:
+                logger.warning(f"   ⚠️ Código inválido: {code}")
                 invalid_codes.append(code)
                 continue
             
             code = normalized_code
-            
             prod = next((x for x in catalog if x["code"] == code), None)
+            
             if prod:
                 add_to_cart(self.phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
                 added.append({
                     "code": code,
                     "name": prod["name"],
                     "quantity": qty,
-                    "price_unit": prod["price_ars"]
+                    "price_unit": prod["price_ars"],
+                    "subtotal": prod["price_ars"] * qty
                 })
                 save_user_state(self.phone, prod)
+                logger.info(f"   ✅ Agregado: {code} x{qty}")
             else:
+                logger.warning(f"   ⚠️ No encontrado: {code}")
                 not_found.append(code)
         
-        # Construir mensaje de respuesta
+        # Mensajes contextuales mejorados (v2.2)
         if added and not (not_found or invalid_codes):
+            total_items = sum(x["quantity"] for x in added)
+            total_price = sum(x["subtotal"] for x in added)
             return {
                 "success": True,
                 "added": added,
-                "message": f"Listo! Agregué {len(added)} productos al carrito."
+                "total_items": total_items,
+                "total_price": total_price,
+                "message": f"¡Listo! Agregué {len(added)} productos ({total_items} unidades) por ${total_price:,.2f} ARS"
             }
         elif added:
             errors = []
             if not_found:
                 errors.append(f"No encontré: {', '.join(not_found)}")
             if invalid_codes:
-                errors.append(f"Códigos inválidos: {', '.join(invalid_codes)} (formato esperado: XXXX/XXXXX-XXX)")
+                errors.append(f"Códigos inválidos: {', '.join(invalid_codes)} (formato: XXXX/XXXXX-XXX)")
             return {
                 "success": True,
                 "added": added,
                 "message": f"Agregué {len(added)} productos. {' | '.join(errors)}"
             }
         else:
-            errors = []
-            if invalid_codes:
-                errors.append(f"Códigos con formato inválido: {', '.join(invalid_codes)}")
-            if not_found:
-                errors.append(f"Códigos no encontrados: {', '.join(not_found)}")
+            suggestion = "Hacé una búsqueda primero para obtener códigos válidos"
             return {
                 "success": False,
                 "added": [],
-                "message": f"No pude agregar productos. {' | '.join(errors)}. Hacé una búsqueda primero para obtener códigos válidos."
+                "message": f"No pude agregar productos. {suggestion}"
             }
     
     def view_cart(self) -> Dict:
@@ -796,7 +812,8 @@ class ToolExecutor:
             "subtotal": total + discount,
             "discount": discount,
             "total": total,
-            "item_count": len(items)
+            "item_count": len(items),
+            "unit_count": sum(qty for _, qty, __, ___ in items)
         }
     
     def update_cart_item(self, code: str, quantity: int) -> Dict:
@@ -805,7 +822,7 @@ class ToolExecutor:
         prod = next((x for x in catalog if x["code"] == code), None)
         
         if not prod:
-            return {"success": False, "error": "Producto no encontrado"}
+            return {"success": False, "error": f"Producto {code} no encontrado"}
         
         update_cart_qty(self.phone, code, quantity)
         
@@ -814,12 +831,14 @@ class ToolExecutor:
             "code": code,
             "name": prod["name"],
             "new_quantity": quantity,
-            "action": "removed" if quantity == 0 else "updated"
+            "action": "removed" if quantity == 0 else "updated",
+            "message": f"{'Eliminado' if quantity == 0 else f'Actualizado a {quantity} unidades'}"
         }
     
     def clear_cart(self) -> Dict:
         """Vacía el carrito"""
         clear_cart(self.phone)
+        logger.info(f"🗑️ Carrito vaciado: {self.phone}")
         return {"success": True, "message": "Carrito vaciado"}
     
     def confirm_order(self) -> Dict:
@@ -830,22 +849,25 @@ class ToolExecutor:
         
         total, discount = cart_totals(self.phone)
         
-        # Capturar detalles antes de limpiar
         order_details = {
             "items": [
-                {"code": code, "name": name, "quantity": qty, "price": price}
+                {"code": code, "name": name, "quantity": qty, "price": price, "subtotal": price * qty}
                 for code, qty, name, price in items
             ],
+            "subtotal": total + discount,
+            "discount": discount,
             "total": total,
-            "discount": discount
+            "item_count": len(items),
+            "unit_count": sum(qty for _, qty, __, ___ in items)
         }
         
         clear_cart(self.phone)
+        logger.info(f"✅ Pedido confirmado: {len(items)} items, ${total:,.2f} ARS")
         
         return {
             "success": True,
             "order": order_details,
-            "message": "Pedido confirmado exitosamente"
+            "message": f"¡Pedido confirmado! {order_details['item_count']} productos ({order_details['unit_count']} unidades) por ${total:,.2f} ARS"
         }
     
     def get_product_details(self, code: str) -> Dict:
@@ -854,11 +876,12 @@ class ToolExecutor:
         prod = next((x for x in catalog if x["code"] == code), None)
         
         if not prod:
-            return {"success": False, "error": "Producto no encontrado"}
+            return {"success": False, "error": f"Producto {code} no encontrado"}
         
         return {
             "success": True,
-            "product": prod
+            "product": prod,
+            "message": f"**(Cód: {prod['code']})** {prod['name']} - ${prod['price_ars']:,.2f} ARS"
         }
     
     def compare_products(self, codes: List[str]) -> Dict:
@@ -867,9 +890,11 @@ class ToolExecutor:
         products = [p for p in catalog if p["code"] in codes]
         
         if len(products) < 2:
-            return {"success": False, "error": "Se necesitan al menos 2 productos válidos para comparar"}
+            return {
+                "success": False,
+                "error": f"Necesito al menos 2 productos válidos. Solo encontré {len(products)}"
+            }
         
-        # Ordenar por precio
         sorted_by_price = sorted(products, key=lambda x: x["price_ars"])
         
         return {
@@ -877,18 +902,17 @@ class ToolExecutor:
             "products": products,
             "cheapest": sorted_by_price[0],
             "most_expensive": sorted_by_price[-1],
-            "price_difference": sorted_by_price[-1]["price_ars"] - sorted_by_price[0]["price_ars"]
+            "price_difference": sorted_by_price[-1]["price_ars"] - sorted_by_price[0]["price_ars"],
+            "comparison": f"Más barato: {sorted_by_price[0]['name']} (${sorted_by_price[0]['price_ars']:,.2f}). Más caro: {sorted_by_price[-1]['name']} (${sorted_by_price[-1]['price_ars']:,.2f})"
         }
     
     def get_recommendations(self, based_on: str = "last_viewed", limit: int = 5) -> Dict:
         """Recomendaciones personalizadas"""
         
         if based_on == "last_viewed":
-            # Basado en último producto visto
             state = get_user_state(self.phone)
             if state and state.get("last_name"):
                 results = semantic_search(state["last_name"], top_k=limit+1)
-                # Excluir el mismo producto
                 recommendations = [p for p, _ in results if p.get("code") != state.get("last_code")][:limit]
                 return {
                     "success": True,
@@ -897,11 +921,9 @@ class ToolExecutor:
                 }
         
         elif based_on == "cart":
-            # Basado en productos del carrito
             items = get_cart(self.phone)
             if items:
-                # Usar el primer producto del carrito como referencia
-                first_item_name = items[0][2]  # name
+                first_item_name = items[0][2]
                 results = semantic_search(first_item_name, top_k=limit+len(items))
                 cart_codes = [item[0] for item in items]
                 recommendations = [p for p, _ in results if p.get("code") not in cart_codes][:limit]
@@ -911,7 +933,6 @@ class ToolExecutor:
                     "reason": "Productos complementarios a tu carrito"
                 }
         
-        # Fallback: productos populares (primeros del catálogo)
         catalog, _ = get_catalog_and_index()
         return {
             "success": True,
@@ -920,7 +941,10 @@ class ToolExecutor:
         }
     
     def get_last_search_results(self) -> Dict:
-        """Recupera los últimos productos buscados/mostrados al usuario"""
+        """
+        Recupera los últimos productos buscados/mostrados al usuario
+        V2.2 - MEJORA CRÍTICA: Devuelve product_codes explícitamente
+        """
         search = get_last_search(self.phone)
         
         if not search:
@@ -929,33 +953,43 @@ class ToolExecutor:
                 "message": "No hay búsquedas recientes. Hacé una búsqueda primero."
             }
         
+        # ✅ CLAVE (v2.2): Extraer códigos en lista simple
+        product_codes = [p["code"] for p in search["products"]]
+        
         return {
             "success": True,
             "query": search["query"],
             "products": search["products"],
+            "product_codes": product_codes,  # ← NUEVO en v2.2
             "count": len(search["products"]),
-            "message": f"Última búsqueda: '{search['query']}' con {len(search['products'])} resultados"
+            "message": (
+                f"Última búsqueda: '{search['query']}' con {len(search['products'])} productos. "
+                f"Códigos: {', '.join(product_codes[:5])}"
+                f"{'...' if len(product_codes) > 5 else ''}"
+            )
         }
 
 # ============================================================
-# 🧠 AGENTE AUTÓNOMO (ReAct Loop)
+# 🧠 AGENTE AUTÓNOMO (ReAct Loop) - V2.2
 # ============================================================
 
 def run_agent(phone: str, user_message: str, max_iterations: int = 5) -> str:
     """
     Loop principal del agente con ReAct (Reasoning + Acting)
-    El modelo puede hacer múltiples llamadas a herramientas antes de responder
+    V2.2 - System prompt optimizado con fixes #1, #2, #3
     """
     
     executor = ToolExecutor(phone)
     
-    # Contexto del usuario - TODO EL DÍA para permitir referencias a compras anteriores
-    history = get_history_today(phone, limit=20)  # ← Aumentado para capturar todo el día
+    # Contexto del usuario
+    history = get_history_today(phone, limit=20)
     state = get_user_state(phone)
     cart_items = get_cart(phone)
     
-    # System prompt moderno con ejemplos REALES del catálogo
-    system_prompt = f"""Sos Fran, vendedor experto de Tercom (distribuidora de tecnología en Argentina).
+    # ============================================================
+    # 📝 SYSTEM PROMPT OPTIMIZADO - V2.2
+    # ============================================================
+    system_prompt = f"""Sos Fran, vendedor experto de Tercom (distribuidora de repuestos para motos en Argentina).
 
 🎯 PERSONALIDAD:
 - Amable, cercano, profesional
@@ -967,70 +1001,86 @@ def run_agent(phone: str, user_message: str, max_iterations: int = 5) -> str:
 - Carrito actual: {len(cart_items)} items
 - Último producto visto: {state.get('last_name', 'ninguno') if state else 'ninguno'}
 
-📦 EJEMPLOS DE PRODUCTOS REALES (para que entiendas el formato):
+📦 EJEMPLOS DE PRODUCTOS REALES:
 
 EJEMPLO 1 - Búsqueda de aceites:
 Usuario: "Tenes aceites para motos?"
-Herramientas: [search_products("aceite moto")]
+→ [search_products("aceite moto")]
 Respuesta: "Sí, tengo estos aceites:
 1. **(Cód: 1005/02102-630)** Aceite Moto 4T 20W40 x 1LT Yamalube - $7,822.36
-2. **(Cód: 1003/03100-658)** Aceite Pride 2T Verde x 1 Litro (Mineral) Gulf - $4,572.79
-3. **(Cód: 1003/01010-658)** Aceite Pride 2T Verde Sachet x 100 ML - $660.04"
+2. **(Cód: 1003/03100-658)** Aceite Pride 2T Verde x 1 Litro Gulf - $4,572.79"
 
 EJEMPLO 2 - Pedido mayorista "X de cada uno":
 Usuario: "Dame 10 de cada uno"
-Herramientas: [get_last_search_results, add_to_cart]
-Respuesta: "Listo! Agregué al carrito:
-• **(Cód: 1005/02102-630)** Aceite Yamalube x10 - $78,223.60
-• **(Cód: 1003/03100-658)** Aceite Pride 2T x10 - $45,727.90
-• **(Cód: 1003/01010-658)** Aceite Pride Sachet x10 - $6,600.40
-Total: $130,551.90"
+→ [get_last_search_results] → obtiene product_codes
+→ [add_to_cart] con esos códigos
+Respuesta: "¡Listo! Agregué:
+• Aceite Yamalube x10 - $78,223
+• Aceite Pride 2T x10 - $45,727
+Total: $123,950"
 
-EJEMPLO 3 - Acrílicos para tableros:
-Usuario: "Necesito acrilico para Yamaha Crypton"
-Herramientas: [search_products("acrilico tablero yamaha crypton")]
-Respuesta: "Tengo estos acrílicos:
-1. **(Cód: 1548/00016-566)** Acrilico Tablero Yamaha Crypton VC - $3,469.49
-2. **(Cód: 1548/00017-536)** Acrilico Tablero Yamaha New Crypton AF - $2,827.89"
-
-🔢 FORMATO DE CÓDIGOS EN TERCOM:
-Los códigos tienen formato: XXXX/XXXXX-XXX
-- Primera parte (1548, 1003, etc) = Categoría
-- Parte media (00016, 03100, etc) = Producto específico
-- Sufijo (-566, -536, -658, etc) = Marca/Proveedor (VC, AF, NSU, Gulf, etc)
+🔢 FORMATO DE CÓDIGOS: XXXX/XXXXX-XXX
+Ejemplo: 1548/00016-566
 
 ⚠️ INSTRUCCIONES CRÍTICAS:
 
-1. **NUNCA inventes códigos** - Los códigos reales son como "1548/00016-566", NO como "ACRI-001"
-2. **Cuando el usuario dice "X de cada uno":**
-   - PASO 1: Llamá get_last_search_results para obtener códigos exactos
-   - PASO 2: Llamá add_to_cart con ESOS códigos
-   - PASO 3: Confirmá con códigos, nombres y subtotales
+1. **NUNCA inventes códigos** - Siempre vienen de search_products
+2. **"X de cada uno" protocol:**
+   - PASO 1: get_last_search_results (devuelve product_codes)
+   - PASO 2: add_to_cart con ESA lista
+   - PASO 3: Confirmar con códigos reales
 
-3. **Formato de respuesta OBLIGATORIO:**
-   **(Cód: 1548/00016-566)** Nombre del Producto - $precio ARS
-   
+3. **Formato OBLIGATORIO:**
+   **(Cód: XXXX/XXXXX-XXX)** Nombre - $precio ARS
+
 4. **Si add_to_cart falla:**
    - NO busques productos random
-   - Decile al usuario que especifique mejor o que los productos no están disponibles
-   - NO mezcles contextos (si hablaba de aceites, no muestres adaptadores)
+   - Pedí que especifique mejor
+   - NO mezcles contextos
 
 5. **Memoria del día completa:**
    - Podés referenciar conversaciones de horas atrás
-   - Si dice "los de esta mañana", buscá en el historial
-   - La última búsqueda (get_last_search_results) es LA MÁS RECIENTE
+   - get_last_search_results = última búsqueda
+
+6. **PROTOCOLO DE CONFIRMACIÓN DE PEDIDO:**
+   Cuando el usuario dice "confirmo":
+   - PASO 1: Llamar view_cart para mostrar resumen
+   - PASO 2: Preguntar "¿Confirmo el pedido?" y ESPERAR
+   - PASO 3: Solo si confirma (sí/dale), llamar confirm_order
+   
+   Ejemplo:
+   Usuario: "confirmo"
+   → view_cart → "Tenés: Espejo x1 ($9,152), Cubierta x1 ($23,315). Total: $32,468. ¿Confirmo?"
+   Usuario: "sí"
+   → confirm_order → "✅ Pedido confirmado!"
+
+7. **PATRÓN DE RECOMENDACIÓN CONFIRMADA:**
+   Si recomendaste un producto CON CÓDIGO y el usuario confirma:
+   - Ejecutar add_to_cart directamente
+   - NO preguntes de nuevo
+   
+   Ejemplo:
+   Bot: "Batería Gel (Cód: 1079/12060-128) - $25,391"
+   Usuario: "sí, agregala"
+   → add_to_cart([{{code: "1079/12060-128", quantity: 1}}])
+   Bot: "✅ Batería agregada!"
+
+8. **REFERENCIAS IMPLÍCITAS:**
+   - "agregala" = producto que acabás de mencionar con código
+   - "ese"/"esa"/"esos" = últimos productos (usar get_last_search_results)
+   - "el más barato" = analizar get_last_search_results
 
 💬 ESTILO:
-- Natural y conversacional, sin ser robótico
+- Natural y conversacional
 - Directo al grano
-- Emojis con moderación (máximo 2 por mensaje)
+- Emojis con moderación (máx 2/mensaje)
 - SIEMPRE mostrá códigos entre paréntesis
 
 🚫 NO HAGAS:
-- Inventar códigos que no están en search_products
-- Agregar productos sin confirmar códigos
-- Mostrar productos irrelevantes cuando algo falla
-- Repetir el mismo error (si falló add_to_cart, no reintentes sin get_last_search_results)
+- Inventar códigos
+- Confirmar pedidos sin preview
+- Mostrar productos irrelevantes al fallar
+- Repetir el mismo error sin usar get_last_search_results
 """
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -1123,7 +1173,7 @@ def webhook():
         if twilio_rest_available:
             threading.Thread(target=delayed_notice, daemon=True).start()
         
-        # 🤖 EL AGENTE AUTÓNOMO MANEJA TODO
+        # 🤖 EL AGENTE AUTÓNOMO MANEJA TODO (v2.2 mejorado)
         text = run_agent(phone, msg_in)
         
         save_message(phone, text, "assistant")
@@ -1161,11 +1211,16 @@ def health():
         catalog, index = get_catalog_and_index()
         return jsonify({
             "status": "ok",
-            "version": "2.0-autonomous",
+            "version": "2.2",  # ← Actualizado
             "products": len(catalog) if catalog else 0,
             "faiss": bool(index),
             "built_at": _catalog_and_index_cache["built_at"],
-            "tools": len(TOOLS)
+            "tools": len(TOOLS),
+            "changelog": {
+                "product_codes_fix": True,
+                "preview_before_confirm": True,
+                "execute_recommendations": True
+            }
         })
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
@@ -1174,6 +1229,10 @@ def health():
 # MAIN
 # =========
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Fran 2.0 - Agente Autónomo")
+    logger.info("🚀 Iniciando Fran 2.2 - Agente Autónomo Mejorado")
+    logger.info("✅ Fixes incluidos:")
+    logger.info("   - product_codes en get_last_search_results")
+    logger.info("   - Preview antes de confirmar pedidos")
+    logger.info("   - Ejecución automática de recomendaciones")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
