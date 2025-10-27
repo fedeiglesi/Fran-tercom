@@ -1,8 +1,22 @@
-flask==3.0.0
-twilio==8.10.0
-requests==2.31.0
-rapidfuzz==3.6.1
+# Web Framework
+flask==3.0.3
 gunicorn==21.2.0
-openai>=1.0.0,<2.0.0
-faiss-cpu>=1.8.0,<2.0.0
-numpy>=1.26.0
+
+# Twilio
+twilio==9.0.4
+
+# OpenAI
+openai==1.54.0
+
+# Search
+rapidfuzz==3.10.0
+
+# FAISS
+faiss-cpu==1.8.0
+numpy==1.26.4
+
+# HTTP
+requests==2.32.3
+
+# Utils
+python-dotenv==1.0.1
