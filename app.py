@@ -1,11 +1,18 @@
+# -*- coding: utf-8 -*-
 """
-FRAN 2.2 - Agente de Ventas Autónomo con IA
-Mejoras: Fix "X de cada uno" + Preview pedidos + Ejecutar recomendaciones
-Changelog v2.2:
-- ✅ get_last_search_results devuelve product_codes explícitos
-- ✅ Logging detallado de tool calls
-- ✅ System prompt optimizado con instrucciones #6, #7, #8
-- ✅ Mejor manejo de errores con mensajes contextuales
+FRAN 2.2 FULL (patched)
+Arreglos clave:
+- Anti “lista fantasma”: si el modelo no ejecuta tool_call y afirma que envió listado,
+  se fuerza una búsqueda real y se responde con productos del catálogo.
+- get_last_search_results devuelve product_codes explícitos (para “X de cada uno”).
+- ReAct loop con control de iteraciones y logging de tool calls.
+- Fallback si FAISS/embeddings fallan (sigue funcionando con fuzzy).
+- Timeouts consistentes en requests/embeddings.
+- Validación de formato de código (XXXX/XXXXX-XXX).
+- Memoria diaria: historial, último producto visto, última búsqueda, carrito.
+
+Requisitos (compatibles con tu requirements.txt):
+flask, gunicorn, twilio, openai==1.54.0, httpx, rapidfuzz, faiss-cpu, numpy, requests, python-dotenv
 """
 
 import os
@@ -34,9 +41,15 @@ from openai import OpenAI
 from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
+from dotenv import load_dotenv
 
 # ============================================================
-# Twilio REST y validador
+# Carga .env
+# ============================================================
+load_dotenv()
+
+# ============================================================
+# Twilio REST y validador (opcional)
 # ============================================================
 try:
     from twilio.rest import Client as TwilioClient
@@ -50,14 +63,21 @@ except Exception:
 # =======================
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("fran22")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-CATALOG_URL = (os.environ.get("CATALOG_URL", 
+# Variables de entorno
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+if not OPENAI_API_KEY:
+    raise RuntimeError("Falta OPENAI_API_KEY")
+
+CATALOG_URL = (os.environ.get("CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv") or "").strip()
-EXCHANGE_API_URL = (os.environ.get("EXCHANGE_API_URL", 
+
+EXCHANGE_API_URL = (os.environ.get("EXCHANGE_API_URL",
     "https://dolarapi.com/v1/dolares/oficial") or "").strip()
-DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", 1600.0))
+
+DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
+REQUESTS_TIMEOUT = 12
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -67,33 +87,12 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-# Inicialización de OpenAI
+# OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Human-like typing notice (opcional)
 DELAY_SECONDS = 12
 delay_messages = ["Dale 👌", "Ok, ya te ayudo…", "Un seg…", "No hay drama, esperá un toque", "Ya vuelvo con vos 😉"]
-
-# ===========================
-# HELPERS DE TWILIO
-# ===========================
-def send_out_of_band_message(to_number: str, body: str):
-    if not twilio_rest_available:
-        return
-    try:
-        twilio_rest_client.messages.create(from_=TWILIO_WHATSAPP_FROM, to=to_number, body=body)
-        logger.info(f"Mensaje fuera de banda enviado a {to_number}")
-    except Exception as e:
-        logger.error(f"Error enviando mensaje fuera de banda: {e}")
-
-@app.before_request
-def validate_twilio_signature():
-    if request.path == "/webhook" and twilio_validator:
-        signature = request.headers.get("X-Twilio-Signature", "")
-        url = request.url
-        params = request.form.to_dict()
-        if not twilio_validator.validate(url, params, signature):
-            logger.warning("⚠️ Solicitud rechazada: firma Twilio inválida")
-            return Response("Invalid signature", status=403)
 
 # =================
 # BASE DE DATOS
@@ -109,30 +108,9 @@ def get_db_connection():
     except Exception as e:
         conn.rollback()
         logger.error(f"DB error: {e}")
+        raise
     finally:
         conn.close()
-
-def validate_tercom_code(code):
-    """
-    Valida que un código tenga el formato correcto de Tercom: XXXX/XXXXX-XXX
-    Returns: (is_valid, normalized_code)
-    """
-    import re
-    
-    # Formato esperado: 1548/00016-566
-    pattern = r'^\d{4}/\d{5}-\d{3}$'
-    
-    if re.match(pattern, str(code).strip()):
-        return True, str(code).strip()
-    
-    # Intentar normalizar (por si viene sin barras o guiones)
-    # Ej: "154800016566" → "1548/00016-566"
-    code_clean = re.sub(r'[^0-9]', '', str(code))
-    if len(code_clean) == 12:
-        normalized = f"{code_clean[:4]}/{code_clean[4:9]}-{code_clean[9:12]}"
-        return True, normalized
-    
-    return False, code
 
 def init_db():
     with get_db_connection() as conn:
@@ -154,160 +132,6 @@ def init_db():
 
 init_db()
 
-# =================
-# RATE LIMIT
-# =================
-user_requests = defaultdict(list)
-RATE_LIMIT = 10
-RATE_WINDOW = 60
-
-def rate_limit_check(phone):
-    now = time()
-    user_requests[phone] = [t for t in user_requests[phone] if now - t < RATE_WINDOW]
-    if len(user_requests[phone]) >= RATE_LIMIT:
-        return False
-    user_requests[phone].append(now)
-    return True
-
-# =================
-# UTILIDADES
-# =================
-def strip_accents(s: str) -> str:
-    if not s:
-        return ""
-    return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
-
-def to_float(s: str) -> float:
-    """Convierte texto a float manejando formatos argentinos."""
-    if s is None:
-        return 0.0
-    s = str(s).strip()
-    if s in ("", "-", "—", "–"):
-        return 0.0
-    s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    try:
-        val = float(s)
-        if val > 1_000_000 and len(s) <= 7:
-            val = val / 100
-        return round(val, 2)
-    except Exception:
-        return 0.0
-
-def get_exchange_rate():
-    try:
-        res = requests.get(EXCHANGE_API_URL, timeout=5)
-        res.raise_for_status()
-        return float(res.json().get("venta", DEFAULT_EXCHANGE))
-    except Exception as e:
-        logger.warning(f"Fallo tasa cambio: {e}")
-        return DEFAULT_EXCHANGE
-
-# =================================
-# CATÁLOGO + FAISS
-# =================================
-_catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
-_catalog_lock = Lock()
-
-def _build_faiss_index_from_catalog(catalog):
-    try:
-        if not catalog:
-            return None, 0
-        texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
-        if not texts:
-            return None, 0
-        
-        vectors = []
-        batch = 512
-        for i in range(0, len(texts), batch):
-            chunk = texts[i:i+batch]
-            resp = client.embeddings.create(input=chunk, model="text-embedding-3-small")
-            vectors.extend([d.embedding for d in resp.data])
-        
-        if not vectors:
-            return None, 0
-        
-        vecs = np.array(vectors).astype("float32")
-        if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
-            return None, 0
-        
-        index = faiss.IndexFlatL2(vecs.shape[1])
-        index.add(vecs)
-        logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores, dim={vecs.shape[1]}")
-        return index, vecs.shape[0]
-    except Exception as e:
-        logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
-        return None, 0
-
-@lru_cache(maxsize=1)
-def _load_raw_csv():
-    r = requests.get(CATALOG_URL, timeout=20)
-    r.raise_for_status()
-    r.encoding = "utf-8"
-    return r.text
-
-def load_catalog():
-    try:
-        text = _load_raw_csv()
-        reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
-        if not rows:
-            return []
-        
-        header = [strip_accents(h) for h in rows[0]]
-        
-        def find_idx(keys):
-            for i, h in enumerate(header):
-                if any(k in h for k in keys):
-                    return i
-            return None
-        
-        idx_code = find_idx(["codigo", "code"])
-        idx_name = find_idx(["producto", "descripcion", "description", "nombre"])
-        idx_usd = find_idx(["usd", "dolar", "precio en dolares"])
-        idx_ars = find_idx(["ars", "pesos", "precio en pesos"])
-        
-        exchange = get_exchange_rate()
-        catalog = []
-        
-        for line in rows[1:]:
-            if not line:
-                continue
-            code = line[idx_code].strip() if idx_code is not None and idx_code < len(line) else ""
-            name = line[idx_name].strip() if idx_name is not None and idx_name < len(line) else ""
-            usd = to_float(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else 0.0
-            ars = to_float(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else 0.0
-            
-            if ars == 0.0 and usd > 0.0:
-                ars = round(usd * exchange, 2)
-            
-            if name and (usd > 0.0 or ars > 0.0):
-                catalog.append({"code": code, "name": name, "price_usd": usd, "price_ars": ars})
-        
-        logger.info(f"📦 Catálogo cargado: {len(catalog)} productos")
-        return catalog
-    except Exception as e:
-        logger.error(f"Error cargando catálogo: {e}", exc_info=True)
-        return []
-
-def get_catalog_and_index():
-    with _catalog_lock:
-        if _catalog_and_index_cache["catalog"] is not None:
-            return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
-        
-        catalog = load_catalog()
-        index, _ = _build_faiss_index_from_catalog(catalog)
-        _catalog_and_index_cache["catalog"] = catalog
-        _catalog_and_index_cache["index"] = index
-        _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
-        return catalog, index
-
-# ============================
-# MEMORIA Y ESTADO
-# ============================
 def save_message(phone, msg, role):
     try:
         with get_db_connection() as conn:
@@ -360,7 +184,6 @@ def get_user_state(phone):
         return None
 
 def save_last_search(phone, products, query):
-    """Guarda la última lista de productos mostrada al usuario"""
     try:
         with get_db_connection() as conn:
             conn.execute(
@@ -370,13 +193,12 @@ def save_last_search(phone, products, query):
                        products_json=excluded.products_json,
                        query=excluded.query,
                        timestamp=excluded.timestamp''',
-                (phone, json.dumps(products), query, datetime.now().isoformat())
+                (phone, json.dumps(products, ensure_ascii=False), query, datetime.now().isoformat())
             )
     except Exception as e:
         logger.error(f"Error guardando last_search: {e}")
 
 def get_last_search(phone):
-    """Recupera la última lista de productos mostrada"""
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -392,6 +214,152 @@ def get_last_search(phone):
     except Exception as e:
         logger.error(f"Error leyendo last_search: {e}")
         return None
+
+# =================
+# RATE LIMIT
+# =================
+user_requests = defaultdict(list)
+RATE_LIMIT = 10
+RATE_WINDOW = 60
+
+def rate_limit_check(phone):
+    now = time()
+    user_requests[phone] = [t for t in user_requests[phone] if now - t < RATE_WINDOW]
+    if len(user_requests[phone]) >= RATE_LIMIT:
+        return False
+    user_requests[phone].append(now)
+    return True
+
+# =================
+# UTILIDADES
+# =================
+def strip_accents(s: str) -> str:
+    if not s:
+        return ""
+    return ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch)).lower()
+
+def to_float(s: str) -> float:
+    """Convierte texto a float manejando formatos AR/US comunes."""
+    if s is None:
+        return 0.0
+    s = str(s).strip()
+    if s in ("", "-", "—", "–"):
+        return 0.0
+    s = s.replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "")
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        val = float(s)
+        if val > 1_000_000 and len(s) <= 7:
+            val = val / 100
+        return round(val, 2)
+    except Exception:
+        return 0.0
+
+def get_exchange_rate():
+    try:
+        res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT)
+        res.raise_for_status()
+        return float(res.json().get("venta", DEFAULT_EXCHANGE))
+    except Exception as e:
+        logger.warning(f"Fallo tasa cambio: {e}")
+        return DEFAULT_EXCHANGE
+
+# =================================
+# CATÁLOGO + FAISS
+# =================================
+_catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
+_catalog_lock = Lock()
+
+@lru_cache(maxsize=1)
+def _load_raw_csv():
+    r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT)
+    r.raise_for_status()
+    r.encoding = "utf-8"
+    return r.text
+
+def load_catalog():
+    try:
+        text = _load_raw_csv()
+        reader = csv.reader(io.StringIO(text))
+        rows = list(reader)
+        if not rows:
+            return []
+        header = [strip_accents(h) for h in rows[0]]
+
+        def find_idx(keys):
+            for i, h in enumerate(header):
+                if any(k in h for k in keys):
+                    return i
+            return None
+
+        idx_code = find_idx(["codigo", "code"])
+        idx_name = find_idx(["producto", "descripcion", "description", "nombre", "name"])
+        idx_usd = find_idx(["usd", "dolar", "precio en dolares"])
+        idx_ars = find_idx(["ars", "pesos", "precio en pesos"])
+
+        exchange = get_exchange_rate()
+        catalog = []
+        for line in rows[1:]:
+            if not line:
+                continue
+            code = line[idx_code].strip() if idx_code is not None and idx_code < len(line) else ""
+            name = line[idx_name].strip() if idx_name is not None and idx_name < len(line) else ""
+            usd = to_float(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else 0.0
+            ars = to_float(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else 0.0
+            if ars == 0.0 and usd > 0.0:
+                ars = round(usd * exchange, 2)
+            if name and (usd > 0.0 or ars > 0.0):
+                catalog.append({"code": code, "name": name, "price_usd": usd, "price_ars": ars})
+        logger.info(f"📦 Catálogo cargado: {len(catalog)} productos")
+        return catalog
+    except Exception as e:
+        logger.error(f"Error cargando catálogo: {e}", exc_info=True)
+        return []
+
+def _build_faiss_index_from_catalog(catalog):
+    try:
+        if not catalog:
+            return None, 0
+        texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
+        if not texts:
+            return None, 0
+
+        vectors = []
+        batch = 512
+        for i in range(0, len(texts), batch):
+            chunk = texts[i:i+batch]
+            resp = client.embeddings.create(input=chunk, model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
+            vectors.extend([d.embedding for d in resp.data])
+
+        if not vectors:
+            return None, 0
+
+        vecs = np.array(vectors).astype("float32")
+        if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
+            return None, 0
+
+        index = faiss.IndexFlatL2(vecs.shape[1])
+        index.add(vecs)
+        logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores, dim={vecs.shape[1]}")
+        return index, vecs.shape[0]
+    except Exception as e:
+        logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
+        return None, 0
+
+def get_catalog_and_index():
+    with _catalog_lock:
+        if _catalog_and_index_cache["catalog"] is not None:
+            return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+
+        catalog = load_catalog()
+        index, _ = _build_faiss_index_from_catalog(catalog)
+        _catalog_and_index_cache["catalog"] = catalog
+        _catalog_and_index_cache["index"] = index
+        _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
+        return catalog, index
 
 # =========================================
 # BÚSQUEDA HÍBRIDA
@@ -409,7 +377,7 @@ def semantic_search(query, top_k=12):
     if not catalog or index is None or not query:
         return []
     try:
-        resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
+        resp = client.embeddings.create(input=[query], model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
         emb = np.array([resp.data[0].embedding]).astype("float32")
         D, I = index.search(emb, top_k)
         results = []
@@ -422,7 +390,6 @@ def semantic_search(query, top_k=12):
         logger.error(f"Error en búsqueda semántica: {e}")
         return []
 
-# Aliases y correcciones de búsqueda comunes
 SEARCH_ALIASES = {
     "yama": "yamaha",
     "gilera": "gilera",
@@ -433,19 +400,20 @@ SEARCH_ALIASES = {
     "aceite 4t": "aceite moto 4t",
     "aceite moto": "aceite",
     "vc": "VC",
-    "af": "AF", 
+    "af": "AF",
     "nsu": "NSU",
     "gulf": "GULF",
-    "yamalube": "YAMALUBE"
+    "yamalube": "YAMALUBE",
+    "suzuki": "suzuki",
+    "zusuki": "suzuki",
 }
 
 def normalize_search_query(query):
-    """Normaliza queries de búsqueda aplicando aliases"""
-    query_lower = query.lower()
+    q = query.lower()
     for alias, replacement in SEARCH_ALIASES.items():
-        if alias in query_lower:
-            query_lower = query_lower.replace(alias, replacement)
-    return query_lower
+        if alias in q:
+            q = q.replace(alias, replacement)
+    return q
 
 def hybrid_search(query, limit=8):
     query = normalize_search_query(query)
@@ -472,7 +440,7 @@ def hybrid_search(query, limit=8):
 # ==================================
 cart_lock = Lock()
 
-def add_to_cart(phone, code, qty, name, usd, ars):
+def cart_add(phone, code, qty, name, usd, ars):
     qty = max(1, min(int(qty or 1), 100))
     with cart_lock, get_db_connection() as conn:
         cur = conn.cursor()
@@ -485,13 +453,13 @@ def add_to_cart(phone, code, qty, name, usd, ars):
             conn.execute('INSERT INTO carts VALUES (?, ?, ?, ?, ?, ?)',
                         (phone, code, qty, name, float(usd or 0.0), float(ars or 0.0)))
 
-def get_cart(phone):
+def cart_get(phone):
     with get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute('SELECT code, quantity, name, price_ars FROM carts WHERE phone=?', (phone,))
         return cur.fetchall()
 
-def update_cart_qty(phone, code, qty):
+def cart_update_qty(phone, code, qty):
     qty = max(0, min(int(qty or 0), 999))
     with cart_lock, get_db_connection() as conn:
         if qty == 0:
@@ -499,12 +467,12 @@ def update_cart_qty(phone, code, qty):
         else:
             conn.execute('UPDATE carts SET quantity=? WHERE phone=? AND code=?', (qty, phone, code))
 
-def clear_cart(phone):
+def cart_clear(phone):
     with cart_lock, get_db_connection() as conn:
         conn.execute('DELETE FROM carts WHERE phone=?', (phone,))
 
 def cart_totals(phone):
-    items = get_cart(phone)
+    items = cart_get(phone)
     total = sum(q * price for _, q, __, price in items)
     discount = 0.05 * total if total > 10_000_000 else 0.0
     return total - discount, discount
@@ -512,6 +480,15 @@ def cart_totals(phone):
 # ============================================================
 # 🤖 DEFINICIÓN DE HERRAMIENTAS (FUNCTION CALLING)
 # ============================================================
+def validate_tercom_code(code):
+    pattern = r'^\d{4}/\d{5}-\d{3}$'
+    if re.match(pattern, str(code).strip()):
+        return True, str(code).strip()
+    code_clean = re.sub(r'[^0-9]', '', str(code))
+    if len(code_clean) == 12:
+        normalized = f"{code_clean[:4]}/{code_clean[4:9]}-{code_clean[9:12]}"
+        return True, normalized
+    return False, code
 
 TOOLS = [
     {
@@ -522,15 +499,8 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Texto de búsqueda (ej: 'cable hdmi', 'mouse inalambrico', 'teclado mecánico')"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Cantidad máxima de resultados a mostrar",
-                        "default": 5
-                    }
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 8}
                 },
                 "required": ["query"]
             }
@@ -540,18 +510,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "add_to_cart",
-            "description": "Agrega uno o varios productos al carrito del usuario",
+            "description": "Agrega productos al carrito",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "items": {
                         "type": "array",
-                        "description": "Lista de productos a agregar",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "code": {"type": "string", "description": "Código del producto"},
-                                "quantity": {"type": "integer", "description": "Cantidad a agregar", "default": 1}
+                                "code": {"type": "string"},
+                                "quantity": {"type": "integer", "default": 1}
                             },
                             "required": ["code"]
                         }
@@ -563,22 +532,18 @@ TOOLS = [
     },
     {
         "type": "function",
-        "function": {
-            "name": "view_cart",
-            "description": "Muestra el contenido actual del carrito con precios y totales",
-            "parameters": {"type": "object", "properties": {}}
-        }
+        "function": {"name": "view_cart", "description": "Muestra el carrito", "parameters": {"type": "object", "properties": {}}}
     },
     {
         "type": "function",
         "function": {
             "name": "update_cart_item",
-            "description": "Modifica la cantidad de un producto en el carrito (0 para eliminar)",
+            "description": "Modifica cantidad (0 elimina)",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string", "description": "Código del producto"},
-                    "quantity": {"type": "integer", "description": "Nueva cantidad (0 elimina el item)"}
+                    "code": {"type": "string"},
+                    "quantity": {"type": "integer"}
                 },
                 "required": ["code", "quantity"]
             }
@@ -586,183 +551,101 @@ TOOLS = [
     },
     {
         "type": "function",
-        "function": {
-            "name": "clear_cart",
-            "description": "Vacía completamente el carrito del usuario",
-            "parameters": {"type": "object", "properties": {}}
-        }
+        "function": {"name": "clear_cart", "description": "Vacía el carrito", "parameters": {"type": "object", "properties": {}}}
     },
     {
         "type": "function",
-        "function": {
-            "name": "confirm_order",
-            "description": "Confirma y procesa el pedido actual",
-            "parameters": {"type": "object", "properties": {}}
-        }
+        "function": {"name": "confirm_order", "description": "Confirma y procesa el pedido", "parameters": {"type": "object", "properties": {}}}
     },
     {
         "type": "function",
         "function": {
             "name": "get_product_details",
-            "description": "Obtiene información detallada de un producto específico por código",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "code": {"type": "string", "description": "Código del producto"}
-                },
-                "required": ["code"]
-            }
+            "description": "Detalle por código",
+            "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}
         }
     },
     {
         "type": "function",
         "function": {
             "name": "compare_products",
-            "description": "Compara precios y características de múltiples productos",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "codes": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Lista de códigos de productos a comparar (mínimo 2)"
-                    }
-                },
-                "required": ["codes"]
-            }
+            "description": "Compara múltiples códigos",
+            "parameters": {"type": "object", "properties": {"codes": {"type": "array", "items": {"type": "string"}}}, "required": ["codes"]}
         }
     },
     {
         "type": "function",
         "function": {
             "name": "get_recommendations",
-            "description": "Obtiene recomendaciones de productos basadas en el contexto del usuario",
+            "description": "Recomendaciones basadas en last_viewed o carrito",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "based_on": {
-                        "type": "string",
-                        "description": "Base para recomendación: 'last_viewed', 'cart', o un código de producto",
-                        "default": "last_viewed"
-                    },
-                    "limit": {"type": "integer", "default": 5}
-                }
+                "properties": {"based_on": {"type": "string", "default": "last_viewed"}, "limit": {"type": "integer", "default": 5}}
             }
         }
     },
     {
         "type": "function",
-        "function": {
-            "name": "get_last_search_results",
-            "description": "Obtiene los resultados de la última búsqueda realizada por el usuario (útil cuando dice 'esos', 'de cada uno', etc.)",
-            "parameters": {"type": "object", "properties": {}}
-        }
+        "function": {"name": "get_last_search_results", "description": "Últimos resultados y códigos", "parameters": {"type": "object", "properties": {}}}
     }
 ]
 
-# ============================================================
-# 🛠️ EJECUTOR DE HERRAMIENTAS - VERSIÓN 2.2 MEJORADA
-# ============================================================
-
 class ToolExecutor:
-    """
-    Ejecuta las herramientas que el modelo solicita
-    V2.2 - Con logging detallado y mejoras críticas
-    """
-    
     def __init__(self, phone: str):
         self.phone = phone
-    
+
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """Router principal de herramientas con logging mejorado"""
         method = getattr(self, tool_name, None)
         if not method:
             logger.error(f"❌ Tool not found: {tool_name}")
             return {"error": f"Herramienta '{tool_name}' no encontrada"}
-        
         try:
-            # 🔍 LOGGING DETALLADO (v2.2)
             logger.info(f"🔧 Tool: {tool_name}")
             args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
             logger.info(f"   Args: {args_preview}{'...' if len(str(arguments)) > 200 else ''}")
-            
             result = method(**arguments)
-            
-            # Log resultado (truncado)
             result_str = json.dumps(result, ensure_ascii=False)
-            logger.info(f"   Result: {result_str[:200]}{'...' if len(result_str) > 200 else ''}")
-            
+            logger.info(f"   Result: {result_str[:300]}{'...' if len(result_str) > 300 else ''}")
             return result
         except Exception as e:
             logger.error(f"❌ {tool_name} error: {e}", exc_info=True)
             return {"error": str(e), "tool": tool_name}
-    
-    def search_products(self, query: str, limit: int = 5) -> Dict:
-        """Búsqueda híbrida de productos"""
+
+    # ---------- Implementaciones ----------
+    def search_products(self, query: str, limit: int = 8) -> Dict:
         results = hybrid_search(query, limit=limit)
-        
         if results:
             save_user_state(self.phone, results[0])
             save_last_search(self.phone, results, query)
-        
         return {
             "success": True,
             "query": query,
-            "results": [
-                {
-                    "code": p["code"],
-                    "name": p["name"],
-                    "price_ars": p["price_ars"],
-                    "price_usd": p["price_usd"]
-                }
-                for p in results
-            ],
+            "results": [{"code": p["code"], "name": p["name"], "price_ars": p["price_ars"], "price_usd": p["price_usd"]} for p in results],
             "count": len(results),
-            "message": f"Encontré {len(results)} productos para '{query}'." if results else f"No encontré productos para '{query}'. Probá con otro término."
+            "message": f"Encontré {len(results)} productos para '{query}'." if results else f"No encontré productos para '{query}'."
         }
-    
+
     def add_to_cart(self, items: List[Dict]) -> Dict:
-        """
-        Agrega productos al carrito
-        V2.2 - Mejor logging y mensajes contextuales
-        """
         catalog, _ = get_catalog_and_index()
-        added = []
-        not_found = []
-        invalid_codes = []
-        
+        added, not_found, invalid_codes = [], [], []
         for item in items:
             code = str(item.get("code", "")).strip()
             qty = int(item.get("quantity", 1))
-            
-            logger.info(f"   Procesando: {code} x{qty}")
-            
-            # Validar formato
-            is_valid, normalized_code = validate_tercom_code(code)
-            if not is_valid:
-                logger.warning(f"   ⚠️ Código inválido: {code}")
+            ok, norm = validate_tercom_code(code)
+            if not ok:
                 invalid_codes.append(code)
                 continue
-            
-            code = normalized_code
+            code = norm
             prod = next((x for x in catalog if x["code"] == code), None)
-            
             if prod:
-                add_to_cart(self.phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
+                cart_add(self.phone, code, qty, prod["name"], prod["price_usd"], prod["price_ars"])
                 added.append({
-                    "code": code,
-                    "name": prod["name"],
-                    "quantity": qty,
-                    "price_unit": prod["price_ars"],
-                    "subtotal": prod["price_ars"] * qty
+                    "code": code, "name": prod["name"], "quantity": qty,
+                    "price_unit": prod["price_ars"], "subtotal": round(prod["price_ars"] * qty, 2)
                 })
                 save_user_state(self.phone, prod)
-                logger.info(f"   ✅ Agregado: {code} x{qty}")
             else:
-                logger.warning(f"   ⚠️ No encontrado: {code}")
                 not_found.append(code)
-        
-        # Mensajes contextuales mejorados (v2.2)
         if added and not (not_found or invalid_codes):
             total_items = sum(x["quantity"] for x in added)
             total_price = sum(x["subtotal"] for x in added)
@@ -779,53 +662,29 @@ class ToolExecutor:
                 errors.append(f"No encontré: {', '.join(not_found)}")
             if invalid_codes:
                 errors.append(f"Códigos inválidos: {', '.join(invalid_codes)} (formato: XXXX/XXXXX-XXX)")
-            return {
-                "success": True,
-                "added": added,
-                "message": f"Agregué {len(added)} productos. {' | '.join(errors)}"
-            }
+            return {"success": True, "added": added, "message": f"Agregué {len(added)} productos. {' | '.join(errors)}"}
         else:
-            suggestion = "Hacé una búsqueda primero para obtener códigos válidos"
-            return {
-                "success": False,
-                "added": [],
-                "message": f"No pude agregar productos. {suggestion}"
-            }
-    
+            return {"success": False, "added": [], "message": "No pude agregar productos. Hacé una búsqueda primero para obtener códigos válidos."}
+
     def view_cart(self) -> Dict:
-        """Muestra el carrito actual"""
-        items = get_cart(self.phone)
+        items = cart_get(self.phone)
         total, discount = cart_totals(self.phone)
-        
         return {
             "success": True,
-            "items": [
-                {
-                    "code": code,
-                    "name": name,
-                    "quantity": qty,
-                    "price_unit": price,
-                    "price_total": price * qty
-                }
-                for code, qty, name, price in items
-            ],
-            "subtotal": total + discount,
-            "discount": discount,
-            "total": total,
+            "items": [{"code": code, "name": name, "quantity": qty, "price_unit": price, "price_total": round(price * qty, 2)} for code, qty, name, price in items],
+            "subtotal": round(total + discount, 2),
+            "discount": round(discount, 2),
+            "total": round(total, 2),
             "item_count": len(items),
             "unit_count": sum(qty for _, qty, __, ___ in items)
         }
-    
+
     def update_cart_item(self, code: str, quantity: int) -> Dict:
-        """Actualiza cantidad de un item"""
         catalog, _ = get_catalog_and_index()
         prod = next((x for x in catalog if x["code"] == code), None)
-        
         if not prod:
             return {"success": False, "error": f"Producto {code} no encontrado"}
-        
-        update_cart_qty(self.phone, code, quantity)
-        
+        cart_update_qty(self.phone, code, quantity)
         return {
             "success": True,
             "code": code,
@@ -834,265 +693,150 @@ class ToolExecutor:
             "action": "removed" if quantity == 0 else "updated",
             "message": f"{'Eliminado' if quantity == 0 else f'Actualizado a {quantity} unidades'}"
         }
-    
+
     def clear_cart(self) -> Dict:
-        """Vacía el carrito"""
-        clear_cart(self.phone)
-        logger.info(f"🗑️ Carrito vaciado: {self.phone}")
+        cart_clear(self.phone)
         return {"success": True, "message": "Carrito vaciado"}
-    
+
     def confirm_order(self) -> Dict:
-        """Confirma el pedido"""
-        items = get_cart(self.phone)
+        items = cart_get(self.phone)
         if not items:
             return {"success": False, "error": "Carrito vacío"}
-        
         total, discount = cart_totals(self.phone)
-        
         order_details = {
-            "items": [
-                {"code": code, "name": name, "quantity": qty, "price": price, "subtotal": price * qty}
-                for code, qty, name, price in items
-            ],
-            "subtotal": total + discount,
-            "discount": discount,
-            "total": total,
+            "items": [{"code": code, "name": name, "quantity": qty, "price": price, "subtotal": round(price * qty, 2)} for code, qty, name, price in items],
+            "subtotal": round(total + discount, 2),
+            "discount": round(discount, 2),
+            "total": round(total, 2),
             "item_count": len(items),
             "unit_count": sum(qty for _, qty, __, ___ in items)
         }
-        
-        clear_cart(self.phone)
-        logger.info(f"✅ Pedido confirmado: {len(items)} items, ${total:,.2f} ARS")
-        
+        cart_clear(self.phone)
         return {
             "success": True,
             "order": order_details,
             "message": f"¡Pedido confirmado! {order_details['item_count']} productos ({order_details['unit_count']} unidades) por ${total:,.2f} ARS"
         }
-    
+
     def get_product_details(self, code: str) -> Dict:
-        """Detalles completos de un producto"""
         catalog, _ = get_catalog_and_index()
         prod = next((x for x in catalog if x["code"] == code), None)
-        
         if not prod:
             return {"success": False, "error": f"Producto {code} no encontrado"}
-        
-        return {
-            "success": True,
-            "product": prod,
-            "message": f"**(Cód: {prod['code']})** {prod['name']} - ${prod['price_ars']:,.2f} ARS"
-        }
-    
+        return {"success": True, "product": prod, "message": f"**(Cód: {prod['code']})** {prod['name']} - ${prod['price_ars']:,.2f} ARS"}
+
     def compare_products(self, codes: List[str]) -> Dict:
-        """Compara múltiples productos"""
         catalog, _ = get_catalog_and_index()
         products = [p for p in catalog if p["code"] in codes]
-        
         if len(products) < 2:
-            return {
-                "success": False,
-                "error": f"Necesito al menos 2 productos válidos. Solo encontré {len(products)}"
-            }
-        
+            return {"success": False, "error": f"Necesito al menos 2 productos válidos. Solo encontré {len(products)}"}
         sorted_by_price = sorted(products, key=lambda x: x["price_ars"])
-        
         return {
             "success": True,
             "products": products,
             "cheapest": sorted_by_price[0],
             "most_expensive": sorted_by_price[-1],
-            "price_difference": sorted_by_price[-1]["price_ars"] - sorted_by_price[0]["price_ars"],
+            "price_difference": round(sorted_by_price[-1]["price_ars"] - sorted_by_price[0]["price_ars"], 2),
             "comparison": f"Más barato: {sorted_by_price[0]['name']} (${sorted_by_price[0]['price_ars']:,.2f}). Más caro: {sorted_by_price[-1]['name']} (${sorted_by_price[-1]['price_ars']:,.2f})"
         }
-    
+
     def get_recommendations(self, based_on: str = "last_viewed", limit: int = 5) -> Dict:
-        """Recomendaciones personalizadas"""
-        
         if based_on == "last_viewed":
             state = get_user_state(self.phone)
             if state and state.get("last_name"):
                 results = semantic_search(state["last_name"], top_k=limit+1)
                 recommendations = [p for p, _ in results if p.get("code") != state.get("last_code")][:limit]
-                return {
-                    "success": True,
-                    "recommendations": recommendations,
-                    "reason": f"Basado en tu interés en: {state['last_name']}"
-                }
-        
+                return {"success": True, "recommendations": recommendations, "reason": f"Basado en tu interés en: {state['last_name']}"}
         elif based_on == "cart":
-            items = get_cart(self.phone)
+            items = cart_get(self.phone)
             if items:
                 first_item_name = items[0][2]
                 results = semantic_search(first_item_name, top_k=limit+len(items))
                 cart_codes = [item[0] for item in items]
                 recommendations = [p for p, _ in results if p.get("code") not in cart_codes][:limit]
-                return {
-                    "success": True,
-                    "recommendations": recommendations,
-                    "reason": "Productos complementarios a tu carrito"
-                }
-        
+                return {"success": True, "recommendations": recommendations, "reason": "Productos complementarios a tu carrito"}
         catalog, _ = get_catalog_and_index()
-        return {
-            "success": True,
-            "recommendations": catalog[:limit],
-            "reason": "Productos destacados"
-        }
-    
+        return {"success": True, "recommendations": catalog[:limit], "reason": "Productos destacados"}
+
     def get_last_search_results(self) -> Dict:
-        """
-        Recupera los últimos productos buscados/mostrados al usuario
-        V2.2 - MEJORA CRÍTICA: Devuelve product_codes explícitamente
-        """
         search = get_last_search(self.phone)
-        
         if not search:
-            return {
-                "success": False,
-                "message": "No hay búsquedas recientes. Hacé una búsqueda primero."
-            }
-        
-        # ✅ CLAVE (v2.2): Extraer códigos en lista simple
+            return {"success": False, "message": "No hay búsquedas recientes. Hacé una búsqueda primero."}
         product_codes = [p["code"] for p in search["products"]]
-        
         return {
             "success": True,
             "query": search["query"],
             "products": search["products"],
-            "product_codes": product_codes,  # ← NUEVO en v2.2
+            "product_codes": product_codes,
             "count": len(search["products"]),
             "message": (
                 f"Última búsqueda: '{search['query']}' con {len(search['products'])} productos. "
-                f"Códigos: {', '.join(product_codes[:5])}"
-                f"{'...' if len(product_codes) > 5 else ''}"
+                f"Códigos: {', '.join(product_codes[:5])}{'...' if len(product_codes) > 5 else ''}"
             )
         }
 
 # ============================================================
-# 🧠 AGENTE AUTÓNOMO (ReAct Loop) - V2.2
+# 🧠 AGENTE AUTÓNOMO (ReAct) — with anti “lista fantasma”
 # ============================================================
+def _format_list(products, max_items=8) -> str:
+    if not products:
+        return "No encontré productos."
+    lines = []
+    for p in products[:max_items]:
+        code = p.get("code", "").strip() or "s/c"
+        name = p.get("name", "").strip()
+        ars = p.get("price_ars", 0.0)
+        lines.append(f"• (Cód: {code}) {name} - ${ars:,.0f} ARS")
+    return "\n".join(lines)
+
+def _intent_needs_basics(user_message: str) -> bool:
+    text = user_message.lower()
+    triggers = ["surtido", "básico", "basico", "abrir mi local", "abrir un local", "recomendar", "proponer", "lista de productos", "lo básico", "lo basico"]
+    return any(t in text for t in triggers)
+
+def _force_search_and_reply(phone: str, query: str) -> str:
+    # Búsqueda directa por servidor para garantizar que exista el listado
+    results = hybrid_search(query, limit=10)
+    if not results:
+        # Segundo intento más genérico
+        results = hybrid_search("repuestos moto", limit=10)
+    if not results:
+        return "No encontré productos para armar un surtido inicial en este momento."
+    save_last_search(phone, results, query)
+    save_user_state(phone, results[0])
+    listado = _format_list(results, max_items=8)
+    return f"Acá tenés un surtido sugerido ({query}):\n{listado}"
 
 def run_agent(phone: str, user_message: str, max_iterations: int = 5) -> str:
-    """
-    Loop principal del agente con ReAct (Reasoning + Acting)
-    V2.2 - System prompt optimizado con fixes #1, #2, #3
-    """
-    
+    catalog, _ = get_catalog_and_index()
+    if not catalog:
+        return "No puedo acceder al catálogo en este momento. Probá más tarde."
+
     executor = ToolExecutor(phone)
-    
-    # Contexto del usuario
     history = get_history_today(phone, limit=20)
     state = get_user_state(phone)
-    cart_items = get_cart(phone)
-    
-    # ============================================================
-    # 📝 SYSTEM PROMPT OPTIMIZADO - V2.2
-    # ============================================================
-    system_prompt = f"""Sos Fran, vendedor experto de Tercom (distribuidora de repuestos para motos en Argentina).
+    cart_items = cart_get(phone)
 
-🎯 PERSONALIDAD:
-- Amable, cercano, profesional
-- Usás lenguaje argentino natural (vos, che, dale, etc.)
-- Proactivo: sugerís productos complementarios cuando corresponde
-- Honesto: si no sabés algo, lo admitís y buscás la info
-
-📊 ESTADO DEL USUARIO:
-- Carrito actual: {len(cart_items)} items
-- Último producto visto: {state.get('last_name', 'ninguno') if state else 'ninguno'}
-
-📦 EJEMPLOS DE PRODUCTOS REALES:
-
-EJEMPLO 1 - Búsqueda de aceites:
-Usuario: "Tenes aceites para motos?"
-→ [search_products("aceite moto")]
-Respuesta: "Sí, tengo estos aceites:
-1. **(Cód: 1005/02102-630)** Aceite Moto 4T 20W40 x 1LT Yamalube - $7,822.36
-2. **(Cód: 1003/03100-658)** Aceite Pride 2T Verde x 1 Litro Gulf - $4,572.79"
-
-EJEMPLO 2 - Pedido mayorista "X de cada uno":
-Usuario: "Dame 10 de cada uno"
-→ [get_last_search_results] → obtiene product_codes
-→ [add_to_cart] con esos códigos
-Respuesta: "¡Listo! Agregué:
-• Aceite Yamalube x10 - $78,223
-• Aceite Pride 2T x10 - $45,727
-Total: $123,950"
-
-🔢 FORMATO DE CÓDIGOS: XXXX/XXXXX-XXX
-Ejemplo: 1548/00016-566
-
-⚠️ INSTRUCCIONES CRÍTICAS:
-
-1. **NUNCA inventes códigos** - Siempre vienen de search_products
-2. **"X de cada uno" protocol:**
-   - PASO 1: get_last_search_results (devuelve product_codes)
-   - PASO 2: add_to_cart con ESA lista
-   - PASO 3: Confirmar con códigos reales
-
-3. **Formato OBLIGATORIO:**
-   **(Cód: XXXX/XXXXX-XXX)** Nombre - $precio ARS
-
-4. **Si add_to_cart falla:**
-   - NO busques productos random
-   - Pedí que especifique mejor
-   - NO mezcles contextos
-
-5. **Memoria del día completa:**
-   - Podés referenciar conversaciones de horas atrás
-   - get_last_search_results = última búsqueda
-
-6. **PROTOCOLO DE CONFIRMACIÓN DE PEDIDO:**
-   Cuando el usuario dice "confirmo":
-   - PASO 1: Llamar view_cart para mostrar resumen
-   - PASO 2: Preguntar "¿Confirmo el pedido?" y ESPERAR
-   - PASO 3: Solo si confirma (sí/dale), llamar confirm_order
-   
-   Ejemplo:
-   Usuario: "confirmo"
-   → view_cart → "Tenés: Espejo x1 ($9,152), Cubierta x1 ($23,315). Total: $32,468. ¿Confirmo?"
-   Usuario: "sí"
-   → confirm_order → "✅ Pedido confirmado!"
-
-7. **PATRÓN DE RECOMENDACIÓN CONFIRMADA:**
-   Si recomendaste un producto CON CÓDIGO y el usuario confirma:
-   - Ejecutar add_to_cart directamente
-   - NO preguntes de nuevo
-   
-   Ejemplo:
-   Bot: "Batería Gel (Cód: 1079/12060-128) - $25,391"
-   Usuario: "sí, agregala"
-   → add_to_cart([{{code: "1079/12060-128", quantity: 1}}])
-   Bot: "✅ Batería agregada!"
-
-8. **REFERENCIAS IMPLÍCITAS:**
-   - "agregala" = producto que acabás de mencionar con código
-   - "ese"/"esa"/"esos" = últimos productos (usar get_last_search_results)
-   - "el más barato" = analizar get_last_search_results
-
-💬 ESTILO:
-- Natural y conversacional
-- Directo al grano
-- Emojis con moderación (máx 2/mensaje)
-- SIEMPRE mostrá códigos entre paréntesis
-
-🚫 NO HAGAS:
-- Inventar códigos
-- Confirmar pedidos sin preview
-- Mostrar productos irrelevantes al fallar
-- Repetir el mismo error sin usar get_last_search_results
+    system_prompt = f"""Sos Fran, vendedor experto de Tercom (mayorista de repuestos para motos en Argentina).
+- Usá lenguaje argentino natural (vos, che, dale).
+- No inventes productos ni códigos. Siempre usá lo que devuelven las herramientas.
+- Formato por ítem: **(Cód: XXXX/XXXXX-XXX)** Nombre - $precio ARS
+- Protocolo “X de cada uno”: get_last_search_results → add_to_cart con esos códigos → confirmar.
+- Confirmación: si el usuario dice “confirmo” → primero view_cart (preview), preguntar “¿Confirmo?” y solo si afirma, confirm_order.
+- Referencias implícitas: “agregala/lo” = último producto con código; “esos” = últimos productos (get_last_search_results).
+- Si pedís “surtido”, “básico”, “recomendá”: llamá search_products con algo como “surtido inicial moto” o “repuestos básicos moto”.
+- Nunca digas “te pasé la lista” si no ejecutaste una búsqueda que devuelva resultados reales.
+Estado:
+- Carrito: {len(cart_items)} ítems
+- Último visto: {state.get('last_name', 'ninguno') if state else 'ninguno'}
 """
 
     messages = [{"role": "system", "content": system_prompt}]
-    
-    # Agregar historial
     for msg, role in history:
         messages.append({"role": role, "content": msg})
-    
-    # Mensaje actual
     messages.append({"role": "user", "content": user_message})
-    
-    # Loop del agente
+
+    # ReAct loop
     for iteration in range(max_iterations):
         try:
             response = client.chat.completions.create(
@@ -1102,66 +846,88 @@ Ejemplo: 1548/00016-566
                 tool_choice="auto",
                 temperature=0.7,
                 max_tokens=1000,
-                timeout=15.0
+                timeout=REQUESTS_TIMEOUT
             )
-            
             message = response.choices[0].message
-            
-            # Si no quiere usar herramientas, terminamos
-            if not message.tool_calls:
-                final_response = message.content
-                logger.info(f"✅ Agente respondió en iteración {iteration + 1}")
-                return final_response
-            
-            # Agregar mensaje del modelo al historial
-            messages.append(message)
-            
-            # Ejecutar herramientas solicitadas
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-                
-                # Ejecutar
-                result = executor.execute(tool_name, tool_args)
-                
-                # Agregar resultado al contexto
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": tool_name,
-                    "content": json.dumps(result, ensure_ascii=False)
-                })
-        
+
+            # 1) Si hay tool_calls → ejecutarlas y seguir
+            if getattr(message, "tool_calls", None):
+                messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments or "{}")
+                    result = executor.execute(tool_name, tool_args)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": json.dumps(result, ensure_ascii=False)
+                    })
+                # sigue el loop para que el modelo use los resultados
+                continue
+
+            # 2) Sin tool_calls: respuesta final del modelo
+            final_response = (message.content or "").strip()
+
+            # Anti “lista fantasma”: si pide surtido y no hay bullets/códigos, forzar búsqueda de servidor
+            if _intent_needs_basics(user_message):
+                # ¿La respuesta contiene un listado con códigos?
+                looks_like_list = bool(re.search(r"\(Cód:\s*\d{4}/\d{5}-\d{3}\)", final_response))
+                if not looks_like_list:
+                    logger.info("⚠️ Anti-lista-fantasma activado: forzando búsqueda real de surtido.")
+                    return _force_search_and_reply(phone, query="surtido inicial moto")
+
+            logger.info(f"✅ Agente respondió en iteración {iteration + 1}")
+            return final_response or "¿Podés repetirlo? No encontré productos."
         except Exception as e:
             logger.error(f"Error en iteración {iteration}: {e}", exc_info=True)
             return "Disculpá, tuve un problema procesando tu pedido. ¿Podés intentar de nuevo?"
-    
-    # Límite de iteraciones alcanzado
-    logger.warning(f"⚠️ Agente alcanzó {max_iterations} iteraciones")
+
+    logger.warning(f"⚠️ Agente alcanzó {max_iterations} iteraciones — devolviendo fallback")
+    # Fallback final: si pedía surtido, asegurar listado real
+    if _intent_needs_basics(user_message):
+        return _force_search_and_reply(phone, query="surtido inicial moto")
     return "Estoy procesando tu pedido pero está tomando más tiempo del esperado. ¿Podés reformular tu consulta?"
 
 # ===========================================
 # 📱 WEBHOOK PRINCIPAL
 # ===========================================
+def send_out_of_band_message(to_number: str, body: str):
+    if not twilio_rest_available:
+        return
+    try:
+        twilio_rest_client.messages.create(from_=TWILIO_WHATSAPP_FROM, to=to_number, body=body)
+        logger.info(f"Mensaje fuera de banda enviado a {to_number}")
+    except Exception as e:
+        logger.error(f"Error enviando mensaje fuera de banda: {e}")
+
+@app.before_request
+def validate_twilio_signature():
+    if request.path == "/webhook" and twilio_validator:
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.url
+        params = request.form.to_dict()
+        if not twilio_validator.validate(url, params, signature):
+            logger.warning("⚠️ Solicitud rechazada: firma Twilio inválida")
+            return Response("Invalid signature", status=403)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     start_ts = time_mod.time()
     cancel_event = threading.Event()
-    
     try:
         msg_in = (request.values.get("Body", "") or "").strip()
         phone = request.values.get("From", "")
-        
+
         # Rate limiting
         if not rate_limit_check(phone):
             resp = MessagingResponse()
             resp.message("Esperá un momento antes de enviar más mensajes 😊")
             return str(resp)
-        
+
         save_message(phone, msg_in, "user")
-        
-        # Delay humano asíncrono
+
+        # Aviso humano en paralelo
         def delayed_notice():
             waited = 0
             while waited < DELAY_SECONDS and not cancel_event.is_set():
@@ -1169,35 +935,33 @@ def webhook():
                 waited += 0.2
             if not cancel_event.is_set():
                 send_out_of_band_message(phone, random.choice(delay_messages))
-        
+
         if twilio_rest_available:
             threading.Thread(target=delayed_notice, daemon=True).start()
-        
-        # 🤖 EL AGENTE AUTÓNOMO MANEJA TODO (v2.2 mejorado)
+
+        # Ejecuta agente
         text = run_agent(phone, msg_in)
-        
+
         save_message(phone, text, "assistant")
         cancel_event.set()
-        
+
         elapsed = time_mod.time() - start_ts
         logger.info(f"⏱️ Webhook procesado en {elapsed:.2f}s")
-        
-        # Fallback fuera de banda si tardó mucho
-        if elapsed > 11.5 and twilio_rest_available:
+
+        # Si tardó mucho, refuerzo fuera de banda
+        if elapsed > (DELAY_SECONDS - 0.5) and twilio_rest_available:
             send_out_of_band_message(phone, text)
-        
+
         resp = MessagingResponse()
         resp.message(text)
         return str(resp)
-    
+
     except Exception as e:
         logger.error(f"❌ Error en webhook: {e}", exc_info=True)
         cancel_event.set()
-        
         err_msg = "Disculpá, tuve un problema técnico. ¿Podés repetir tu consulta?"
         if twilio_rest_available:
             send_out_of_band_message(request.values.get("From", ""), err_msg)
-        
         resp = MessagingResponse()
         resp.message(err_msg)
         return str(resp)
@@ -1211,15 +975,17 @@ def health():
         catalog, index = get_catalog_and_index()
         return jsonify({
             "status": "ok",
-            "version": "2.2",  # ← Actualizado
+            "version": "2.2-full-patched",
             "products": len(catalog) if catalog else 0,
             "faiss": bool(index),
             "built_at": _catalog_and_index_cache["built_at"],
             "tools": len(TOOLS),
             "changelog": {
+                "anti_lista_fantasma": True,
                 "product_codes_fix": True,
                 "preview_before_confirm": True,
-                "execute_recommendations": True
+                "fallback_semantico": True,
+                "timeouts_uniformes": True
             }
         })
     except Exception as e:
@@ -1229,10 +995,6 @@ def health():
 # MAIN
 # =========
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando Fran 2.2 - Agente Autónomo Mejorado")
-    logger.info("✅ Fixes incluidos:")
-    logger.info("   - product_codes en get_last_search_results")
-    logger.info("   - Preview antes de confirmar pedidos")
-    logger.info("   - Ejecución automática de recomendaciones")
+    logger.info("🚀 Iniciando FRAN 2.2 FULL (patched)")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
