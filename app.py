@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-FRAN 2.2 FULL (patched)
+FRAN 2.2 FULL (patched) — Railway-ready
 Arreglos clave:
 - Anti “lista fantasma”: si el modelo no ejecuta tool_call y afirma que envió listado,
   se fuerza una búsqueda real y se responde con productos del catálogo.
@@ -10,6 +10,7 @@ Arreglos clave:
 - Timeouts consistentes en requests/embeddings.
 - Validación de formato de código (XXXX/XXXXX-XXX).
 - Memoria diaria: historial, último producto visto, última búsqueda, carrito.
+- **Railway**: respeta PORT y permite DB_PATH configurable (p.ej. /data/tercom.db con Volumes).
 
 Requisitos (compatibles con tu requirements.txt):
 flask, gunicorn, twilio, openai==1.54.0, httpx, rapidfuzz, faiss-cpu, numpy, requests, python-dotenv
@@ -44,7 +45,7 @@ import numpy as np
 from dotenv import load_dotenv
 
 # ============================================================
-# Carga .env
+# Carga .env (útil local; en Railway usa Variables del proyecto)
 # ============================================================
 load_dotenv()
 
@@ -66,7 +67,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("fran22")
 
 # Variables de entorno
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 if not OPENAI_API_KEY:
     raise RuntimeError("Falta OPENAI_API_KEY")
 
@@ -77,8 +78,9 @@ EXCHANGE_API_URL = (os.environ.get("EXCHANGE_API_URL",
     "https://dolarapi.com/v1/dolares/oficial") or "").strip()
 
 DEFAULT_EXCHANGE = float(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
-REQUESTS_TIMEOUT = 12
+REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "12"))
 
+# Twilio
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
@@ -95,12 +97,19 @@ DELAY_SECONDS = 12
 delay_messages = ["Dale 👌", "Ok, ya te ayudo…", "Un seg…", "No hay drama, esperá un toque", "Ya vuelvo con vos 😉"]
 
 # =================
-# BASE DE DATOS
+# BASE DE DATOS (Railway: permitir volumen persistente)
 # =================
-DB_PATH = "tercom.db"
+DB_PATH = os.environ.get("DB_PATH", "tercom.db")  # en Railway usar /data/tercom.db con Volume
 
 @contextmanager
 def get_db_connection():
+    # Asegurar carpeta si es un path tipo /data/tercom.db
+    try:
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"No se pudo crear dir DB: {e}")
     conn = sqlite3.connect(DB_PATH)
     try:
         yield conn
@@ -346,7 +355,7 @@ def _build_faiss_index_from_catalog(catalog):
         logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores, dim={vecs.shape[1]}")
         return index, vecs.shape[0]
     except Exception as e:
-        logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
+        logger.error(f"Error construyendo FAISS: {e}")
         return None, 0
 
 def get_catalog_and_index():
@@ -776,7 +785,7 @@ class ToolExecutor:
         }
 
 # ============================================================
-# 🧠 AGENTE AUTÓNOMO (ReAct) — with anti “lista fantasma”
+# 🧠 AGENTE AUTÓNOMO (ReAct) — con anti “lista fantasma”
 # ============================================================
 def _format_list(products, max_items=8) -> str:
     if not products:
@@ -871,7 +880,6 @@ Estado:
 
             # Anti “lista fantasma”: si pide surtido y no hay bullets/códigos, forzar búsqueda de servidor
             if _intent_needs_basics(user_message):
-                # ¿La respuesta contiene un listado con códigos?
                 looks_like_list = bool(re.search(r"\(Cód:\s*\d{4}/\d{5}-\d{3}\)", final_response))
                 if not looks_like_list:
                     logger.info("⚠️ Anti-lista-fantasma activado: forzando búsqueda real de surtido.")
@@ -884,7 +892,6 @@ Estado:
             return "Disculpá, tuve un problema procesando tu pedido. ¿Podés intentar de nuevo?"
 
     logger.warning(f"⚠️ Agente alcanzó {max_iterations} iteraciones — devolviendo fallback")
-    # Fallback final: si pedía surtido, asegurar listado real
     if _intent_needs_basics(user_message):
         return _force_search_and_reply(phone, query="surtido inicial moto")
     return "Estoy procesando tu pedido pero está tomando más tiempo del esperado. ¿Podés reformular tu consulta?"
@@ -919,7 +926,6 @@ def webhook():
         msg_in = (request.values.get("Body", "") or "").strip()
         phone = request.values.get("From", "")
 
-        # Rate limiting
         if not rate_limit_check(phone):
             resp = MessagingResponse()
             resp.message("Esperá un momento antes de enviar más mensajes 😊")
@@ -927,7 +933,6 @@ def webhook():
 
         save_message(phone, msg_in, "user")
 
-        # Aviso humano en paralelo
         def delayed_notice():
             waited = 0
             while waited < DELAY_SECONDS and not cancel_event.is_set():
@@ -939,7 +944,6 @@ def webhook():
         if twilio_rest_available:
             threading.Thread(target=delayed_notice, daemon=True).start()
 
-        # Ejecuta agente
         text = run_agent(phone, msg_in)
 
         save_message(phone, text, "assistant")
@@ -948,7 +952,6 @@ def webhook():
         elapsed = time_mod.time() - start_ts
         logger.info(f"⏱️ Webhook procesado en {elapsed:.2f}s")
 
-        # Si tardó mucho, refuerzo fuera de banda
         if elapsed > (DELAY_SECONDS - 0.5) and twilio_rest_available:
             send_out_of_band_message(phone, text)
 
@@ -975,7 +978,7 @@ def health():
         catalog, index = get_catalog_and_index()
         return jsonify({
             "status": "ok",
-            "version": "2.2-full-patched",
+            "version": "2.2-full-patched-railway",
             "products": len(catalog) if catalog else 0,
             "faiss": bool(index),
             "built_at": _catalog_and_index_cache["built_at"],
@@ -985,7 +988,8 @@ def health():
                 "product_codes_fix": True,
                 "preview_before_confirm": True,
                 "fallback_semantico": True,
-                "timeouts_uniformes": True
+                "timeouts_uniformes": True,
+                "db_path_env": True
             }
         })
     except Exception as e:
@@ -995,6 +999,6 @@ def health():
 # MAIN
 # =========
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando FRAN 2.2 FULL (patched)")
-    port = int(os.environ.get("PORT", 5000))
+    logger.info("🚀 Iniciando FRAN 2.2 FULL (patched) — Railway-ready")
+    port = int(os.environ.get("PORT", 5000))  # Railway provee PORT
     app.run(host="0.0.0.0", port=port)
