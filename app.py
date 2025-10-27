@@ -30,12 +30,6 @@ from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
 
-# Desactivar proxy para OpenAI (fix para Railway/Render)
-import os as os_module
-if hasattr(os_module.environ, 'get'):
-    for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
-        os_module.environ.pop(key, None)
-
 # ============================================================
 # Twilio REST y validador
 # ============================================================
