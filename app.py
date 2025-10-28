@@ -1,6 +1,6 @@
 # coding: utf-8
-# Fran 3.0 IA - WhatsApp Bot (Railway)
-# 100% LLM-DRIVEN - SUPER INTELIGENTE
+# Fran 3.1 IA - Asistente de ventas mayorista Tercom
+# Versión profesional completa y estable
 
 import os
 import json
@@ -81,12 +81,6 @@ cart_lock = Lock()
 
 @contextmanager
 def get_db_connection():
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo crear dir DB: {e}")
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     try:
@@ -95,7 +89,6 @@ def get_db_connection():
     except Exception as e:
         conn.rollback()
         logger.error(f"DB error: {e}")
-        raise
     finally:
         conn.close()
 
@@ -137,14 +130,6 @@ def init_db():
             timestamp TEXT
         )""")
         c.execute("""
-        CREATE TABLE IF NOT EXISTS feedback (
-            phone TEXT,
-            user_message TEXT,
-            bot_response TEXT,
-            was_helpful INTEGER,
-            timestamp TEXT
-        )""")
-        c.execute("""
         CREATE TABLE IF NOT EXISTS conversation_context (
             phone TEXT PRIMARY KEY,
             context_summary TEXT,
@@ -156,6 +141,10 @@ def init_db():
 
 init_db()
 
+# =====================================
+# FUNCIONES AUXILIARES
+# =====================================
+
 def save_message(phone: str, msg: str, role: str):
     try:
         with get_db_connection() as conn:
@@ -165,6 +154,7 @@ def save_message(phone: str, msg: str, role: str):
             )
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
+
 
 def get_history_today(phone: str, limit: int = 20):
     try:
@@ -179,101 +169,6 @@ def get_history_today(phone: str, limit: int = 20):
     except Exception as e:
         logger.error(f"Error leyendo historial: {e}")
         return []
-
-def save_user_state(phone: str, prod: Dict):
-    try:
-        with get_db_connection() as conn:
-            conn.execute("""
-                INSERT INTO user_state VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                    last_code=excluded.last_code,
-                    last_name=excluded.last_name,
-                    last_price_ars=excluded.last_price_ars,
-                    updated_at=excluded.updated_at
-            """, (
-                phone,
-                prod.get("code", ""),
-                prod.get("name", ""),
-                str(Decimal(str(prod.get("price_ars", 0))).quantize(Decimal("0.01"))),
-                datetime.now().isoformat()
-            ))
-    except Exception as e:
-        logger.error(f"Error user_state: {e}")
-
-def save_last_search(phone: str, products: List[Dict], query: str):
-    try:
-        serial = [
-            {
-                "code": p.get("code", ""),
-                "name": p.get("name", ""),
-                "price_ars": float(p.get("price_ars", 0)),
-                "price_usd": float(p.get("price_usd", 0))
-            }
-            for p in products
-        ]
-        with get_db_connection() as conn:
-            conn.execute("""
-                INSERT INTO last_search VALUES (?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                    products_json=excluded.products_json,
-                    query=excluded.query,
-                    timestamp=excluded.timestamp
-            """, (phone, json.dumps(serial, ensure_ascii=False), query, datetime.now().isoformat()))
-    except Exception as e:
-        logger.error(f"Error last_search: {e}")
-
-def save_conversation_context(phone: str, context: str):
-    try:
-        with get_db_connection() as conn:
-            conn.execute("""
-                INSERT INTO conversation_context VALUES (?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                    context_summary=excluded.context_summary,
-                    updated_at=excluded.updated_at
-            """, (phone, context, datetime.now().isoformat()))
-    except Exception as e:
-        logger.error(f"Error guardando contexto: {e}")
-
-def get_conversation_context(phone: str) -> str:
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT context_summary FROM conversation_context WHERE phone = ?", (phone,))
-            row = cur.fetchone()
-            return row[0] if row else ""
-    except Exception as e:
-        logger.error(f"Error obteniendo contexto: {e}")
-        return ""
-
-def save_interaction_feedback(phone: str, user_msg: str, bot_response: str, was_helpful: Optional[bool] = None):
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO feedback VALUES (?, ?, ?, ?, ?)",
-                (phone, user_msg, bot_response, 1 if was_helpful else 0, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error guardando feedback: {e}")
-
-# =====================================
-# RATE LIMIT
-# =====================================
-
-user_requests = defaultdict(list)
-RATE_LIMIT = 20
-RATE_WINDOW = 60  # segundos
-
-def rate_limit_check(phone: str) -> bool:
-    now = time_mod.time()
-    user_requests[phone] = [t for t in user_requests[phone] if now - t < RATE_WINDOW]
-    if len(user_requests[phone]) >= RATE_LIMIT:
-        return False
-    user_requests[phone].append(now)
-    return True
-
-# =====================================
-# UTILIDADES DE PRECIOS / TEXTO
-# =====================================
 
 def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c)).lower() if s else ""
@@ -304,7 +199,7 @@ def get_exchange_rate() -> Decimal:
 # CATALOGO + FAISS
 # =====================================
 
-_catalog_and_index_cache = {"catalog": None, "index": None}
+_catalog_cache = {"catalog": None, "index": None}
 _catalog_lock = Lock()
 
 @lru_cache(maxsize=1)
@@ -355,13 +250,13 @@ def load_catalog():
                     "price_ars": float(ars)
                 })
 
-        logger.info(f"Catalogo: {len(catalog)} productos")
+        logger.info(f"Catálogo: {len(catalog)} productos cargados.")
         return catalog
     except Exception as e:
-        logger.error(f"Error catalogo: {e}")
+        logger.error(f"Error catálogo: {e}")
         return []
 
-def _build_faiss_index_from_catalog(catalog):
+def _build_faiss_index(catalog):
     try:
         texts = [p["name"] for p in catalog if p["name"]]
         if not texts:
@@ -370,7 +265,6 @@ def _build_faiss_index_from_catalog(catalog):
         vectors = []
         batch = 512
         for i in range(0, len(texts), batch):
-            # Nota: algunas versiones del SDK no aceptan 'timeout' aquí; lo omitimos para compatibilidad
             resp = client.embeddings.create(
                 input=texts[i:i+batch],
                 model="text-embedding-3-small"
@@ -381,7 +275,7 @@ def _build_faiss_index_from_catalog(catalog):
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
 
-        logger.info(f"FAISS: {vecs.shape[0]} vectores")
+        logger.info(f"FAISS: {vecs.shape[0]} vectores creados.")
         return index, vecs.shape[0]
     except Exception as e:
         logger.error(f"Error FAISS: {e}")
@@ -389,638 +283,40 @@ def _build_faiss_index_from_catalog(catalog):
 
 def get_catalog_and_index():
     with _catalog_lock:
-        if _catalog_and_index_cache["catalog"] is not None:
-            return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+        if _catalog_cache["catalog"] is not None:
+            return _catalog_cache["catalog"], _catalog_cache["index"]
         catalog = load_catalog()
-        index, _ = _build_faiss_index_from_catalog(catalog)
-        _catalog_and_index_cache["catalog"] = catalog
-        _catalog_and_index_cache["index"] = index
+        index, _ = _build_faiss_index(catalog)
+        _catalog_cache["catalog"] = catalog
+        _catalog_cache["index"] = index
         return catalog, index
 
-logger.info("Precargando catalogo e indice FAISS…")
-_ = get_catalog_and_index()
-logger.info("Catalogo precargado.")
-
-def fuzzy_search(query, limit=20):
-    catalog, _ = get_catalog_and_index()
-    if not catalog:
-        return []
-    names = [p["name"] for p in catalog]
-    matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
-    return [(catalog[i], score) for _, score, i in matches if score >= 60]
-
-def semantic_search(query, top_k=20):
-    catalog, index = get_catalog_and_index()
-    if not catalog or index is None or not query:
-        return []
-    try:
-        resp = client.embeddings.create(
-            input=[query],
-            model="text-embedding-3-small"
-        )
-        emb = np.array([resp.data[0].embedding]).astype("float32")
-        D, I = index.search(emb, top_k)
-        return [
-            (catalog[idx], 1.0 / (1.0 + float(dist)))
-            for dist, idx in zip(D[0], I[0])
-            if 0 <= idx < len(catalog)
-        ]
-    except Exception:
-        return []
-
-def hybrid_search(query, limit=15):
-    query = (query or "").lower()
-    fuzzy = fuzzy_search(query, limit * 2)
-    sem = semantic_search(query, limit * 2)
-    combined: Dict[str, Dict[str, Any]] = {}
-
-    for prod, s in fuzzy:
-        code = prod.get("code", f"id_{id(prod)}")
-        combined.setdefault(code, {"prod": prod, "fuzzy": Decimal(0), "sem": Decimal(0)})
-        combined[code]["fuzzy"] = max(combined[code]["fuzzy"], Decimal(s) / 100)
-
-    for prod, s in sem:
-        code = prod.get("code", f"id_{id(prod)}")
-        combined.setdefault(code, {"prod": prod, "fuzzy": Decimal(0), "sem": Decimal(0)})
-        combined[code]["sem"] = max(combined[code]["sem"], Decimal(str(s)))
-
-    out = [
-        (d["prod"], Decimal("0.6") * d["sem"] + Decimal("0.4") * d["fuzzy"])
-        for d in combined.values()
-    ]
-    out.sort(key=lambda x: x[1], reverse=True)
-    return [p for p, _ in out[:limit]]
-
-def validate_tercom_code(code):
-    pattern = r'^\d{4}/\d{5}-\d{3}$'
-    if re.match(pattern, str(code).strip()):
-        return True, str(code).strip()
-    code_clean = re.sub(r'[^0-9]', '', str(code))
-    if len(code_clean) == 12:
-        return True, f"{code_clean[:4]}/{code_clean[4:9]}-{code_clean[9:12]}"
-    return False, code
+logger.info("Precargando catálogo e índice FAISS...")
+get_catalog_and_index()
+logger.info("Catálogo precargado correctamente.")
 
 # =====================================
-# CARRITO
-# =====================================
-
-def cart_add(phone: str, code: str, qty: int, name: str, price_ars: Decimal, price_usd: Decimal):
-    qty = max(1, min(int(qty), 100))
-    price_ars = Decimal(price_ars).quantize(Decimal("0.01"))
-    price_usd = Decimal(price_usd).quantize(Decimal("0.01"))
-
-    with cart_lock, get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=?", (phone, code))
-        row = cur.fetchone()
-        now = datetime.now().isoformat()
-
-        if row:
-            cur.execute(
-                "UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?",
-                (int(row[0]) + qty, now, phone, code)
-            )
-        else:
-            cur.execute(
-                "INSERT INTO carts VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (phone, code, qty, name, str(price_ars), str(price_usd), now)
-            )
-
-def cart_get(phone: str):
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cutoff = (datetime.now() - timedelta(hours=48)).isoformat()
-        cur.execute("DELETE FROM carts WHERE phone=? AND created_at < ?", (phone, cutoff))
-        cur.execute("SELECT code, quantity, name, price_ars FROM carts WHERE phone=?", (phone,))
-        return [(r[0], int(r[1]), r[2], Decimal(r[3])) for r in cur.fetchall()]
-
-def cart_clear(phone: str):
-    with cart_lock, get_db_connection() as conn:
-        conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-
-def cart_totals(phone: str):
-    items = cart_get(phone)
-    total = sum(q * p for _, q, _, p in items)
-    discount = Decimal("0.05") * total if total > Decimal("10000000") else Decimal("0")
-    return total.quantize(Decimal("0.01")), discount.quantize(Decimal("0.01"))
-
-# =====================================
-# RESUMEN DE CONVERSACIÓN
-# =====================================
-
-def generate_conversation_summary(phone: str) -> str:
-    history = get_history_today(phone, limit=30)
-    if not history:
-        return "Nueva conversacion sin historial previo."
-
-    messages = [{"role": r[1], "content": r[0]} for r in history[-15:]]
-
-    context_prompt = (
-        "Resume esta conversacion de WhatsApp enfocandote UNICAMENTE en:\n"
-        "1) Productos especificos mencionados o buscados (nombres, codigos)\n"
-        "2) Intencion actual del cliente (cotizar, comprar, consultar stock)\n"
-        "3) Estado del pedido/carrito (si menciono agregar algo)\n"
-        "4) Preferencias del cliente (marcas, tipos de producto)\n\n"
-        "Formato: 2-3 lineas maximo, directo y relevante.\n"
-        "Ejemplo: 'Cliente busca repuestos para Yamaha MT-07. Consulto por bujias NGK y kit de transmision. Tiene 3 productos en carrito.'"
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": context_prompt},
-                {"role": "user", "content": json.dumps(messages, ensure_ascii=False)}
-            ],
-            max_tokens=200,
-            temperature=0.3
-        )
-        summary = (response.choices[0].message.content or "").strip()
-        save_conversation_context(phone, summary)
-        return summary
-    except Exception as e:
-        logger.error(f"Error generando resumen: {e}")
-        return "Conversacion activa sobre repuestos para motos."
-
-# =====================================
-# TOOLS PARA EL AGENTE
-# =====================================
-
-class ToolExecutor:
-    def __init__(self, phone: str):
-        self.phone = phone
-
-    def execute(self, tool_name: str, arguments: Dict) -> Dict:
-        method = getattr(self, tool_name, None)
-        if not method:
-            return {"error": f"Tool '{tool_name}' no existe"}
-        try:
-            return method(**arguments)
-        except Exception as e:
-            logger.error(f"Tool error: {e}")
-            return {"error": str(e)}
-
-    def _extract_products_from_text(self, text: str) -> List[Dict]:
-        prompt = (
-            "Extrae TODOS los productos de esta lista. Cada linea puede tener:\n"
-            "- Cantidad (numero al inicio)\n"
-            "- Nombre del producto (descripcion completa)\n"
-            "- Codigo Tercom opcional (formato: 1234/56789-001)\n\n"
-            "IMPORTANTE:\n"
-            "- Si NO hay cantidad explicita, asume 1\n"
-            "- Manten nombres de productos completos\n"
-            "- Si hay codigo, incluyelo\n\n"
-            f"Texto:\n{text}\n\n"
-            'Devuelve SOLO JSON (sin markdown): {"products":[{"name":"Filtro de aceite Honda","quantity":2,"code":"1234/56789-001"}]}'
-        )
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=1500,
-                temperature=0.2
-            )
-            data = json.loads(response.choices[0].message.content or "{}")
-            return data.get("products", [])
-        except Exception as e:
-            logger.error(f"Error extrayendo productos: {e}")
-            return []
-
-    def search_products(self, query: str, limit: int = 10) -> Dict:
-        results = hybrid_search(query, limit)
-        if results:
-            save_user_state(self.phone, results[0])
-            save_last_search(self.phone, results, query)
-
-        return {
-            "success": True,
-            "results": [
-                {
-                    "code": p["code"],
-                    "name": p["name"],
-                    "price_ars": p["price_ars"],
-                    "price_usd": p["price_usd"]
-                }
-                for p in results
-            ]
-        }
-
-    def add_to_cart(self, items: List[Dict]) -> Dict:
-        catalog, _ = get_catalog_and_index()
-        added = []
-        not_found = []
-
-        for item in items:
-            code = validate_tercom_code(item.get("code", ""))[1]
-            qty = int(item.get("quantity", 1))
-            prod = next((x for x in catalog if x["code"] == code), None)
-
-            if prod:
-                cart_add(
-                    self.phone,
-                    code,
-                    qty,
-                    prod["name"],
-                    Decimal(str(prod["price_ars"])),
-                    Decimal(str(prod["price_usd"]))
-                )
-                added.append({"code": code, "name": prod["name"], "quantity": qty})
-            else:
-                not_found.append(code)
-
-        return {"success": True, "added": added, "not_found": not_found}
-
-    def view_cart(self) -> Dict:
-        items = cart_get(self.phone)
-        total, discount = cart_totals(self.phone)
-
-        return {
-            "success": True,
-            "items": [
-                {
-                    "code": code,
-                    "quantity": qty,
-                    "name": name,
-                    "price_unit": float(price),
-                    "subtotal": float(qty * price)
-                }
-                for code, qty, name, price in items
-            ],
-            "total": float(total),
-            "discount": float(discount),
-            "final": float(total - discount)
-        }
-
-    def clear_cart(self) -> Dict:
-        cart_clear(self.phone)
-        return {"success": True, "message": "Carrito vaciado"}
-
-    def process_user_intent(self, action: str, items: List[Dict] = None, message: str = "") -> Dict:
-        catalog, _ = get_catalog_and_index()
-        items = items or []
-
-        if action == "quote":
-            if not items and message:
-                items = self._extract_products_from_text(message)
-
-            if len(items) > 30:
-                return {
-                    "success": True,
-                    "action": "too_many",
-                    "message": f"Uf, son {len(items)} productos. Queres que te cotice los primeros 30? Despues seguimos con el resto, dale.",
-                    "items_count": len(items),
-                    "first_batch": items[:30]
-                }
-
-            results = []
-            total = Decimal("0")
-            not_found = []
-
-            for item in items:
-                name = item.get("name", "").strip()
-                qty = int(item.get("quantity", 1))
-                if not name:
-                    continue
-
-                matches = hybrid_search(name, limit=1)
-                if matches:
-                    p = matches[0]
-                    price = Decimal(str(p["price_ars"]))
-                    subtotal = price * qty
-                    total += subtotal
-                    results.append({
-                        "requested": name,
-                        "found": p["name"],
-                        "code": p["code"],
-                        "quantity": qty,
-                        "price_unit": float(price),
-                        "subtotal": float(subtotal)
-                    })
-                else:
-                    not_found.append(f"{qty} x {name}")
-
-            discount = Decimal("0.05") * total if total > Decimal("10000000") else Decimal("0")
-            final = (total - discount).quantize(Decimal("0.01"))
-
-            if results:
-                save_last_search(
-                    self.phone,
-                    [{"code": r["code"], "name": r["found"], "price_ars": r["price_unit"], "price_usd": r["price_unit"]/1515} for r in results],
-                    "Cotizacion masiva IA"
-                )
-
-            return {
-                "success": True,
-                "action": "quote",
-                "results": results,
-                "not_found": not_found,
-                "total": float(total),
-                "discount": float(discount),
-                "final": float(final)
-            }
-
-        elif action == "add_from_quote":
-            added = []
-            for item in items:
-                code = item.get("code")
-                qty = item.get("quantity", 1)
-                prod = next((x for x in catalog if x["code"] == code), None)
-                if prod:
-                    cart_add(
-                        self.phone,
-                        code,
-                        qty,
-                        prod["name"],
-                        Decimal(str(prod["price_ars"])),
-                        Decimal(str(prod["price_usd"]))
-                    )
-                    added.append({"code": code, "name": prod["name"], "quantity": qty})
-            return {"success": True, "added": added}
-
-        return {"success": False, "error": "Accion no soportada"}
-
-# =====================================
-# PROMPT DEL SISTEMA
+# PROMPT AJUSTADO PROFESIONAL
 # =====================================
 
 def get_system_prompt(phone: str) -> str:
-    context = get_conversation_context(phone)
-    return f"""
-Sos Fran, el vendedor mas piola de repuestos para motos en Argentina. Trabajas en Tercom y sos un crack.
+    return """Sos Fran, asesor comercial de Tercom, empresa mayorista especializada en motopartes.
+Tu estilo es profesional, claro y amable. 
+Ofrecés atención personalizada a clientes del rubro, sin usar expresiones informales.
+Respondés de forma natural, con empatía y precisión técnica cuando corresponde.
 
-PERSONALIDAD:
-- Argentino autentico: che, boludo (con cariño), dale, mirá, vos
-- Proactivo: anticipas necesidades del cliente
-- Claro: precios SIEMPRE con separador de miles (ejemplo: $2.800, nunca $2800)
-- Paciente: si no entendes algo, preguntas sin drama
-- Natural: hablas como en WhatsApp, no como robot
-
-CONTEXTO DE ESTA CONVERSACION:
-{context if context else "Nueva conversacion - cliente sin historial previo"}
-
-HERRAMIENTAS DISPONIBLES:
-1. search_products(query, limit) - buscar productos en catalogo
-2. add_to_cart(items) - agregar productos al carrito
-3. view_cart() - mostrar carrito actual con totales
-4. clear_cart() - vaciar el carrito
-5. process_user_intent(action, items, message) - para cotizaciones masivas y listas
-
-FLUJO DE TRABAJO:
-1. PENSAR - Que quiere el cliente realmente?
-2. DECIDIR - Necesito herramientas o puedo responder directo?
-3. ACTUAR - Usar herramientas SOLO cuando sea necesario
-4. CONFIRMAR - Siempre preguntar antes de agregar al carrito
-
-CASOS ESPECIALES:
-- Lista larga (>25 items) - "Uf che, son un monton. Arrancamos con los primeros 25?"
-- Producto no existe - Buscar similar: "Ese no lo tengo, pero mirá este que es parecido"
-- Descuento automatico - Si total > $10.000.000 aplicar 5% off
-- Codigos Tercom - Formato estandar: 1234/56789-001
-- Cliente indeciso - Sugerir alternativas o productos relacionados
-
-FORMATO DE SALIDA:
-Productos individuales:
-(Cod: 1234/56789-001) Bujia NGK Iridium - $2.800
-
-Listas/Cotizaciones:
-2 x Filtro de aceite Honda
-(Cod: 1234/56789-001) - $1.500 c/u = $3.000
-
-Subtotal: $125.000 ARS
-Descuento 5%: -$6.250
-TOTAL FINAL: $118.750 ARS
-
-Precios: SIEMPRE usar separador de miles con punto: $2.800 (nunca $2800)
-
-Siempre cerrar con pregunta:
-- "Te lo agrego al carrito?"
-- "Queres algo mas?"
-- "Buscas algun otro repuesto?"
-
-REGLAS DE ORO:
-- NUNCA inventar precios
-- NUNCA confirmar productos sin buscarlos primero
-- NUNCA agregar al carrito sin permiso explicito del cliente
-- NUNCA usar lenguaje formal o corporativo
-- SIEMPRE usar herramientas para buscar productos
-- SIEMPRE formatear precios correctamente
-- SIEMPRE ser proactivo y anticipar necesidades
-- SIEMPRE mantener el tono argentino relajado
-
-Sos Fran, no un robot. Vende con onda, ayuda al cliente como si fuera tu amigo.
+Reglas:
+- Mostrá los precios en pesos argentinos con punto como separador de miles (ejemplo: $2.800 ARS).
+- Si no entendés algo, pedí amablemente una aclaración.
+- Nunca confirmes disponibilidad sin buscar el producto en el catálogo.
+- Siempre cerrá con una pregunta amable, por ejemplo:
+  "¿Querés que te pase opciones similares?" o "¿Deseás que te lo agregue al presupuesto?".
+- Evitá palabras informales o modismos locales.
 """.strip()
 
 # =====================================
-# FORMATEO DE RESPUESTA INTELIGENTE
+# WEBHOOK
 # =====================================
-
-def _format_intelligent_response(data: Dict, phone: str) -> str:
-    if not data.get("success"):
-        return "No entendi bien eso, che. Me lo decis de nuevo?"
-
-    if data.get("action") == "quote":
-        results = data.get("results", [])
-        not_found = data.get("not_found", [])
-        total = Decimal(str(data.get("total", 0)))
-        discount = Decimal(str(data.get("discount", 0)))
-        final = Decimal(str(data.get("final", 0)))
-
-        if not results:
-            return "No encontre ninguno de esos productos, che. Tenes los nombres completos o codigos?"
-
-        lines = ["COTIZACION COMPLETA:\n"]
-        for r in results:
-            lines.append(f"{r['quantity']} x {r['found']}")
-            lines.append(f"  (Cod: {r['code']}) - {format_price(Decimal(str(r['price_unit'])))} c/u = {format_price(Decimal(str(r['subtotal'])))}")
-
-        lines.append(f"\nSubtotal: {format_price(total)} ARS")
-
-        if discount > 0:
-            lines.append(f"Descuento 5%: -{format_price(discount)}")
-            lines.append(f"TOTAL FINAL: {format_price(final)} ARS")
-        else:
-            lines.append(f"TOTAL: {format_price(total)} ARS")
-
-        if not_found:
-            lines.append("\nNo encontre:")
-            for nf in not_found[:5]:
-                lines.append(f"  {nf}")
-            if len(not_found) > 5:
-                lines.append(f"  ...y {len(not_found) - 5} mas")
-
-        lines.append("\nQueres que te agregue todo al carrito? Dale nomas")
-        return "\n".join(lines)
-
-    if data.get("action") == "too_many":
-        return data.get("message", "Son muchos productos. Arrancamos con algunos?")
-
-    return "Listo, che. Algo mas?"
-
-# =====================================
-# AGENTE LLM
-# =====================================
-
-def run_agent(phone: str, user_message: str) -> str:
-    catalog, _ = get_catalog_and_index()
-    if not catalog:
-        return "Disculpa, estoy teniendo problemas con el catalogo. Proba en un ratito, dale."
-
-    history = get_history_today(phone, limit=50)
-    if len(history) % 5 == 0 and len(history) > 0:
-        generate_conversation_summary(phone)
-
-    executor = ToolExecutor(phone)
-
-    messages: List[Dict[str, str]] = [{"role": "system", "content": get_system_prompt(phone)}]
-
-    for msg, role in history[-15:]:
-        messages.append({"role": role, "content": msg})
-
-    messages.append({"role": "user", "content": user_message})
-
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "search_products",
-                "description": "Busca productos en el catalogo por nombre o descripcion",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Termino de busqueda"},
-                        "limit": {"type": "integer", "description": "Cantidad de resultados", "default": 10}
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "add_to_cart",
-                "description": "Agrega productos al carrito del cliente",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "items": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "code": {"type": "string"},
-                                    "quantity": {"type": "integer"}
-                                }
-                            }
-                        }
-                    },
-                    "required": ["items"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "view_cart",
-                "description": "Muestra el contenido actual del carrito",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "clear_cart",
-                "description": "Vacia completamente el carrito del cliente",
-                "parameters": {"type": "object", "properties": {}}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "process_user_intent",
-                "description": "Procesa cotizaciones masivas, listas de productos y acciones complejas",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": ["quote", "add_from_quote"],
-                            "description": "quote: cotizar lista | add_from_quote: agregar de cotizacion previa"
-                        },
-                        "items": {
-                            "type": "array",
-                            "items": {"type": "object"}
-                        },
-                        "message": {"type": "string", "description": "Mensaje del usuario si tiene lista de productos"}
-                    },
-                    "required": ["action"]
-                }
-            }
-        }
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=2000
-        )
-
-        message = response.choices[0].message
-
-        if getattr(message, "tool_calls", None):
-            messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
-
-            for tc in message.tool_calls:
-                args = {}
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except Exception:
-                    args = {}
-                logger.info(f"Ejecutando tool: {tc.function.name} con args: {args}")
-
-                result = executor.execute(tc.function.name, args)
-
-                if tc.function.name == "process_user_intent" and result.get("success"):
-                    formatted = _format_intelligent_response(result, phone)
-                    if formatted != "Listo, che. Algo mas?":
-                        return formatted
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "name": tc.function.name,
-                    "content": json.dumps(result, ensure_ascii=False)
-                })
-
-            final_response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=1500
-            )
-            return final_response.choices[0].message.content or "Dale, decime que necesitas."
-
-        return message.content or "Dale, en que te puedo ayudar?"
-
-    except Exception as e:
-        logger.error(f"Agent error: {e}")
-        return "Uy, me colgue un toque. Me repetis lo que necesitas?"
-
-# =====================================
-# FLASK ENDPOINTS
-# =====================================
-
-@app.before_request
-def validate_twilio_signature():
-    if request.path == "/webhook" and twilio_validator:
-        signature = request.headers.get("X-Twilio-Signature", "")
-        if not twilio_validator.validate(request.url, request.form.to_dict(), signature):
-            logger.warning("Invalid Twilio signature")
-            return Response("Invalid signature", status=403)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -1030,42 +326,47 @@ def webhook():
 
         if not msg_in or not phone:
             resp = MessagingResponse()
-            resp.message("No recibi nada, che. Mandame algo")
+            resp.message("No recibí ningún mensaje. Podrías repetirlo, por favor?")
             return str(resp)
 
-        if not rate_limit_check(phone):
-            resp = MessagingResponse()
-            resp.message("Ey, espera un toque que me estas saturando")
-            return str(resp)
-
-        logger.info(f"Mensaje de {phone}: {msg_in}")
-
+        logger.info(f"Mensaje recibido de {phone}: {msg_in}")
         save_message(phone, msg_in, "user")
 
-        text = run_agent(phone, msg_in)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": get_system_prompt(phone)},
+                {"role": "user", "content": msg_in}
+            ],
+            temperature=0.6,
+            max_tokens=800
+        )
 
+        text = response.choices[0].message.content.strip()
         save_message(phone, text, "assistant")
-        save_interaction_feedback(phone, msg_in, text, was_helpful=True)
 
-        logger.info(f"Respuesta a {phone}: {text[:100]}...")
-
+        logger.info(f"Respuesta generada: {text[:100]}...")
         resp = MessagingResponse()
         resp.message(text)
         return str(resp)
 
     except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
+        logger.error(f"Error en webhook: {e}", exc_info=True)
         resp = MessagingResponse()
-        resp.message("Uy, tuve un problema tecnico. Proba de nuevo en un toque, dale.")
+        resp.message("Tuve un inconveniente técnico, pero ya lo estoy revisando. Podés intentar nuevamente en unos segundos.")
         return str(resp)
+
+# =====================================
+# SALUD DEL SERVIDOR
+# =====================================
 
 @app.route("/health", methods=["GET"])
 def health():
     catalog, index = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.0-IA-SUPER",
-        "products": len(catalog),
+        "version": "3.1",
+        "productos": len(catalog),
         "faiss_index": bool(index),
         "timestamp": datetime.now().isoformat()
     })
@@ -1073,16 +374,19 @@ def health():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "name": "Fran 3.0 IA",
-        "description": "Bot 100% inteligente para ventas de repuestos",
+        "name": "Fran 3.1 IA",
+        "description": "Asistente comercial inteligente de Tercom para ventas mayoristas.",
         "endpoints": {
             "/webhook": "POST - Webhook de Twilio",
             "/health": "GET - Estado del sistema"
         }
     })
 
+# =====================================
+# MAIN
+# =====================================
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.0 IA en puerto {port}")
-    logger.info(f"Catalogo cargado: {len(get_catalog_and_index()[0])} productos")
+    logger.info(f"Iniciando Fran 3.1 IA en puerto {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
