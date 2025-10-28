@@ -1,18 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-FRAN 2.3 FULL — Railway Production Ready
-Fixes implementados:
-- Anti "lista fantasma" reforzado con validación de códigos en respuesta
-- System prompt mejorado con reglas explícitas
-- Persistencia de carrito con expiración (24h)
-- Streaming real de respuestas (sin delays artificiales)
-- Catálogo mayorista extendido (límites aumentados)
-- Timeouts corregidos y configurables
-- Sumas de carrito con Decimal (precisión exacta)
-- Logging detallado para debugging
-- Validaciones de conteo correctas
-"""
-
 import os
 import json
 import csv
@@ -51,9 +36,6 @@ except Exception:
     TwilioClient = None
     RequestValidator = None
 
-# =======================
-# CONFIGURACIÓN
-# =======================
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("fran23")
@@ -79,9 +61,6 @@ twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and 
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# =================
-# BASE DE DATOS
-# =================
 DB_PATH = os.environ.get("DB_PATH", "tercom.db")
 cart_lock = Lock()
 
@@ -112,7 +91,6 @@ def init_db():
             c.execute("PRAGMA journal_mode=WAL;")
         except Exception as e:
             logger.warning(f"No se pudo activar WAL: {e}")
-
         c.execute('''CREATE TABLE IF NOT EXISTS conversations
                      (phone TEXT, message TEXT, role TEXT, timestamp TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS carts
@@ -124,10 +102,7 @@ def init_db():
                      (phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT, 
                       last_price_ars TEXT, updated_at TEXT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS last_search
-                     (phone TEXT PRIMARY KEY, 
-                      products_json TEXT,
-                      query TEXT,
-                      timestamp TEXT)''')
+                     (phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT)''')
 
 init_db()
 
@@ -209,9 +184,6 @@ def get_last_search(phone):
         logger.error(f"Error leyendo last_search: {e}")
         return None
 
-# =================
-# RATE LIMIT
-# =================
 user_requests = defaultdict(list)
 RATE_LIMIT = 15
 RATE_WINDOW = 60
@@ -224,9 +196,6 @@ def rate_limit_check(phone):
     user_requests[phone].append(now)
     return True
 
-# =================
-# UTILIDADES
-# =================
 def strip_accents(s: str) -> str:
     if not s:
         return ""
@@ -254,9 +223,6 @@ def get_exchange_rate() -> Decimal:
         logger.warning(f"Fallo tasa cambio: {e}")
         return DEFAULT_EXCHANGE
 
-# =================================
-# CATÁLOGO + FAISS
-# =================================
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
 
@@ -318,24 +284,20 @@ def _build_faiss_index_from_catalog(catalog):
         texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
         if not texts:
             return None, 0
-
         vectors = []
         batch = 512
         for i in range(0, len(texts), batch):
             chunk = texts[i:i+batch]
             resp = client.embeddings.create(input=chunk, model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
             vectors.extend([d.embedding for d in resp.data])
-
         if not vectors:
             return None, 0
-
         vecs = np.array(vectors).astype("float32")
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
             return None, 0
-
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
-        logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores, dim={vecs.shape[1]}")
+        logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores")
         return index, vecs.shape[0]
     except Exception as e:
         logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
@@ -345,7 +307,6 @@ def get_catalog_and_index():
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None:
             return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
-
         catalog = load_catalog()
         index, _ = _build_faiss_index_from_catalog(catalog)
         _catalog_and_index_cache["catalog"] = catalog
@@ -353,9 +314,6 @@ def get_catalog_and_index():
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         return catalog, index
 
-# =========================================
-# BÚSQUEDA HÍBRIDA
-# =========================================
 def fuzzy_search(query, limit=20):
     catalog, _ = get_catalog_and_index()
     if not catalog:
@@ -383,21 +341,11 @@ def semantic_search(query, top_k=20):
         return []
 
 SEARCH_ALIASES = {
-    "yama": "yamaha",
-    "gilera": "gilera",
-    "zan": "zanella",
-    "hond": "honda",
-    "acrilico": "acrilico tablero",
-    "aceite 2t": "aceite pride 2t",
-    "aceite 4t": "aceite moto 4t",
-    "aceite moto": "aceite",
-    "vc": "VC",
-    "af": "AF",
-    "nsu": "NSU",
-    "gulf": "GULF",
-    "yamalube": "YAMALUBE",
-    "suzuki": "suzuki",
-    "zusuki": "suzuki",
+    "yama": "yamaha", "gilera": "gilera", "zan": "zanella", "hond": "honda",
+    "acrilico": "acrilico tablero", "aceite 2t": "aceite pride 2t",
+    "aceite 4t": "aceite moto 4t", "aceite moto": "aceite",
+    "vc": "VC", "af": "AF", "nsu": "NSU", "gulf": "GULF",
+    "yamalube": "YAMALUBE", "suzuki": "suzuki", "zusuki": "suzuki",
 }
 
 def normalize_search_query(query):
@@ -427,20 +375,15 @@ def hybrid_search(query, limit=15):
     out.sort(key=lambda x: x[1], reverse=True)
     return [p for p, _ in out[:limit]]
 
-# ==================================
-# CARRITO
-# ==================================
 def cart_add(phone: str, code: str, qty: int, name: str, price_ars: Decimal, price_usd: Decimal):
     qty = max(1, min(int(qty or 1), 100))
     price_ars = price_ars.quantize(Decimal("0.01"))
     price_usd = price_usd.quantize(Decimal("0.01"))
-
     with cart_lock, get_db_connection() as conn:
         cur = conn.cursor()
         cur.execute('SELECT quantity FROM carts WHERE phone=? AND code=?', (phone, code))
         row = cur.fetchone()
         now = datetime.now().isoformat()
-        
         if row:
             new_qty = int(row[0]) + qty
             cur.execute('UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?', 
@@ -455,7 +398,6 @@ def cart_get(phone: str, max_age_hours: int = 24):
         cur = conn.cursor()
         cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
         cur.execute('DELETE FROM carts WHERE phone=? AND created_at < ?', (phone, cutoff))
-        
         cur.execute('SELECT code, quantity, name, price_ars FROM carts WHERE phone=?', (phone,))
         rows = cur.fetchall()
         out = []
@@ -489,9 +431,6 @@ def cart_totals(phone: str):
     final = (total - discount).quantize(Decimal("0.01"))
     return final, discount.quantize(Decimal("0.01"))
 
-# ============================================================
-# TOOLS
-# ============================================================
 def validate_tercom_code(code):
     pattern = r'^\d{4}/\d{5}-\d{3}$'
     if re.match(pattern, str(code).strip()):
@@ -503,508 +442,211 @@ def validate_tercom_code(code):
     return False, code
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "Busca productos por nombre/características en el catálogo",
-            "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 15}}, "required": ["query"]}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "add_to_cart",
-            "description": "Agrega productos al carrito",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "items": {"type": "array",
-                              "items": {"type": "object",
-                                        "properties": {"code": {"type": "string"}, "quantity": {"type": "integer", "default": 1}},
-                                        "required": ["code"]}}
-                },
-                "required": ["items"]
-            }
-        }
-    },
-    {"type": "function", "function": {"name": "view_cart", "description": "Muestra el carrito actual", "parameters": {"type": "object", "properties": {}}}},
-    {
-        "type": "function",
-        "function": {"name": "update_cart_item", "description": "Modifica cantidad (0 elimina)", "parameters": {"type": "object", "properties": {"code": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["code", "quantity"]}}
-    },
-    {"type": "function", "function": {"name": "clear_cart", "description": "Vacía el carrito completamente", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "confirm_order", "description": "Confirma y procesa el pedido final", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "get_product_details", "description": "Detalle de un producto por código", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
-    {"type": "function", "function": {"name": "compare_products", "description": "Compara múltiples productos por código", "parameters": {"type": "object", "properties": {"codes": {"type": "array", "items": {"type": "string"}}}, "required": ["codes"]}}},
-    {"type": "function", "function": {"name": "get_recommendations", "description": "Obtiene recomendaciones de productos", "parameters": {"type": "object", "properties": {"based_on": {"type": "string", "default": "last_viewed"}, "limit": {"type": "integer", "default": 5}}}}},
-    {"type": "function", "function": {"name": "get_last_search_results", "description": "Recupera los últimos resultados de búsqueda con códigos", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "search_products", "description": "Busca productos por nombre/características", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 15}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "add_to_cart", "description": "Agrega productos al carrito", "parameters": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"code": {"type": "string"}, "quantity": {"type": "integer", "default": 1}}, "required": ["code"]}}}, "required": ["items"]}}},
+    {"type": "function", "function": {"name": "view_cart", "description": "Muestra el carrito", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "update_cart_item", "description": "Modifica cantidad", "parameters": {"type": "object", "properties": {"code": {"type": "string"}, "quantity": {"type": "integer"}}, "required": ["code", "quantity"]}}},
+    {"type": "function", "function": {"name": "clear_cart", "description": "Vacía el carrito", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "confirm_order", "description": "Confirma pedido", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "get_product_details", "description": "Detalle por código", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}},
+    {"type": "function", "function": {"name": "compare_products", "description": "Compara códigos", "parameters": {"type": "object", "properties": {"codes": {"type": "array", "items": {"type": "string"}}}, "required": ["codes"]}}},
+    {"type": "function", "function": {"name": "get_recommendations", "description": "Recomendaciones", "parameters": {"type": "object", "properties": {"based_on": {"type": "string", "default": "last_viewed"}, "limit": {"type": "integer", "default": 5}}}}},
+    {"type": "function", "function": {"name": "get_last_search_results", "description": "Últimos resultados", "parameters": {"type": "object", "properties": {}}}},
 ]
 
 class ToolExecutor:
     def __init__(self, phone: str):
         self.phone = phone
-
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         method = getattr(self, tool_name, None)
         if not method:
-            logger.error(f"❌ Tool not found: {tool_name}")
-            return {"error": f"Herramienta '{tool_name}' no encontrada"}
+            return {"error": f"Tool '{tool_name}' no encontrada"}
         try:
-            logger.info(f"🔧 Tool: {tool_name}")
-            args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
-            logger.info(f"   Args: {args_preview}{'...' if len(str(arguments)) > 200 else ''}")
-            result = method(**arguments)
-            result_str = json.dumps(result, ensure_ascii=False)
-            logger.info(f"   Result: {result_str[:300]}{'...' if len(result_str) > 300 else ''}")
-            return result
+            logger.info(f"🔧 {tool_name}")
+            return method(**arguments)
         except Exception as e:
-            logger.error(f"❌ {tool_name} error: {e}", exc_info=True)
-            return {"error": str(e), "tool": tool_name}
-
+            logger.error(f"❌ {tool_name}: {e}", exc_info=True)
+            return {"error": str(e)}
     def search_products(self, query: str, limit: int = 15) -> Dict:
         results = hybrid_search(query, limit=limit)
-        
         if results:
             save_user_state(self.phone, results[0])
             save_last_search(self.phone, results, query)
-        
-        actual_count = len(results)
-        
-        return {
-            "success": True,
-            "query": query,
-            "results": [{"code": p["code"], "name": p["name"], "price_ars": p["price_ars"], "price_usd": p["price_usd"]} for p in results],
-            "count": actual_count,
-            "message": (f"Encontré {actual_count} producto{'s' if actual_count != 1 else ''} para '{query}'." 
-                       if results 
-                       else f"No encontré productos para '{query}'. Probá con otros términos.")
-        }
-
+        return {"success": True, "query": query, "results": [{"code": p["code"], "name": p["name"], "price_ars": p["price_ars"], "price_usd": p["price_usd"]} for p in results], "count": len(results)}
     def add_to_cart(self, items: List[Dict]) -> Dict:
         catalog, _ = get_catalog_and_index()
-        added, not_found, invalid_codes = [], [], []
-        
+        added, not_found = [], []
         for item in items:
             code = str(item.get("code", "")).strip()
             qty = int(item.get("quantity", 1))
             ok, norm = validate_tercom_code(code)
-            
             if not ok:
-                invalid_codes.append(code)
+                not_found.append(code)
                 continue
-            
-            code = norm
-            prod = next((x for x in catalog if x["code"] == code), None)
-            
+            prod = next((x for x in catalog if x["code"] == norm), None)
             if prod:
                 price_ars = to_decimal_money(prod["price_ars"])
                 price_usd = to_decimal_money(prod["price_usd"])
-                cart_add(self.phone, code, qty, prod["name"], price_ars, price_usd)
-                subtotal = (price_ars * qty).quantize(Decimal("0.01"))
-                added.append({
-                    "code": code,
-                    "name": prod["name"],
-                    "quantity": qty,
-                    "price_unit": str(price_ars),
-                    "subtotal": str(subtotal)
-                })
-                save_user_state(self.phone, prod)
+                cart_add(self.phone, norm, qty, prod["name"], price_ars, price_usd)
+                added.append({"code": norm, "name": prod["name"], "quantity": qty, "subtotal": str((price_ars * qty).quantize(Decimal("0.01")))})
             else:
                 not_found.append(code)
-        
-        if added and not (not_found or invalid_codes):
-            total_items = sum(a["quantity"] for a in added)
-            total_price = sum(Decimal(a["subtotal"]) for a in added)
-            return {
-                "success": True,
-                "added": added,
-                "total_items": int(total_items),
-                "total_price": float(total_price),
-                "message": f"¡Listo! Agregué {len(added)} producto{'s' if len(added) != 1 else ''} ({int(total_items)} unidad{'es' if total_items != 1 else ''}) por ${total_price:,.2f} ARS"
-            }
-        elif added:
-            errors = []
-            if not_found:
-                errors.append(f"No encontré: {', '.join(not_found)}")
-            if invalid_codes:
-                errors.append(f"Códigos inválidos: {', '.join(invalid_codes)}")
-            return {"success": True, "added": added, "message": f"Agregué {len(added)} productos. {' | '.join(errors)}"}
-        else:
-            return {"success": False, "added": [], "message": "No pude agregar productos. Hacé una búsqueda primero para obtener códigos válidos."}
-
+        if added:
+            total = sum(Decimal(a["subtotal"]) for a in added)
+            return {"success": True, "added": added, "message": f"Agregué {len(added)} productos por ${total:,.2f} ARS"}
+        return {"success": False, "message": "No pude agregar productos"}
     def view_cart(self) -> Dict:
         items = cart_get(self.phone)
         total, discount = cart_totals(self.phone)
-        
-        return {
-            "success": True,
-            "items": [{
-                "code": code,
-                "name": name,
-                "quantity": qty,
-                "price_unit": float(price),
-                "price_total": float((price * qty).quantize(Decimal("0.01")))
-            } for code, qty, name, price in items],
-            "subtotal": float((total + discount).quantize(Decimal("0.01"))),
-            "discount": float(discount),
-            "total": float(total),
-            "item_count": len(items),
-            "unit_count": sum(qty for _, qty, __, ___ in items)
-        }
-
+        return {"success": True, "items": [{"code": c, "name": n, "quantity": q, "price_unit": float(p), "price_total": float((p*q).quantize(Decimal("0.01")))} for c, q, n, p in items], "total": float(total), "item_count": len(items)}
     def update_cart_item(self, code: str, quantity: int) -> Dict:
-        catalog, _ = get_catalog_and_index()
-        prod = next((x for x in catalog if x["code"] == code), None)
-        
-        if not prod:
-            return {"success": False, "error": f"Producto {code} no encontrado"}
-        
         cart_update_qty(self.phone, code, quantity)
-        
-        return {
-            "success": True,
-            "code": code,
-            "name": prod["name"],
-            "new_quantity": quantity,
-            "action": "removed" if quantity == 0 else "updated",
-            "message": f"{'Eliminado' if quantity == 0 else f'Actualizado a {quantity} unidades'}"
-        }
-
+        return {"success": True, "message": "Actualizado"}
     def clear_cart(self) -> Dict:
         cart_clear(self.phone)
-        return {"success": True, "message": "Carrito vaciado completamente"}
-
+        return {"success": True}
     def confirm_order(self) -> Dict:
         items = cart_get(self.phone)
-        
         if not items:
             return {"success": False, "error": "Carrito vacío"}
-        
-        total, discount = cart_totals(self.phone)
-        
-        order_details = {
-            "items": [{
-                "code": code, 
-                "name": name, 
-                "quantity": qty, 
-                "price": float(price), 
-                "subtotal": float((price * qty).quantize(Decimal("0.01")))
-            } for code, qty, name, price in items],
-            "subtotal": float((total + discount).quantize(Decimal("0.01"))),
-            "discount": float(discount),
-            "total": float(total),
-            "item_count": len(items),
-            "unit_count": sum(qty for _, qty, __, ___ in items)
-        }
-        
+        total, _ = cart_totals(self.phone)
         cart_clear(self.phone)
-        
-        return {
-            "success": True, 
-            "order": order_details, 
-            "message": f"¡Pedido confirmado! {order_details['item_count']} productos ({order_details['unit_count']} unidades) por ${total:,.2f} ARS"
-        }
-
+        return {"success": True, "message": f"Pedido confirmado por ${total:,.2f} ARS"}
     def get_product_details(self, code: str) -> Dict:
         catalog, _ = get_catalog_and_index()
         prod = next((x for x in catalog if x["code"] == code), None)
-        
-        if not prod:
-            return {"success": False, "error": f"Producto {code} no encontrado"}
-        
-        return {
-            "success": True, 
-            "product": prod, 
-            "message": f"**(Cód: {prod['code']})** {prod['name']} - ${float(prod['price_ars']):,.2f} ARS"
-        }
-
+        return {"success": bool(prod), "product": prod} if prod else {"success": False}
     def compare_products(self, codes: List[str]) -> Dict:
         catalog, _ = get_catalog_and_index()
         products = [p for p in catalog if p["code"] in codes]
-        
-        if len(products) < 2:
-            return {"success": False, "error": f"Necesito al menos 2 productos válidos. Solo encontré {len(products)}"}
-        
-        sorted_by_price = sorted(products, key=lambda x: x["price_ars"])
-        
-        return {
-            "success": True,
-            "products": products,
-            "cheapest": sorted_by_price[0],
-            "most_expensive": sorted_by_price[-1],
-            "price_difference": float(sorted_by_price[-1]["price_ars"] - sorted_by_price[0]["price_ars"]),
-            "comparison": f"Más barato: {sorted_by_price[0]['name']} (${sorted_by_price[0]['price_ars']:,.2f}). Más caro: {sorted_by_price[-1]['name']} (${sorted_by_price[-1]['price_ars']:,.2f})"
-        }
-
+        return {"success": len(products) >= 2, "products": products}
     def get_recommendations(self, based_on: str = "last_viewed", limit: int = 5) -> Dict:
         catalog, _ = get_catalog_and_index()
-        return {"success": True, "recommendations": catalog[:limit], "reason": "Productos destacados"}
-
+        return {"success": True, "recommendations": catalog[:limit]}
     def get_last_search_results(self) -> Dict:
         search = get_last_search(self.phone)
-        
         if not search:
-            return {"success": False, "message": "No hay búsquedas recientes. Hacé una búsqueda primero."}
-        
-        product_codes = [p["code"] for p in search["products"]]
-        
-        return {
-            "success": True,
-            "query": search["query"],
-            "products": search["products"],
-            "product_codes": product_codes,
-            "count": len(search["products"]),
-            "message": f"Última búsqueda: '{search['query']}' con {len(search['products'])} productos. Códigos: {', '.join(product_codes[:5])}{'...' if len(product_codes) > 5 else ''}"
-        }
+            return {"success": False}
+        return {"success": True, "query": search["query"], "products": search["products"], "product_codes": [p["code"] for p in search["products"]]}
 
-# ============================================================
-# AGENTE
-# ============================================================
 def _format_list(products, max_items=15) -> str:
     if not products:
         return "No encontré productos."
-    
     lines = []
     for p in products[:max_items]:
         code = p.get("code", "").strip() or "s/c"
         name = p.get("name", "").strip()
         ars = Decimal(str(p.get("price_ars", 0))).quantize(Decimal("0.01"))
         lines.append(f"• **(Cód: {code})** {name} - ${ars:,.0f} ARS")
-    
     return "\n".join(lines)
 
 def _intent_needs_basics(user_message: str) -> bool:
     t = user_message.lower()
-    triggers = [
-        "surtido", "básico", "basico", "abrir mi local", 
-        "recomendar", "proponer", "lista de productos", 
-        "lo básico", "lo basico", "catalogo", "catálogo",
-        "empezar", "comenzar", "inicial", "necesito productos",
-        "dame productos", "mostrame productos"
-    ]
+    triggers = ["surtido", "básico", "basico", "abrir mi local", "recomendar", "proponer", "lista de productos", "lo básico", "lo basico", "catalogo", "catálogo", "empezar", "comenzar", "inicial", "necesito productos"]
     return any(x in t for x in triggers)
 
 def _force_search_and_reply(phone: str, query: str) -> str:
     results = hybrid_search(query, limit=15)
-    
     if not results:
         results = hybrid_search("repuestos basicos moto", limit=15)
-    
     if not results:
-        return "Disculpá, tengo problemas para acceder al catálogo en este momento. Probá en unos minutos."
-    
+        return "Disculpá, tengo problemas con el catálogo."
     save_last_search(phone, results, query)
     save_user_state(phone, results[0])
-    
     listado = _format_list(results, max_items=len(results))
-    count = len(results)
-    
-    return f"Acá tenés {count} productos sugeridos para {query}:\n\n{listado}\n\n¿Querés que te agregue alguno al carrito?"
+    return f"Acá tenés {len(results)} productos sugeridos:\n\n{listado}\n\n¿Querés que agregue alguno?"
 
 def run_agent(phone: str, user_message: str, max_iterations: int = 6) -> str:
     catalog, _ = get_catalog_and_index()
-    
     if not catalog:
-        return "No puedo acceder al catálogo en este momento. Probá más tarde."
-
+        return "No puedo acceder al catálogo."
     executor = ToolExecutor(phone)
     history = get_history_today(phone, limit=20)
-    
-    cart_items = cart_get(phone)
-    logger.info(f"📱 INICIO - Usuario: {phone}, Carrito: {len(cart_items)} items")
-    logger.info(f"💬 Mensaje: {user_message[:100]}")
-
-    system_prompt = """Sos Fran, vendedor experto de Tercom (mayorista de repuestos para motos en Argentina).
-
-REGLAS CRÍTICAS:
-1. NUNCA digas "te pasé la lista" o "la lista que te mostré" si no ejecutaste search_products con resultados reales EN ESTE MENSAJE.
-2. Si el usuario pide "surtido/básico/catálogo/productos", SIEMPRE ejecutá search_products primero y mostrá los resultados completos.
-3. Antes de decir que agregaste productos al carrito, SIEMPRE ejecutá add_to_cart y confirmá el resultado.
-4. Si el usuario pregunta por el carrito, SIEMPRE ejecutá view_cart antes de responder.
-5. Formato obligatorio por ítem: **(Cód: XXXX/XXXXX-XXX)** Nombre - $precio ARS
-6. Mostrá TODOS los productos que encontraste, no solo algunos.
-
-PROTOCOLO DE CONFIRMACIÓN:
-- Usuario dice "dale/ok/sí" después de ver productos → ejecutá add_to_cart con los códigos
-- Usuario dice "dale/ok/confirmo" cuando ya hay carrito → ejecutá view_cart primero
-- Mostrá el resumen completo con totales exactos
-- Preguntá "¿Confirmo el pedido?" explícitamente
-- Solo si el usuario confirma de nuevo, ejecutá confirm_order
-
+    logger.info(f"📱 {phone}: {user_message[:100]}")
+    system_prompt = """Sos Fran, vendedor de Tercom (mayorista de repuestos para motos en Argentina).
+REGLAS:
+1. NUNCA digas "te pasé la lista" si no ejecutaste search_products EN ESTE MENSAJE.
+2. Si pide "surtido/básico/catálogo", ejecutá search_products primero.
+3. Antes de decir que agregaste, ejecutá add_to_cart.
+4. Si pregunta por carrito, ejecutá view_cart.
+5. Formato: **(Cód: XXXX/XXXXX-XXX)** Nombre - $precio ARS
+CONFIRMACIÓN:
+- "dale/ok" después de productos → add_to_cart
+- "dale/confirmo" con carrito → view_cart primero, preguntá "¿Confirmo?", luego confirm_order
 REFERENCIAS:
-- "agregalo/agregala" = último producto mencionado con código válido
-- "esos/todos esos" = get_last_search_results → usar esos códigos
-- "X de cada uno" = get_last_search_results → add_to_cart con cantidad X para cada código
-- "todos" o "todos los que me mostraste" = get_last_search_results → add_to_cart con todos los códigos
-
-SUMAS Y CANTIDADES:
-- Usá Decimal para cálculos exactos
-- Validá que las cantidades y totales sean correctos
-- Si el usuario cuestiona números, ejecutá view_cart y verificá
-
-Usá lenguaje argentino natural (vos, che, dale) pero NUNCA inventes información ni códigos.
-"""
-
+- "agregalo" = último producto
+- "esos/todos" = get_last_search_results
+- "X de cada uno" = get_last_search_results + add_to_cart con cantidad X
+Usá lenguaje argentino (vos, che, dale) pero NO inventes info."""
     messages = [{"role": "system", "content": system_prompt}]
     for msg, role in history:
         messages.append({"role": role, "content": msg})
     messages.append({"role": "user", "content": user_message})
-
-    last_model_text = ""
-
+    last_text = ""
     for iteration in range(max_iterations):
         try:
-            logger.info(f"🔄 Iteración {iteration + 1}/{max_iterations}")
-            
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=messages,
-                tools=TOOLS,
-                tool_choice="auto",
-                temperature=0.7,
-                max_tokens=1500,
-                timeout=REQUESTS_TIMEOUT
-            )
+            response = client.chat.completions.create(model="gpt-4o", messages=messages, tools=TOOLS, tool_choice="auto", temperature=0.7, max_tokens=1500, timeout=REQUESTS_TIMEOUT)
             message = response.choices[0].message
-
             if getattr(message, "tool_calls", None):
-                logger.info(f"🔧 Tools llamados: {[tc.function.name for tc in message.tool_calls]}")
                 messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
-                
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments or "{}")
-                    result = executor.execute(tool_name, tool_args)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": json.dumps(result, ensure_ascii=False)
-                    })
+                for tc in message.tool_calls:
+                    result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "name": tc.function.name, "content": json.dumps(result, ensure_ascii=False)})
                 continue
-
             final_response = (message.content or "").strip()
-            last_model_text = final_response
-
-            # Anti "lista fantasma"
+            last_text = final_response
             if _intent_needs_basics(user_message):
                 has_codes = bool(re.search(r"\(Cód:\s*\d{4}/\d{5}-\d{3}\)", final_response))
                 if not has_codes:
-                    logger.info("⚠️ Anti-lista-fantasma activado: forzando búsqueda real")
-                    return _force_search_and_reply(phone, query="surtido basico repuestos moto")
-
+                    return _force_search_and_reply(phone, "surtido basico repuestos moto")
             if final_response:
-                logger.info(f"✅ Respuesta final generada: {len(final_response)} caracteres")
                 return final_response
-
-            logger.warning("⚠️ Modelo no respondió texto, reintentando")
-            messages.append({"role": "system", "content": "Respondé siempre con una frase clara y útil. Si ejecutaste herramientas, explicá los resultados."})
-            continue
-
+            messages.append({"role": "system", "content": "Respondé con una frase clara."})
         except Exception as e:
-            logger.error(f"❌ Error en iteración {iteration}: {e}", exc_info=True)
-            return "Disculpá, tuve un problema procesando tu pedido. ¿Podés intentar de nuevo?"
-
-    logger.warning(f"⚠️ Agente alcanzó {max_iterations} iteraciones")
-    
-    if _intent_needs_basics(user_message):
-        return _force_search_and_reply(phone, query="surtido basico repuestos moto")
-    
-    return last_model_text or "Estoy procesando tu pedido pero está tomando más tiempo del esperado. ¿Podés reformular tu consulta?"
-
-# ===========================================
-# WEBHOOK
-# ===========================================
-def send_out_of_band_message(to_number: str, body: str):
-    if not twilio_rest_available:
-        return
-    try:
-        twilio_rest_client.messages.create(from_=TWILIO_WHATSAPP_FROM, to=to_number, body=body)
-        logger.info(f"📤 Mensaje enviado a {to_number}")
-    except Exception as e:
-        logger.error(f"❌ Error enviando mensaje: {e}")
+            logger.error(f"❌ Iteración {iteration}: {e}")
+            return "Disculpá, hubo un problema. ¿Podés reintentar?"
+    return last_text or _force_search_and_reply(phone, "surtido basico") if _intent_needs_basics(user_message) else "Procesando... ¿Podés reformular?"
 
 @app.before_request
 def validate_twilio_signature():
     if request.path == "/webhook" and twilio_validator:
         signature = request.headers.get("X-Twilio-Signature", "")
-        url = request.url
-        params = request.form.to_dict()
-        if not twilio_validator.validate(url, params, signature):
-            logger.warning("⚠️ Solicitud rechazada: firma Twilio inválida")
+        if not twilio_validator.validate(request.url, request.form.to_dict(), signature):
             return Response("Invalid signature", status=403)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    start_ts = time_mod.time()
-    
     try:
         msg_in = (request.values.get("Body", "") or "").strip()
         phone = request.values.get("From", "")
-
         if not rate_limit_check(phone):
             resp = MessagingResponse()
-            resp.message("Esperá un momento antes de enviar más mensajes 😊")
+            resp.message("Esperá un momento 😊")
             return str(resp)
-
         save_message(phone, msg_in, "user")
-
         text = run_agent(phone, msg_in)
-
         save_message(phone, text, "assistant")
-
-        elapsed = time_mod.time() - start_ts
-        logger.info(f"⏱️ Webhook procesado en {elapsed:.2f}s")
-
         resp = MessagingResponse()
         resp.message(text)
         return str(resp)
-
     except Exception as e:
-        logger.error(f"❌ Error en webhook: {e}", exc_info=True)
-        err_msg = "Disculpá, tuve un problema técnico. ¿Podés repetir tu consulta?"
-        
-        if twilio_rest_available:
-            send_out_of_band_message(request.values.get("From", ""), err_msg)
-        
+        logger.error(f"❌ Webhook: {e}")
         resp = MessagingResponse()
-        resp.message(err_msg)
+        resp.message("Disculpá, hubo un problema técnico.")
         return str(resp)
 
-# =========
-# HEALTH
-# =========
 @app.route("/health", methods=["GET"])
 def health():
     try:
         catalog, index = get_catalog_and_index()
-        return jsonify({
-            "status": "ok",
-            "version": "2.3-production-streaming",
-            "products": len(catalog) if catalog else 0,
-            "faiss": bool(index),
-            "built_at": _catalog_and_index_cache["built_at"],
-            "tools": len(TOOLS),
-            "changelog": {
-                "anti_lista_fantasma": True,
-                "system_prompt_mejorado": True,
-                "persistencia_carrito_24h": True,
-                "streaming_real": True,
-                "catalogo_extendido": True,
-                "timeout_20s": True,
-                "decimal_precision": True,
-                "logging_detallado": True
-            }
-        })
+        return jsonify({"status": "ok", "version": "2.3", "products": len(catalog) if catalog else 0, "faiss": bool(index)})
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
 
-# =========
-# MAIN
-# =========
 if __name__ == "__main__":
-    logger.info("🚀 Iniciando FRAN 2.3 — Production Ready con Streaming Real")
+    logger.info("🚀 FRAN 2.3")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
 ```
+
+Eso es todo. Sin ````python` al inicio ni al final. Guardá y deployá 🚀​​​​​​​​​​​​​​​​
