@@ -622,7 +622,6 @@ def is_bulk_list_request(text: str) -> bool:
     is_multiline = len(lines) >= 3
     return (lines_with_qty >= 3) or (has_quote_intent and is_multiline and lines_with_qty >= 1)
 
-
 # -------------------------
 # Tools del agente
 # -------------------------
@@ -639,8 +638,10 @@ class ToolExecutor:
 
         # Normalizar argumentos según tool
         if tool_name == "quote_bulk_list":
-            # Aceptar tanto "list" como "raw_list"
-            if "list" in arguments and "raw_list" not in arguments:
+            # Aceptar "text", "list" o "raw_list"
+            if "text" in arguments and "raw_list" not in arguments:
+                arguments["raw_list"] = arguments.pop("text")
+            elif "list" in arguments and "raw_list" not in arguments:
                 arguments["raw_list"] = arguments.pop("list")
 
         try:
@@ -652,8 +653,7 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"❌ Error inesperado en {tool_name}: {e}", exc_info=True)
             return {"error": str(e)}
-
-    
+            
 # === BÚSQUEDA DE PRODUCTOS ===
     def search_products(self, query: str, limit: int = 15) -> Dict:
         results = hybrid_search(query, limit=limit)
