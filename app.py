@@ -931,12 +931,25 @@ Formato de respuesta:
             message = response.choices[0].message
 
             if getattr(message, "tool_calls", None):
-                messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
-                for tc in message.tool_calls:
-                    result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
-                    if tc.function.name == "quote_bulk_list":
-                        return _format_bulk_quote_response(result)
-                    messages.append({
+    messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
+    for tc in message.tool_calls:
+        result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
+
+        # 💡 Solución: cortar solo esta respuesta masiva
+        if tc.function.name == "quote_bulk_list":
+            response_text = _format_bulk_quote_response(result)
+            save_message(phone, response_text, "assistant")  # guardamos el texto bueno
+            return response_text  # corta esta iteración sin romper el flujo
+
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "name": tc.function.name,
+            "content": json.dumps(result, ensure_ascii=False)
+        })
+    continue
+            
+            messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
