@@ -887,43 +887,60 @@ def run_agent(phone: str, user_message: str) -> str:
 # =========================
 # HTTP
 # =========================
-@app.route("/health", methods=["GET"])
-def health():
-    return {"ok": True, "service": "fran31", "model": MODEL_NAME}, 200
 
-@app.route("/", methods=["GET"])  # ping básico
-def root():
-    return Response("Fran 3.1 Final – OK", status=200, mimetype="text/plain")
-
-@app.route("/whatsapp", methods=["POST"])  # Twilio webhook moderno
+@app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
+    logger.info("=" * 50)
+    logger.info("=== WEBHOOK RECIBIDO ===")
+    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Form data: {dict(request.form)}")
+    logger.info(f"JSON data: {request.get_json(silent=True)}")
+    logger.info("=" * 50)
+    
     try:
         from_number = request.form.get("From", "").replace("whatsapp:", "").strip()
         body = (request.form.get("Body", "") or "").strip()
-    except Exception:
-        # fallback si no viene form-encoded
-        data = request.get_json(silent=True) or {}
-        from_number = str(data.get("from", "")).strip()
-        body = str(data.get("body", "")).strip()
-
-    phone = from_number or "anon"
-
-    if not rate_limit_check(phone):
+        
+        logger.info(f"Procesando - From: {from_number}, Body: {body}")
+        
+        if not from_number or not body:
+            logger.warning("Faltan datos: from_number o body vacío")
+            resp = MessagingResponse()
+            resp.message("No recibí tu mensaje correctamente.")
+            return str(resp)
+        
+        phone = from_number
+        
+        if not rate_limit_check(phone):
+            logger.info(f"Rate limit excedido para {phone}")
+            resp = MessagingResponse()
+            resp.message("Estoy a full. Probá en unos segundos, dale.")
+            return str(resp)
+    
+        if body:
+            logger.info(f"Guardando mensaje user: {body}")
+            save_message(phone, body, "user")
+            
+            logger.info(f"Ejecutando agente para: {body}")
+            reply = run_agent(phone, body)
+            
+            logger.info(f"Respuesta generada: {reply[:100]}...")
+            save_message(phone, reply, "assistant")
+        else:
+            reply = "Mandame tu pedido o producto a buscar."
+        
         resp = MessagingResponse()
-        resp.message("Estoy a full. Probá en unos segundos, dale.")
+        resp.message(reply)
+        
+        logger.info("Respuesta TwiML generada correctamente")
         return str(resp)
-
-    if body:
-        save_message(phone, body, "user")
-        reply = run_agent(phone, body)
-        save_message(phone, reply, "assistant")
-    else:
-        reply = "Mandame tu pedido o producto a buscar."
-
-    resp = MessagingResponse()
-    resp.message(reply)
-    return str(resp)
-
+        
+    except Exception as e:
+        logger.error(f"ERROR en webhook: {e}", exc_info=True)
+        resp = MessagingResponse()
+        resp.message("Hubo un problema, probá de nuevo.")
+        return str(resp)
+        
 # Alias retrocompatible (versiones anteriores usaban /webhook)
 @app.route("/webhook", methods=["POST"])
 def webhook_alias():
