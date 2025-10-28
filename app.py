@@ -596,22 +596,30 @@ def cart_totals(phone: str):
 # Procesamiento de listas grandes
 # -------------------------
 def parse_bulk_list(text: str) -> List[Tuple[int, str]]:
-    """Parsea listas como '10 BUJIA NGK B7ES' o '5 FILTRO AIRE HONDA'"""
+    """
+    Parsear listas masivas tipo:
+    '10 BUJIA NGK B7ES, 5 FILTRO AIRE HONDA'
+    o
+    '10 BUJIA NGK B7ES\n5 FILTRO AIRE HONDA'
+    """
+    # Normalizar separadores
+    text = text.replace(",", "\n").replace(";", "\n")
     lines = text.strip().split("\n")
     parsed = []
+
     for line in lines:
         line = line.strip()
         if not line:
             continue
+        # Detectar cantidad + nombre
         match = re.match(r'^(\d+)\s+(.+)$', line)
         if match:
             qty = int(match.group(1))
             product_name = match.group(2).strip()
             parsed.append((qty, product_name))
         else:
-            parsed.append((1, line))
+            parsed.append((1, line))  # fallback si no hay número
     return parsed
-
 
 def is_bulk_list_request(text: str) -> bool:
     lower = text.lower()
