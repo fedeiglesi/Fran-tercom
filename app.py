@@ -17,6 +17,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 from collections import defaultdict
+from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
