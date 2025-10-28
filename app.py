@@ -1,5 +1,5 @@
 # ============================================================
-# FRAN 2.4 - Sistema de Ventas Mayoristas (Tercom)
+# FRAN 2.4 - Sistema de Ventas Mayoristas (Tercom) faltan funciones
 # ============================================================
 
 import os
