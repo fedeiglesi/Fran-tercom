@@ -1,10 +1,14 @@
+Acá tenés el app.py completo y corregido de Fran 3.1 Híbrido – Railway Ready, tomando lo sólido de Fran 2.6, el enfoque IA de Fran 3.0, y con los fixes que vimos (carrito, alias /webhook, DB endurecida).
+
+Copiá y pegá tal cual en tu repo. No agregues comillas triples al final.
+
 # =========================================================
 # Fran 3.1 Híbrido – WhatsApp Bot (Railway)
 # =========================================================
-# - Sólido como 2.6 (catálogo + FAISS + fuzzy + carrito)
-# - IA puntual y controlada como 3.0 (parsing de listas, resúmenes)
-# - Endurecido para Railway: healthcheck, timeouts, logs
-# - Sin dependencias exóticas ni sintaxis inválida
+# - Base robusta (Fran 2.6): catálogo + fuzzy + carrito
+# - IA puntual (Fran 3.0): embeddings + FAISS para recall
+# - Fixes: get_last_search(), alias /webhook, DB endurecida
+# - Railway-ready: /health, logs, timeouts razonables
 # =========================================================
 
 import os
@@ -17,7 +21,6 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 from collections import defaultdict
-from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
@@ -85,7 +88,7 @@ twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -------------------------
-# DB
+# DB (endurecida)
 # -------------------------
 cart_lock = Lock()
 
@@ -98,7 +101,8 @@ def get_db_connection():
     except Exception as e:
         logger.warning(f"No se pudo crear dir DB: {e}")
 
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # check_same_thread=False para uso seguro con Flask/Gunicorn
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -128,7 +132,6 @@ def init_db():
             )
             """
         )
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS carts (
@@ -142,10 +145,8 @@ def init_db():
             )
             """
         )
-
         c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS user_state (
@@ -157,7 +158,6 @@ def init_db():
             )
             """
         )
-
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS last_search (
@@ -172,9 +172,8 @@ def init_db():
 init_db()
 
 # -------------------------
-# Persistencia de mensajes/estado
+# Persistencia mensajes/estado
 # -------------------------
-
 def save_message(phone: str, msg: str, role: str):
     try:
         with get_db_connection() as conn:
@@ -184,7 +183,6 @@ def save_message(phone: str, msg: str, role: str):
             )
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
-
 
 def get_history_today(phone: str, limit: int = 20):
     try:
@@ -201,7 +199,6 @@ def get_history_today(phone: str, limit: int = 20):
     except Exception as e:
         logger.error(f"Error leyendo historial: {e}")
         return []
-
 
 def save_user_state(phone: str, prod: dict):
     try:
@@ -226,7 +223,6 @@ def save_user_state(phone: str, prod: dict):
             )
     except Exception as e:
         logger.error(f"Error guardando user_state: {e}")
-
 
 def save_last_search(phone: str, products: list, query: str):
     try:
@@ -255,9 +251,23 @@ def save_last_search(phone: str, products: list, query: str):
     except Exception as e:
         logger.error(f"Error guardando last_search: {e}")
 
+def get_last_search(phone: str):
+    """Fix clave: recuperar la última búsqueda/cotización para confirmar con 'dale'."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT products_json, query FROM last_search WHERE phone=?", (phone,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            products = json.loads(row[0])
+            return {"products": products, "query": row[1]}
+    except Exception as e:
+        logger.error(f"Error leyendo last_search: {e}")
+        return None
 
 # -------------------------
-# Rate limit (simple)
+# Rate limit simple
 # -------------------------
 user_requests = defaultdict(list)
 RATE_LIMIT = 15       # reqs
@@ -274,12 +284,10 @@ def rate_limit_check(phone: str) -> bool:
 # -------------------------
 # Utils
 # -------------------------
-
 def strip_accents(s: str) -> str:
     if not s:
         return ""
     return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch)).lower()
-
 
 def to_decimal_money(x) -> Decimal:
     try:
@@ -293,7 +301,6 @@ def to_decimal_money(x) -> Decimal:
     except Exception:
         d = Decimal("0")
     return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
 
 def validate_tercom_code(code: str):
     pattern = r'^\d{4}/\d{5}-\d{3}$'
@@ -309,7 +316,6 @@ def validate_tercom_code(code: str):
 # =========================
 # Catálogo, FAISS, fuzzy + híbrido
 # =========================
-
 def get_exchange_rate() -> Decimal:
     try:
         res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT)
@@ -392,10 +398,10 @@ def _build_faiss_index_from_catalog(catalog):
         batch = 512
         for i in range(0, len(texts), batch):
             chunk = texts[i:i + batch]
+            # Nota: la versión moderna del cliente OpenAI no requiere 'timeout' por llamada aquí
             resp = client.embeddings.create(
                 input=chunk,
-                model="text-embedding-3-small",
-                timeout=REQUESTS_TIMEOUT
+                model="text-embedding-3-small"
             )
             vectors.extend([d.embedding for d in resp.data])
 
@@ -434,7 +440,6 @@ logger.info("Catálogo e índice listos.")
 # -------------------------
 # Motores de búsqueda
 # -------------------------
-
 def fuzzy_search(query: str, limit: int = 20):
     catalog, _ = get_catalog_and_index()
     if not catalog:
@@ -443,13 +448,12 @@ def fuzzy_search(query: str, limit: int = 20):
     matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
     return [(catalog[i], score) for _, score, i in matches if score >= 60]
 
-
 def semantic_search(query: str, top_k: int = 20):
     catalog, index = get_catalog_and_index()
     if not catalog or index is None or not query:
         return []
     try:
-        resp = client.embeddings.create(input=[query], model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
+        resp = client.embeddings.create(input=[query], model="text-embedding-3-small")
         emb = np.array([resp.data[0].embedding]).astype("float32")
         D, I = index.search(emb, top_k)
         results = []
@@ -477,7 +481,6 @@ def normalize_search_query(query: str) -> str:
             q = q.replace(alias, replacement)
     return q
 
-
 def hybrid_search(query: str, limit: int = 15):
     query = normalize_search_query(query)
     fuzzy = fuzzy_search(query, limit=limit*2)
@@ -501,14 +504,14 @@ def hybrid_search(query: str, limit: int = 15):
 # =========================
 # Carrito
 # =========================
-
 def cart_add(phone: str, code: str, qty: int, name: str, price_ars: Decimal, price_usd: Decimal):
     qty = max(1, min(int(qty or 1), 1000))
     price_ars = price_ars.quantize(Decimal("0.01"))
     price_usd = price_usd.quantize(Decimal("0.01"))
     with cart_lock, get_db_connection() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=\"?\"".replace('\"?\"','?'), (phone, code))
+        # FIX: SQL correcto con placeholders
+        cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=?", (phone, code))
         row = cur.fetchone()
         now = datetime.now().isoformat()
         if row:
@@ -567,7 +570,6 @@ def cart_totals(phone: str):
 # =========================
 # Listas masivas y helpers IA
 # =========================
-
 def parse_bulk_list(text: str):
     # Acepta ",", ";" y saltos de línea
     text = text.replace(",", "\n").replace(";", "\n")
@@ -585,7 +587,6 @@ def parse_bulk_list(text: str):
         else:
             parsed.append((1, line))
     return parsed
-
 
 def is_bulk_list_request(text: str) -> bool:
     if not text:
@@ -705,10 +706,9 @@ class ToolExecutor:
         }
 
 # =========================
-# Agent principal (mixed)
+# Agente principal (flow)
 # =========================
 BULK_CONFIRM_TRIGGERS = ["dale", "agregalos", "agregá", "agrega", "sumalos", "sumá", "ok", "si", "sí", "perfecto", "metelos"]
-
 
 def _format_list(products, max_items=15):
     if not products:
@@ -720,7 +720,6 @@ def _format_list(products, max_items=15):
         ars = Decimal(str(p.get("price_ars", 0))).quantize(Decimal("0.01"))
         lines.append(f"• (Cód: {code}) {name} - ${ars:,.0f} ARS".replace(",", "."))
     return "\n".join(lines)
-
 
 def _format_bulk_quote_response(data: dict) -> str:
     if not data.get("success"):
@@ -748,7 +747,6 @@ def _format_bulk_quote_response(data: dict) -> str:
             lines.append(f"... y {len(not_found) - 5} más")
     lines.append("\n¿Querés que los agregue al carrito? Decime: *dale* o *agregalos*.")
     return "\n".join(lines)
-
 
 def run_agent(phone: str, user_message: str) -> str:
     catalog, _ = get_catalog_and_index()
@@ -785,11 +783,15 @@ def run_agent(phone: str, user_message: str) -> str:
         result = executor.add_to_cart(items)
         if result.get("success"):
             total = result.get("total_added", 0.0)
-            return f"🛒 Agregué {len(result['added'])} ítems al carrito por ${total:,.0f} ARS.".replace(",", ".")
+            return f"🛒 Agregué {len(result['added'])} ítems al carrito por ${Decimal(str(total)):,.0f} ARS.".replace(",", ".")
         return "No pude agregar los productos al carrito."
 
     # 3) Búsquedas sueltas
-    if any(x in lower for x in ["busca", "buscar", "tenes", "tenés", "precio", "cotiz", "aceite", "bujia", "bujía", "filtro", "kit", "cadena", "pastilla", "nsu", "gulf", "yamalube", "yamaha", "honda", "suzuki", "zanella"]):
+    if any(x in lower for x in [
+        "busca", "buscar", "tenes", "tenés", "precio", "cotiz", "aceite", "bujia", "bujía",
+        "filtro", "kit", "cadena", "pastilla", "nsu", "gulf", "yamalube", "yamaha", "honda",
+        "suzuki", "zanella"
+    ]):
         q = user_message
         results = hybrid_search(q, limit=15)
         if not results:
@@ -832,7 +834,7 @@ def health():
 def root():
     return Response("Fran 3.1 Híbrido – OK", status=200, mimetype="text/plain")
 
-@app.route("/whatsapp", methods=["POST"])  # Twilio webhook
+@app.route("/whatsapp", methods=["POST"])  # Twilio webhook moderno
 def whatsapp_webhook():
     try:
         from_number = request.form.get("From", "").replace("whatsapp:", "").strip()
@@ -861,9 +863,13 @@ def whatsapp_webhook():
     resp.message(reply)
     return str(resp)
 
+# Alias retrocompatible (versiones anteriores usaban /webhook)
+@app.route("/webhook", methods=["POST"])
+def webhook_alias():
+    return whatsapp_webhook()
+
 # -------------------------
-# Entry point (Gunicorn en Railway usa 'web: gunicorn app:app')
+# Entry point (local)
 # -------------------------
 if __name__ == "__main__":
-    # Para correr local: python app.py
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
