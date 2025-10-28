@@ -602,16 +602,27 @@ class ToolExecutor:
         self.phone = phone
 
     def execute(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Ejecuta cualquier tool y repara argumentos incompatibles."""
         method = getattr(self, tool_name, None)
         if not method:
             return {"error": f"Tool '{tool_name}' no encontrada"}
-        try:
-            logger.info(f"🔧 Ejecutando tool: {tool_name}")
-            return method(**arguments)
-        except Exception as e:
-            logger.error(f"❌ Error en {tool_name}: {e}", exc_info=True)
-            return {"error": str(e)}
 
+        # Normalizar argumentos según tool
+        if tool_name == "quote_bulk_list":
+            # Aceptar tanto "list" como "raw_list"
+            if "list" in arguments and "raw_list" not in arguments:
+                arguments["raw_list"] = arguments.pop("list")
+
+        try:
+            logger.info(f"🔧 Ejecutando tool: {tool_name} con args: {arguments.keys()}")
+            return method(**arguments)
+        except TypeError as e:
+            logger.error(f"❌ Error en {tool_name}: {e}", exc_info=True)
+            return {"error": f"Argumentos inválidos para {tool_name}: {e}"}
+        except Exception as e:
+            logger.error(f"❌ Error inesperado en {tool_name}: {e}", exc_info=True)
+            return {"error": str(e)}
+            
     # === BÚSQUEDA DE PRODUCTOS ===
     def search_products(self, query: str, limit: int = 15) -> Dict:
         results = hybrid_search(query, limit=limit)
