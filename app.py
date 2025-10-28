@@ -1,13 +1,3 @@
-¡Ah! El problema es que incluí emojis (❌ y ✅) en un comentario dentro del código Python, y Python no permite esos caracteres Unicode en el código fuente sin estar dentro de strings.
-
-Voy a arreglarlo removiendo esa sección de comentarios:
-
-```python
-# =========================
-# Fran 3.0 IA - WhatsApp (Railway)
-# 100% LLM-DRIVEN — SUPER INTELIGENTE
-# =========================
-
 import os
 import json
 import csv
@@ -1173,5 +1163,4 @@ if __name__ == "__main__":
     logger.info(f"Catálogo cargado: {len(get_catalog_and_index()[0])} productos")
     app.run(host="0.0.0.0", port=port, debug=False)
 ```
-
-¡Listo! Ahora el código debería funcionar sin problemas. El error era por los emojis que había incluido en un comentario de comparación. Los removí completamente y el código está listo para deploy. 🚀​​​​​​​​​​​​​​​​
+​​​​​​​​​​​​​​​​
