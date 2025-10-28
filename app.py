@@ -294,7 +294,6 @@ def to_decimal_money(x) -> Decimal:
         d = Decimal("0")
     return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-
 # =========================
 # Parte 2/4 - Catálogo, FAISS, fuzzy + híbrido
 # =========================
@@ -310,11 +309,9 @@ def get_exchange_rate() -> Decimal:
         logger.warning(f"Fallo tasa cambio: {e}")
         return DEFAULT_EXCHANGE
 
-
 # Caché de catálogo e índice
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
-
 
 @lru_cache(maxsize=1)
 def _load_raw_csv():
@@ -323,7 +320,6 @@ def _load_raw_csv():
     r.raise_for_status()
     r.encoding = "utf-8"
     return r.text
-
 
 def load_catalog():
     """Carga y normaliza el catálogo CSV remoto."""
@@ -377,7 +373,6 @@ def load_catalog():
         logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
 
-
 def _build_faiss_index_from_catalog(catalog):
     """Crea un índice FAISS de embeddings."""
     try:
@@ -417,7 +412,6 @@ def _build_faiss_index_from_catalog(catalog):
         logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
         return None, 0
 
-
 def get_catalog_and_index():
     """Devuelve catálogo e índice FAISS, cacheados."""
     with _catalog_lock:
@@ -432,12 +426,10 @@ def get_catalog_and_index():
 
         return catalog, index
 
-
 # --- Pre-carga del catálogo e índice al iniciar ---
 logger.info("⏳ Precargando catálogo e índice FAISS...")
 _ = get_catalog_and_index()
 logger.info("✅ Catálogo precargado correctamente.")
-
 
 # -------------------------
 # Motores de búsqueda
@@ -449,7 +441,6 @@ def fuzzy_search(query, limit=20):
     names = [p["name"] for p in catalog]
     matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
     return [(catalog[i], score) for _, score, i in matches if score >= 60]
-
 
 def semantic_search(query, top_k=20):
     catalog, index = get_catalog_and_index()
@@ -469,7 +460,6 @@ def semantic_search(query, top_k=20):
         logger.error(f"Error en búsqueda semántica: {e}")
         return []
 
-
 SEARCH_ALIASES = {
     "yama": "yamaha", "gilera": "gilera", "zan": "zanella", "hond": "honda",
     "acrilico": "acrilico tablero", "aceite 2t": "aceite pride 2t",
@@ -484,7 +474,6 @@ def normalize_search_query(query):
         if alias in q:
             q = q.replace(alias, replacement)
     return q
-
 
 def hybrid_search(query, limit=15):
     """Combina fuzzy y semántico con pesos."""
@@ -521,7 +510,6 @@ def validate_tercom_code(code):
         return True, normalized
     return False, code
 
-
 # -------------------------
 # Carrito
 # -------------------------
@@ -547,7 +535,6 @@ def cart_add(phone: str, code: str, qty: int, name: str, price_ars: Decimal, pri
                 (phone, code, qty, name, str(price_ars), str(price_usd), now)
             )
 
-
 def cart_get(phone: str, max_age_hours: int = 24):
     with get_db_connection() as conn:
         cur = conn.cursor()
@@ -565,7 +552,6 @@ def cart_get(phone: str, max_age_hours: int = 24):
             out.append((code, q, name, price_dec))
         return out
 
-
 def cart_update_qty(phone: str, code: str, qty: int):
     qty = max(0, min(int(qty or 0), 999))
     with cart_lock, get_db_connection() as conn:
@@ -578,11 +564,9 @@ def cart_update_qty(phone: str, code: str, qty: int):
                 (qty, now, phone, code)
             )
 
-
 def cart_clear(phone: str):
     with cart_lock, get_db_connection() as conn:
         conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-
 
 def cart_totals(phone: str):
     items = cart_get(phone)
@@ -590,7 +574,6 @@ def cart_totals(phone: str):
     discount = Decimal("0.05") * total if total > Decimal("10000000") else Decimal("0.00")
     final = (total - discount).quantize(Decimal("0.01"))
     return final, discount.quantize(Decimal("0.01"))
-
 
 # -------------------------
 # Procesamiento de listas grandes
@@ -604,14 +587,9 @@ def parse_bulk_list(text: str) -> List[Tuple[int, str]]:
     """
     # Normalizar separadores
     text = text.replace(",", "\n").replace(";", "\n")
-    lines = text.strip().split("\n")
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
     parsed = []
-
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Detectar cantidad + nombre
         match = re.match(r'^(\d+)\s+(.+)$', line)
         if match:
             qty = int(match.group(1))
@@ -622,18 +600,24 @@ def parse_bulk_list(text: str) -> List[Tuple[int, str]]:
     return parsed
 
 def is_bulk_list_request(text: str) -> bool:
-    lower = text.lower()
+    """Heurístico: detecta listas de cotización aunque vengan en una sola línea separada por comas/;"""
+    if not text:
+        return False
+    # Normalizo separadores para el heurístico
+    norm = text.replace(",", "\n").replace(";", "\n")
+    lower = norm.lower()
     quote_keywords = ["cotiz", "precio", "cuanto", "tenes", "stock", "pedido", "lista"]
-    lines = text.strip().split("\n")
-    lines_with_qty = sum(1 for l in lines if re.match(r'^\d+\s+\w', l.strip()))
+
+    lines = [l.strip() for l in norm.strip().split("\n") if l.strip()]
+    lines_with_qty = sum(1 for l in lines if re.match(r'^\d+\s+\w', l))
     has_quote_intent = any(kw in lower for kw in quote_keywords)
     is_multiline = len(lines) >= 3
+
     return (lines_with_qty >= 3) or (has_quote_intent and is_multiline and lines_with_qty >= 1)
 
 # -------------------------
 # Tools del agente
 # -------------------------
-
 class ToolExecutor:
     def __init__(self, phone: str):
         self.phone = phone
@@ -644,16 +628,47 @@ class ToolExecutor:
         if not method:
             return {"error": f"Tool '{tool_name}' no encontrada"}
 
-        # ✅ Normalizar argumentos según tool
+        # --- Normalización agresiva de argumentos para quote_bulk_list ---
         if tool_name == "quote_bulk_list":
-            # Aceptar "text", "list" o "raw_list"
-            if "text" in arguments and "raw_list" not in arguments:
-                arguments["raw_list"] = arguments.pop("text")
-            elif "list" in arguments and "raw_list" not in arguments:
-                arguments["raw_list"] = arguments.pop("list")
+            # 1) Si llega un string directo
+            if isinstance(arguments, str):
+                arguments = {"raw_list": arguments}
+
+            # 2) Si llega una lista
+            elif isinstance(arguments, list):
+                arguments = {"raw_list": "\n".join(str(x) for x in arguments)}
+
+            # 3) Si llega un dict
+            elif isinstance(arguments, dict):
+                if "raw_list" in arguments:
+                    pass  # OK
+                elif "text" in arguments and not arguments.get("raw_list"):
+                    arguments["raw_list"] = arguments.pop("text")
+                elif "list" in arguments and not arguments.get("raw_list"):
+                    v = arguments.pop("list")
+                    arguments["raw_list"] = "\n".join(str(x) for x in v) if isinstance(v, list) else str(v)
+                else:
+                    # Caso extremo: dict con una única key que es todo el texto (lo visto en logs)
+                    if len(arguments) == 1:
+                        only_key = next(iter(arguments.keys()))
+                        only_val = arguments[only_key]
+                        if (isinstance(only_key, str) and len(only_key) > 30 and (only_val in ("", None))):
+                            arguments = {"raw_list": only_key}
+                        elif isinstance(only_val, str) and only_val.strip():
+                            arguments = {"raw_list": only_val}
+                        else:
+                            arguments = {"raw_list": json.dumps(arguments, ensure_ascii=False)}
+                    else:
+                        arguments = {"raw_list": json.dumps(arguments, ensure_ascii=False)}
+            else:
+                # Tipo inesperado
+                arguments = {"raw_list": json.dumps(arguments, ensure_ascii=False)}
 
         try:
-            logger.info(f"🔧 Ejecutando tool: {tool_name} con args: {arguments.keys()}")
+            logger.info(
+                f"🔧 Ejecutando tool: {tool_name} con args: "
+                f"{list(arguments.keys()) if isinstance(arguments, dict) else type(arguments)}"
+            )
             return method(**arguments)
         except TypeError as e:
             logger.error(f"❌ Error en {tool_name}: {e}", exc_info=True)
@@ -661,8 +676,8 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"❌ Error inesperado en {tool_name}: {e}", exc_info=True)
             return {"error": str(e)}
-            
-# === BÚSQUEDA DE PRODUCTOS ===
+
+    # === BÚSQUEDA DE PRODUCTOS ===
     def search_products(self, query: str, limit: int = 15) -> Dict:
         results = hybrid_search(query, limit=limit)
         if results:
@@ -803,7 +818,6 @@ def _format_list(products, max_items=15) -> str:
         lines.append(f"• **(Cód: {code})** {name} - ${ars:,.0f} ARS")
     return "\n".join(lines)
 
-
 def _format_bulk_quote_response(data: Dict) -> str:
     """Formatea respuesta de cotización masiva de manera clara."""
     if not data.get("success"):
@@ -837,7 +851,6 @@ def _format_bulk_quote_response(data: Dict) -> str:
     lines.append("\n¿Querés que agregue los productos encontrados al carrito? 🛒")
     return "\n".join(lines)
 
-
 def _intent_needs_basics(user_message: str) -> bool:
     t = user_message.lower()
     triggers = [
@@ -846,7 +859,6 @@ def _intent_needs_basics(user_message: str) -> bool:
         "empezar", "comenzar", "inicial", "necesito productos"
     ]
     return any(x in t for x in triggers)
-
 
 def _force_search_and_reply(phone: str, query: str) -> str:
     results = hybrid_search(query, limit=15)
@@ -863,11 +875,14 @@ def _force_search_and_reply(phone: str, query: str) -> str:
 # Lógica principal del agente
 # -------------------------
 def run_agent(phone: str, user_message: str, max_iterations: int = 8) -> str:
+    """
+    max_iterations: cantidad máxima de "vueltas" pensamiento→acción→observación para evitar loops infinitos.
+    """
     catalog, _ = get_catalog_and_index()
     if not catalog:
         return "No puedo acceder al catálogo."
 
-    # Si el usuario envía una lista masiva de productos:
+    # Detección rápida de lista masiva: procesar directo y cortar
     if is_bulk_list_request(user_message):
         logger.info(f"🔍 Lista masiva detectada para {phone}")
         executor = ToolExecutor(phone)
@@ -929,23 +944,38 @@ Formato de respuesta:
             )
             message = response.choices[0].message
 
-            # === BLOQUE CORREGIDO: manejo de tool_calls ===
+            # --- BLOQUE ROBUSTO PARA TOOL CALLS ---
             if getattr(message, "tool_calls", None):
                 messages.append({
                     "role": "assistant",
                     "content": message.content or "",
                     "tool_calls": message.tool_calls
                 })
-                for tc in message.tool_calls:
-                    result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
 
-                    # Cortar solo para cotización masiva (evita el "¿Podrías reformularla?")
+                for tc in message.tool_calls:
+                    # Robustez al parsear tc.function.arguments
+                    raw_args = tc.function.arguments or ""
+                    try:
+                        if isinstance(raw_args, dict):
+                            arguments = raw_args  # por si el SDK ya lo entrega parseado
+                        else:
+                            s = str(raw_args).strip()
+                            if s.startswith("{") and s.endswith("}"):
+                                arguments = json.loads(s)
+                            else:
+                                # Si no es JSON objeto, tratamos todo como texto crudo
+                                arguments = {"raw_list": s}
+                    except Exception:
+                        arguments = {"raw_list": str(raw_args)}
+
+                    result = executor.execute(tc.function.name, arguments)
+
+                    # Cortar y responder en el acto si es la cotización masiva
                     if tc.function.name == "quote_bulk_list":
                         response_text = _format_bulk_quote_response(result)
                         save_message(phone, response_text, "assistant")
                         return response_text
 
-                    # Para otras tools, devolvemos el resultado al modelo y seguimos iterando
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -953,16 +983,14 @@ Formato de respuesta:
                         "content": json.dumps(result, ensure_ascii=False)
                     })
                 continue
-            # === FIN BLOQUE CORREGIDO ===
+            # --- FIN BLOQUE ROBUSTO ---
 
             final_response = (message.content or "").strip()
             last_text = final_response
-
             if _intent_needs_basics(user_message):
                 has_codes = bool(re.search(r"\(Cód:\s*\d{4}/\d{5}-\d{3}\)", final_response))
                 if not has_codes:
                     return _force_search_and_reply(phone, "surtido basico repuestos moto")
-
             if final_response:
                 return final_response
 
@@ -983,7 +1011,6 @@ def validate_twilio_signature():
         signature = request.headers.get("X-Twilio-Signature", "")
         if not twilio_validator.validate(request.url, request.form.to_dict(), signature):
             return Response("Invalid signature", status=403)
-
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -1008,7 +1035,6 @@ def webhook():
         resp.message("Disculpá, hubo un problema técnico.")
         return str(resp)
 
-
 # -------------------------
 # Healthcheck
 # -------------------------
@@ -1024,7 +1050,6 @@ def health():
         })
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 500
-
 
 # -------------------------
 # Main (para Railway)
