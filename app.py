@@ -164,6 +164,12 @@ def init_db():
 # Inicializar DB al importar
 init_db()
 
+# --- Pre-carga del catálogo e índice al iniciar ---
+logger.info("⏳ Precargando catálogo e índice FAISS...")
+_ = get_catalog_and_index()
+logger.info("✅ Catálogo precargado correctamente.")
+
+
 # -------------------------
 # Persistencia de mensajes y estados
 # -------------------------
