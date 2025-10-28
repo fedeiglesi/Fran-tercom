@@ -922,7 +922,7 @@ def whatsapp_webhook():
 
     resp = MessagingResponse()
     resp.message(reply)
-    return Response(str(resp), mimetype="application/xml")
+    return str(resp)
 
 # Alias retrocompatible (versiones anteriores usaban /webhook)
 @app.route("/webhook", methods=["POST"])
