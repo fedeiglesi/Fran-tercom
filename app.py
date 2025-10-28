@@ -597,6 +597,7 @@ def is_bulk_list_request(text: str) -> bool:
 # -------------------------
 # Tools del agente
 # -------------------------
+
 class ToolExecutor:
     def __init__(self, phone: str):
         self.phone = phone
@@ -622,8 +623,54 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"❌ Error inesperado en {tool_name}: {e}", exc_info=True)
             return {"error": str(e)}
-            
-    # === BÚSQUEDA DE PRODUCTOS ===
+
+    def quote_bulk_list(self, raw_list: str) -> Dict[str, Any]:
+        """
+        Recibe una lista de productos en formato libre (por ejemplo:
+        '10 bujia NGK, 5 cableado Zanella RX150') y devuelve cotización aproximada.
+        """
+        if not raw_list:
+            return {"success": False, "error": "Lista vacía"}
+
+        catalog, _ = get_catalog_and_index()
+        if not catalog:
+            return {"success": False, "error": "Catálogo no disponible"}
+
+        # Separar por coma o salto de línea
+        items = [i.strip() for i in re.split(r"[,\n]", raw_list) if i.strip()]
+        resultados = []
+        for item in items:
+            # Detectar cantidad inicial (ej: "10 bujía...")
+            match = re.match(r"^(\d+)\s+(.*)$", item)
+            qty = int(match.group(1)) if match else 1
+            query = match.group(2) if match else item
+            found = hybrid_search(query, limit=1)
+            if found:
+                p = found[0]
+                price = Decimal(str(p.get("price_ars", 0))) * qty
+                resultados.append({
+                    "query": query,
+                    "code": p.get("code", ""),
+                    "name": p.get("name", ""),
+                    "qty": qty,
+                    "price_total": float(price)
+                })
+            else:
+                resultados.append({
+                    "query": query,
+                    "not_found": True
+                })
+
+        total = sum(r["price_total"] for r in resultados if "price_total" in r)
+        return {
+            "success": True,
+            "count": len(resultados),
+            "total": float(total),
+            "items": resultados
+        }
+
+
+# === BÚSQUEDA DE PRODUCTOS ===
     def search_products(self, query: str, limit: int = 15) -> Dict:
         results = hybrid_search(query, limit=limit)
         if results:
