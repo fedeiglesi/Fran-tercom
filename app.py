@@ -888,14 +888,6 @@ def run_agent(phone: str, user_message: str) -> str:
 # HTTP
 # =========================
 
-@app.route("/health", methods=["GET"])
-def health():
-    return {"ok": True, "service": "fran31", "model": MODEL_NAME}, 200
-
-@app.route("/", methods=["GET"])
-def root():
-    return Response("Fran 3.1 Final – OK", status=200, mimetype="text/plain")
-
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     logger.info("=" * 50)
@@ -915,7 +907,7 @@ def whatsapp_webhook():
             logger.warning("Faltan datos: from_number o body vacío")
             resp = MessagingResponse()
             resp.message("No recibí tu mensaje correctamente.")
-            return str(resp)
+            return Response(str(resp), status=200, mimetype='text/xml')
         
         phone = from_number
         
@@ -923,7 +915,7 @@ def whatsapp_webhook():
             logger.info(f"Rate limit excedido para {phone}")
             resp = MessagingResponse()
             resp.message("Estoy a full. Probá en unos segundos, dale.")
-            return str(resp)
+            return Response(str(resp), status=200, mimetype='text/xml')
     
         if body:
             logger.info(f"Guardando mensaje user: {body}")
@@ -932,7 +924,7 @@ def whatsapp_webhook():
             logger.info(f"Ejecutando agente para: {body}")
             reply = run_agent(phone, body)
             
-            logger.info(f"Respuesta generada: {reply[:100]}...")
+            logger.info(f"Respuesta generada completa: {reply}")
             save_message(phone, reply, "assistant")
         else:
             reply = "Mandame tu pedido o producto a buscar."
@@ -940,15 +932,18 @@ def whatsapp_webhook():
         resp = MessagingResponse()
         resp.message(reply)
         
-        logger.info("Respuesta TwiML generada correctamente")
-        return str(resp)
+        twiml_str = str(resp)
+        logger.info(f"TwiML generado: {twiml_str}")
+        logger.info(f"Longitud TwiML: {len(twiml_str)} caracteres")
+        
+        return Response(twiml_str, status=200, mimetype='text/xml')
         
     except Exception as e:
         logger.error(f"ERROR en webhook: {e}", exc_info=True)
         resp = MessagingResponse()
         resp.message("Hubo un problema, probá de nuevo.")
-        return str(resp)
-
+        return Response(str(resp), status=200, mimetype='text/xml')        
+    
 # Alias retrocompatible
 @app.route("/webhook", methods=["POST"])
 def webhook_alias():
