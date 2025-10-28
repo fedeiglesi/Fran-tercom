@@ -859,7 +859,6 @@ def _force_search_and_reply(phone: str, query: str) -> str:
     listado = _format_list(results, max_items=len(results))
     return f"Acá tenés {len(results)} productos sugeridos:\n\n{listado}\n\n¿Querés que agregue alguno?"
 
-
 # -------------------------
 # Lógica principal del agente
 # -------------------------
@@ -930,47 +929,50 @@ Formato de respuesta:
             )
             message = response.choices[0].message
 
+            # === BLOQUE CORREGIDO: manejo de tool_calls ===
             if getattr(message, "tool_calls", None):
-    messages.append({"role": "assistant", "content": message.content or "", "tool_calls": message.tool_calls})
-    for tc in message.tool_calls:
-        result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": message.tool_calls
+                })
+                for tc in message.tool_calls:
+                    result = executor.execute(tc.function.name, json.loads(tc.function.arguments or "{}"))
 
-        # 💡 Solución: cortar solo esta respuesta masiva
-        if tc.function.name == "quote_bulk_list":
-            response_text = _format_bulk_quote_response(result)
-            save_message(phone, response_text, "assistant")  # guardamos el texto bueno
-            return response_text  # corta esta iteración sin romper el flujo
+                    # Cortar solo para cotización masiva (evita el "¿Podrías reformularla?")
+                    if tc.function.name == "quote_bulk_list":
+                        response_text = _format_bulk_quote_response(result)
+                        save_message(phone, response_text, "assistant")
+                        return response_text
 
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "name": tc.function.name,
-            "content": json.dumps(result, ensure_ascii=False)
-        })
-    continue
-            
-            messages.append({
+                    # Para otras tools, devolvemos el resultado al modelo y seguimos iterando
+                    messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
                         "content": json.dumps(result, ensure_ascii=False)
                     })
                 continue
+            # === FIN BLOQUE CORREGIDO ===
 
             final_response = (message.content or "").strip()
             last_text = final_response
+
             if _intent_needs_basics(user_message):
                 has_codes = bool(re.search(r"\(Cód:\s*\d{4}/\d{5}-\d{3}\)", final_response))
                 if not has_codes:
                     return _force_search_and_reply(phone, "surtido basico repuestos moto")
+
             if final_response:
                 return final_response
+
             messages.append({"role": "system", "content": "Respondé con una frase clara."})
+
         except Exception as e:
             logger.error(f"❌ Iteración {iteration}: {e}")
             return "Disculpá, hubo un problema. ¿Podés reintentar?"
-    return last_text or _force_search_and_reply(phone, "surtido basico")
 
+    return last_text or _force_search_and_reply(phone, "surtido basico")
 
 # -------------------------
 # Webhook de Twilio
