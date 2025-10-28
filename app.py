@@ -1,22 +1,10 @@
-# ============================================================
-# Fran – versión de prueba FAISS + Tool
-# ============================================================
-
-import os
-import json
-import csv
-import sqlite3
-import logging
-import time
+import os, json, csv, sqlite3, logging, time
 from datetime import datetime
 from threading import Lock
-
-import numpy as np
-import faiss
-import requests
-from flask import Flask, request, jsonify
-from openai import OpenAI
+import numpy as np, faiss, requests
+from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
+from openai import OpenAI
 
 # ------------------------------------------------------------
 # CONFIGURACIÓN GENERAL
@@ -31,42 +19,30 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 CATALOG_PATH = "LISTA_TERCOM_LIMPIA.csv"
 DB_PATH = "conversations.db"
 
+_catalog_cache, _index_cache = None, None
 _catalog_lock = Lock()
-_catalog_cache = None
-_index_cache = None
 
 # ------------------------------------------------------------
-# BASE DE DATOS DE CONVERSACIONES
+# BASE DE DATOS
 # ------------------------------------------------------------
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user TEXT,
-            message TEXT,
-            response TEXT,
-            timestamp TEXT
+            user TEXT, message TEXT, response TEXT, timestamp TEXT
         )
     """)
-    conn.commit()
-    conn.close()
-
+    conn.commit(); conn.close()
 init_db()
 
 # ------------------------------------------------------------
-# CARGA Y PROCESAMIENTO DEL CATÁLOGO
+# CATÁLOGO Y FAISS
 # ------------------------------------------------------------
 def load_catalog():
     catalog = []
     with open(CATALOG_PATH, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
+        for row in csv.DictReader(f):
             catalog.append({
                 "code": row.get("code", "").strip(),
                 "name": row.get("name", "").strip(),
@@ -76,158 +52,101 @@ def load_catalog():
     return catalog
 
 def build_faiss_index(catalog):
-    logger.info("Construyendo índice FAISS...")
-    texts = [f"{item['code']} {item['name']}" for item in catalog]
-    embeddings = []
-    for i in range(0, len(texts), 100):
-        chunk = texts[i:i + 100]
-        response = client.embeddings.create(
-            input=chunk, model="text-embedding-3-small"
-        )
-        for d in response.data:
-            embeddings.append(d.embedding)
-
-    vectors = np.array(embeddings, dtype="float32")
-    index = faiss.IndexFlatL2(vectors.shape[1])
-    index.add(vectors)
-    logger.info(f"FAISS: {len(catalog)} vectores creados.")
+    logger.info("Creando embeddings...")
+    textos = [f"{c['code']} {c['name']}" for c in catalog]
+    emb = []
+    for i in range(0, len(textos), 100):
+        r = client.embeddings.create(input=textos[i:i+100], model="text-embedding-3-small")
+        emb += [d.embedding for d in r.data]
+    mat = np.array(emb, dtype="float32")
+    index = faiss.IndexFlatL2(mat.shape[1]); index.add(mat)
+    logger.info(f"FAISS: {len(catalog)} vectores cargados.")
     return index
 
 def get_catalog_and_index():
     global _catalog_cache, _index_cache
     with _catalog_lock:
-        if _catalog_cache is None or _index_cache is None:
-            catalog = load_catalog()
-            index = build_faiss_index(catalog)
-            _catalog_cache = catalog
-            _index_cache = index
-            logger.info("Catálogo precargado correctamente.")
+        if _catalog_cache is None:
+            _catalog_cache = load_catalog()
+            _index_cache = build_faiss_index(_catalog_cache)
+            logger.info("✅ Catálogo FAISS inicializado.")
         return _catalog_cache, _index_cache
 
-# ------------------------------------------------------------
-# FUNCIÓN TOOL: BÚSQUEDA EN CATÁLOGO
-# ------------------------------------------------------------
-def search_products(query: str, limit: int = 10):
-    catalog, index = get_catalog_and_index()
+def search_products(query: str, limit=8):
+    cat, idx = get_catalog_and_index()
     try:
-        response = client.embeddings.create(
-            input=query, model="text-embedding-3-small"
-        )
-        qv = np.array(response.data[0].embedding, dtype="float32")
-        distances, indices = index.search(np.array([qv]), limit)
-        results = []
-        for i, idx in enumerate(indices[0]):
-            if idx < len(catalog):
-                item = catalog[idx]
-                results.append({
-                    "code": item["code"],
-                    "name": item["name"],
-                    "price_ars": item["price_ars"],
-                    "distance": float(distances[0][i])
-                })
-        logger.info(f"Búsqueda FAISS completada: {len(results)} resultados.")
-        return results
+        emb = client.embeddings.create(input=query, model="text-embedding-3-small")
+        qv = np.array(emb.data[0].embedding, dtype="float32")
+        D, I = idx.search(np.array([qv]), limit)
+        res = []
+        for i in I[0]:
+            if i < len(cat): res.append(cat[i])
+        return res
     except Exception as e:
-        logger.error(f"Error en búsqueda FAISS: {e}")
+        logger.error(f"Error en búsqueda: {e}")
         return []
 
 # ------------------------------------------------------------
-# TOOLS DISPONIBLES PARA EL ASISTENTE
+# MOTOR DE RESPUESTA
 # ------------------------------------------------------------
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "Busca productos en el catálogo interno de Tercom según la consulta del cliente (marca, modelo o tipo de repuesto).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Texto de búsqueda (por ejemplo 'bujía NGK' o 'faro Honda Wave')."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Número máximo de resultados a devolver.",
-                        "default": 10
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    }
-]
+def ask_fran(user_input):
+    # detección rápida de intención de búsqueda
+    keywords = ["bujía", "faro", "cadena", "cable", "cubierta", "lampara", "kit", "embrague"]
+    if any(k in user_input.lower() for k in keywords):
+        results = search_products(user_input, 5)
+        if results:
+            reply = "Encontré algunas opciones que podrían servirte:\n"
+            for r in results:
+                reply += f"- ({r['code']}) {r['name']} – ${r['price_ars']} ARS\n"
+            return reply
+        else:
+            return "No encontré ese producto exacto. ¿Podrías darme más detalles (marca o modelo)?"
 
-# ------------------------------------------------------------
-# ASISTENTE OPENAI
-# ------------------------------------------------------------
-def ask_fran(user_input: str):
-    messages = [
-        {"role": "system", "content": (
-            "Sos Fran, vendedor de Tercom, empresa mayorista de motopartes. "
-            "Tu estilo es profesional y cordial. Siempre respondé en español claro. "
-            "Si el usuario menciona una marca, modelo o tipo de repuesto, usá la función search_products "
-            "para buscar en el catálogo y devolver resultados con precios en ARS. "
-            "Si no hay resultados, pedí más detalles del producto."
-        )},
-        {"role": "user", "content": user_input}
-    ]
+    # si no es búsqueda, pasa por el modelo
+    system_prompt = (
+        "Sos Fran, asistente de ventas mayorista de Tercom. "
+        "Sos amable, profesional y respondés siempre en español. "
+        "Tu función es ayudar a encontrar repuestos de motos, confirmar precios o derivar a cotización."
+    )
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=messages,
-        tools=TOOLS,
-        tool_choice="auto"
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_input}
+        ]
     )
-
-    message = response.choices[0].message
-
-    # Si el modelo pidió usar una tool
-    if hasattr(message, "tool_calls") and message.tool_calls:
-        for tool_call in message.tool_calls:
-            if tool_call.function.name == "search_products":
-                args = json.loads(tool_call.function.arguments)
-                query = args.get("query", "")
-                limit = args.get("limit", 10)
-                results = search_products(query, limit)
-                if not results:
-                    return "No encontré coincidencias exactas, ¿podrías especificar el modelo o marca?"
-                reply = "He encontrado algunas opciones que podrían interesarte:\n"
-                for r in results[:5]:
-                    reply += f"- ({r['code']}) {r['name']} - ${r['price_ars']} ARS\n"
-                return reply
-    else:
-        return message.content
+    return response.choices[0].message.content.strip()
 
 # ------------------------------------------------------------
-# TWILIO WEBHOOK
+# TWILIO
 # ------------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    incoming_msg = request.values.get("Body", "").strip()
-    from_number = request.values.get("From", "")
-    logger.info(f"Mensaje recibido de {from_number}: {incoming_msg}")
+    msg = request.values.get("Body", "").strip()
+    user = request.values.get("From", "")
+    logger.info(f"Mensaje: {msg}")
 
-    response_text = ask_fran(incoming_msg)
-    logger.info(f"Respuesta generada: {response_text[:100]}...")
+    try:
+        ans = ask_fran(msg)
+    except Exception as e:
+        logger.error(f"Error en ask_fran: {e}")
+        ans = "Hubo un problema al procesar tu solicitud. Estoy revisando el sistema."
 
-    conn = get_db_connection()
-    conn.execute(
-        "INSERT INTO conversations (user, message, response, timestamp) VALUES (?, ?, ?, ?)",
-        (from_number, incoming_msg, response_text, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
+    # guarda conversación
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT INTO conversations (user, message, response, timestamp) VALUES (?,?,?,?)",
+                 (user, msg, ans, datetime.now().isoformat()))
+    conn.commit(); conn.close()
 
-    twilio_resp = MessagingResponse()
-    twilio_resp.message(response_text)
-    return str(twilio_resp)
+    tw = MessagingResponse()
+    tw.message(ans)
+    return str(tw)
 
 # ------------------------------------------------------------
-# INICIO DE LA APP
+# INICIO
 # ------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info("Precargando catálogo e índice FAISS...")
+    logger.info("Precargando catálogo...")
     get_catalog_and_index()
     app.run(host="0.0.0.0", port=5000)
