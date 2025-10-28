@@ -164,12 +164,6 @@ def init_db():
 # Inicializar DB al importar
 init_db()
 
-# --- Pre-carga del catálogo e índice al iniciar ---
-logger.info("⏳ Precargando catálogo e índice FAISS...")
-_ = get_catalog_and_index()
-logger.info("✅ Catálogo precargado correctamente.")
-
-
 # -------------------------
 # Persistencia de mensajes y estados
 # -------------------------
@@ -300,6 +294,7 @@ def to_decimal_money(x) -> Decimal:
         d = Decimal("0")
     return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+
 # =========================
 # Parte 2/4 - Catálogo, FAISS, fuzzy + híbrido
 # =========================
@@ -323,6 +318,7 @@ _catalog_lock = Lock()
 
 @lru_cache(maxsize=1)
 def _load_raw_csv():
+    """Descarga el catálogo CSV remoto y lo devuelve como texto."""
     r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT)
     r.raise_for_status()
     r.encoding = "utf-8"
@@ -337,6 +333,7 @@ def load_catalog():
         rows = list(reader)
         if not rows:
             return []
+
         header = [strip_accents(h) for h in rows[0]]
 
         def find_idx(keys):
@@ -352,6 +349,7 @@ def load_catalog():
 
         exchange = get_exchange_rate()
         catalog = []
+
         for line in rows[1:]:
             if not line:
                 continue
@@ -359,8 +357,11 @@ def load_catalog():
             name = (line[idx_name].strip() if idx_name is not None and idx_name < len(line) else "")
             usd = to_decimal_money(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else Decimal("0")
             ars = to_decimal_money(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else Decimal("0")
+
+            # Si no hay precio en ARS, lo calcula con el dólar actual
             if ars == 0 and usd > 0:
                 ars = (usd * exchange).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
             if name and (usd > 0 or ars > 0):
                 catalog.append({
                     "code": code,
@@ -368,8 +369,10 @@ def load_catalog():
                     "price_usd": float(usd),
                     "price_ars": float(ars)
                 })
+
         logger.info(f"📦 Catálogo cargado: {len(catalog)} productos")
         return catalog
+
     except Exception as e:
         logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
@@ -380,24 +383,36 @@ def _build_faiss_index_from_catalog(catalog):
     try:
         if not catalog:
             return None, 0
+
         texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
         if not texts:
             return None, 0
+
         vectors = []
         batch = 512
+
         for i in range(0, len(texts), batch):
-            chunk = texts[i:i+batch]
-            resp = client.embeddings.create(input=chunk, model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
+            chunk = texts[i:i + batch]
+            resp = client.embeddings.create(
+                input=chunk,
+                model="text-embedding-3-small",
+                timeout=REQUESTS_TIMEOUT
+            )
             vectors.extend([d.embedding for d in resp.data])
+
         if not vectors:
             return None, 0
+
         vecs = np.array(vectors).astype("float32")
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
             return None, 0
+
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
-        logger.info(f"✅ Índice FAISS: {vecs.shape[0]} vectores")
+
+        logger.info(f"✅ Índice FAISS creado con {vecs.shape[0]} vectores")
         return index, vecs.shape[0]
+
     except Exception as e:
         logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
         return None, 0
@@ -408,12 +423,20 @@ def get_catalog_and_index():
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None:
             return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+
         catalog = load_catalog()
         index, _ = _build_faiss_index_from_catalog(catalog)
         _catalog_and_index_cache["catalog"] = catalog
         _catalog_and_index_cache["index"] = index
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
+
         return catalog, index
+
+
+# --- Pre-carga del catálogo e índice al iniciar ---
+logger.info("⏳ Precargando catálogo e índice FAISS...")
+_ = get_catalog_and_index()
+logger.info("✅ Catálogo precargado correctamente.")
 
 
 # -------------------------
