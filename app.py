@@ -1162,5 +1162,4 @@ if __name__ == "__main__":
     logger.info(f"Iniciando Fran 3.0 IA en puerto {port}")
     logger.info(f"Catálogo cargado: {len(get_catalog_and_index()[0])} productos")
     app.run(host="0.0.0.0", port=port, debug=False)
-```
-​​​​​​​​​​​​​​​​
+​​​​​​​​​​​​
