@@ -636,7 +636,7 @@ class ToolExecutor:
         if not method:
             return {"error": f"Tool '{tool_name}' no encontrada"}
 
-        # Normalizar argumentos según tool
+        # ✅ Normalizar argumentos según tool
         if tool_name == "quote_bulk_list":
             # Aceptar "text", "list" o "raw_list"
             if "text" in arguments and "raw_list" not in arguments:
