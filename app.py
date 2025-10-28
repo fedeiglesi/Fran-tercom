@@ -1,7 +1,3 @@
-Acá tenés el app.py completo y corregido de Fran 3.1 Híbrido – Railway Ready, tomando lo sólido de Fran 2.6, el enfoque IA de Fran 3.0, y con los fixes que vimos (carrito, alias /webhook, DB endurecida).
-
-Copiá y pegá tal cual en tu repo. No agregues comillas triples al final.
-
 # =========================================================
 # Fran 3.1 Híbrido – WhatsApp Bot (Railway)
 # =========================================================
