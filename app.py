@@ -888,6 +888,14 @@ def run_agent(phone: str, user_message: str) -> str:
 # HTTP
 # =========================
 
+@app.route("/health", methods=["GET"])
+def health():
+    return {"ok": True, "service": "fran31", "model": MODEL_NAME}, 200
+
+@app.route("/", methods=["GET"])
+def root():
+    return Response("Fran 3.1 Final – OK", status=200, mimetype="text/plain")
+
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     logger.info("=" * 50)
@@ -940,8 +948,8 @@ def whatsapp_webhook():
         resp = MessagingResponse()
         resp.message("Hubo un problema, probá de nuevo.")
         return str(resp)
-        
-# Alias retrocompatible (versiones anteriores usaban /webhook)
+
+# Alias retrocompatible
 @app.route("/webhook", methods=["POST"])
 def webhook_alias():
     return whatsapp_webhook()
@@ -950,4 +958,6 @@ def webhook_alias():
 # Entry point (local)
 # -------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Iniciando Flask en puerto {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
