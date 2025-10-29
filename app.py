@@ -64,7 +64,6 @@ REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "20"))
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
 
 DB_PATH = os.environ.get("DB_PATH", "tercom.db")
 
@@ -885,74 +884,41 @@ def run_agent(phone: str, user_message: str) -> str:
     return final
 
 # =========================
-# HTTP
+# HTTP (Compatibilidad Fran 2.6)
 # =========================
+from twilio.twiml.messaging_response import MessagingResponse
 
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
-    logger.info("=" * 50)
-    logger.info("=== WEBHOOK RECIBIDO ===")
-    logger.info(f"Headers: {dict(request.headers)}")
-    logger.info(f"Form data: {dict(request.form)}")
-    logger.info(f"JSON data: {request.get_json(silent=True)}")
-    logger.info("=" * 50)
-    
-    try:
-        from_number = request.form.get("From", "").replace("whatsapp:", "").strip()
-        body = (request.form.get("Body", "") or "").strip()
-        
-        logger.info(f"Procesando - From: {from_number}, Body: {body}")
-        
-        if not from_number or not body:
-            logger.warning("Faltan datos: from_number o body vacío")
-            resp = MessagingResponse()
-            resp.message("No recibí tu mensaje correctamente.")
-            return Response(str(resp), status=200, mimetype='text/xml')
-        
-        phone = from_number
-        
-        if not rate_limit_check(phone):
-            logger.info(f"Rate limit excedido para {phone}")
-            resp = MessagingResponse()
-            resp.message("Estoy a full. Probá en unos segundos, dale.")
-            return Response(str(resp), status=200, mimetype='text/xml')
-    
-        if body:
-            logger.info(f"Guardando mensaje user: {body}")
-            save_message(phone, body, "user")
-            
-            logger.info(f"Ejecutando agente para: {body}")
-            reply = run_agent(phone, body)
-            
-            logger.info(f"Respuesta generada completa: {reply}")
-            save_message(phone, reply, "assistant")
-        else:
-            reply = "Mandame tu pedido o producto a buscar."
-        
-        resp = MessagingResponse()
-        resp.message(reply)
-        
-        twiml_str = str(resp)
-        logger.info(f"TwiML generado: {twiml_str}")
-        logger.info(f"Longitud TwiML: {len(twiml_str)} caracteres")
-        
-        return Response(twiml_str, status=200, mimetype='text/xml')
-        
-    except Exception as e:
-        logger.error(f"ERROR en webhook: {e}", exc_info=True)
-        resp = MessagingResponse()
-        resp.message("Hubo un problema, probá de nuevo.")
-        return Response(str(resp), status=200, mimetype='text/xml')        
-    
-# Alias retrocompatible
 @app.route("/webhook", methods=["POST"])
-def webhook_alias():
-    return whatsapp_webhook()
+def whatsapp_webhook():
+    from_number = request.form.get("From", "")
+    message_body = request.form.get("Body", "").strip()
 
-# -------------------------
-# Entry point (local)
-# -------------------------
+    logger.info(f"Mensaje recibido de {from_number}: {message_body}")
+
+    try:
+        # Lógica principal (idéntica a Fran 2.6)
+        reply = run_agent(from_number, message_body)
+    except Exception as e:
+        logger.error(f"Error ejecutando agente: {e}", exc_info=True)
+        reply = "Hubo un problema procesando tu mensaje."
+
+    # Armar respuesta Twilio
+    twiml = MessagingResponse()
+    twiml.message(reply)
+    return str(twiml)
+
+
+# Health check y root endpoint para Railway
+@app.route("/health", methods=["GET"])
+def health():
+    return {"ok": True, "service": "fran31", "model": MODEL_NAME}, 200
+
+@app.route("/", methods=["GET"])
+def root():
+    return Response("Fran 3.1 – compat 2.6 OK", status=200, mimetype="text/plain")
+
+
+# Entry point local
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Flask en puerto {port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
