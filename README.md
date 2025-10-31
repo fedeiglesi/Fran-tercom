@@ -33,3 +33,22 @@
 │ • Añade tono natural + contexto     │
 │ • Memoria 3 días (30 msgs)          │
 └─────────────────────────────────────┘
+
+En resumen:
+┌─────────────────────────────────────┐
+│ ARQUITECTURA                        │
+├─────────────────────────────────────┤
+│ • CSV → Catálogo                    │
+│ • FAISS + RapidFuzz (híbrido)       │
+│ • LÓGICA DETERMINISTA primero       │
+│ • GPT-4o REESCRIBE después          │
+│ • Memoria: 3 días (30 msgs)         │
+│ • SQLite local                      │
+└─────────────────────────────────────┘
+
+FLUJO:
+1. Usuario → mensaje
+2. run_agent_rule_based() decide
+3. Genera respuesta estructurada
+4. GPT-4o reescribe con tono natural
+5. Agrega contexto de 3 días
