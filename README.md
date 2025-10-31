@@ -52,3 +52,10 @@ FLUJO:
 3. Genera respuesta estructurada
 4. GPT-4o reescribe con tono natural
 5. Agrega contexto de 3 días
+
+Características:
+	•	✅ Lógica determinista (keywords/patterns)
+	•	✅ GPT-4o como “pulidor” de respuestas
+	•	✅ Memoria 3 días (vs 1 día en 2.6)
+	•	✅ Fallback: si GPT falla → respuesta determinista
+	•	✅ Datos críticos manejados por código
