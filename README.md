@@ -14,3 +14,9 @@ FLUJO:
 2. GPT-4o decide qué tool usar
 3. Ejecuta tools (búsqueda/carrito)
 4. GPT-4o genera respuesta final
+
+Características:
+	•	✅ Function calling nativo (GPT decide tools)
+	•	✅ Loop iterativo (hasta 8 tools por mensaje)
+	•	✅ Memoria solo del día
+	•	✅ 7 tools disponibles
