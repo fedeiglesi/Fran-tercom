@@ -927,17 +927,18 @@ def run_agent(phone: str, user_message: str) -> str:
 # ---------------------------------------------------------
 # HTTP - Webhook Twilio con validación de firma
 # ---------------------------------------------------------
+
 @app.before_request
 def validate_twilio_signature():
     """Valida firma Twilio para evitar requests no autorizados"""
-    if request.path == "/webhook" and twilio_validator:
+    if request.path.rstrip("/") == "/webhook" and twilio_validator:
         signature = request.headers.get("X-Twilio-Signature", "")
-        url = request.url
+        url = request.url.replace("http://", "https://")
         params = request.form.to_dict()
         if not twilio_validator.validate(url, params, signature):
             logger.warning(f"Firma Twilio inválida desde {request.remote_addr}")
             return Response("Forbidden", status=403)
-
+            
 @app.route("/webhook", methods=["POST"])
 def whatsapp_webhook():
     from_number = request.form.get("From", "")
