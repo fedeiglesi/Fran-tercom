@@ -1,17 +1,16 @@
 # coding: utf-8
 # =========================================================
-# Fran 3.6 - WhatsApp Bot Mayorista Inteligente
+# Fran 3.7 - WhatsApp Bot Mayorista Inteligente
 # =========================================================
-# Features:
-# ✅ Multi-búsqueda (5 cotizaciones simultáneas, flujo circular)
-# ✅ IA por default (lógica invertida - contexto técnico)
-# ✅ Carrito completo (agregar/modificar/sacar cantidades)
-# ✅ Async listas grandes (20-200 items con notificación)
-# ✅ Memoria persistente (sesión + historial 3 días)
-# ✅ Captura datos cliente
-# ✅ Presupuesto formateado WhatsApp
-# ✅ Órdenes confirmadas
-# ✅ Lenguaje natural argentino
+# Mejoras v3.7:
+# ✅ FAISS persistente en disco (no recalcula embeddings)
+# ✅ Manejo de RateLimitError en embeddings y búsquedas
+# ✅ Caché de tipo de cambio (1 hora)
+# ✅ API REST modular (/api/cart, /api/quote, /api/orders, /api/analytics)
+# ✅ Analytics de intents en tabla interactions
+# ✅ Prompt empático y tolerante a errores de usuario
+# ✅ Headers User-Agent en requests externos
+# ✅ Logger sin duplicados (para Gunicorn/Railway)
 # =========================================================
 
 import os
@@ -24,6 +23,7 @@ import re
 import unicodedata
 import time
 import threading
+import pickle
 from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import lru_cache
@@ -33,48 +33,50 @@ from queue import Queue
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 import requests
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from twilio.twiml.messaging_response import MessagingResponse
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------
+# =========================================================
 # CONFIGURACIÓN INICIAL
-# ---------------------------------------------------------
+# =========================================================
 load_dotenv()
 app = Flask(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("fran36")
+
+# Logger sin duplicados
+logger = logging.getLogger("fran37")
+logger.setLevel(logging.INFO)
+logger.propagate = False  # evita duplicados en Gunicorn
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
 
 # =========================================================
-# CONFIGURACIÓN
+# VARIABLES DE ENTORNO
 # =========================================================
-
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
+    raise RuntimeError("❌ Falta OPENAI_API_KEY")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL")
     or "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv"
 ).strip()
-EXCHANGE_API_URL = (
-    os.environ.get("EXCHANGE_API_URL")
-    or "https://dolarapi.com/v1/dolares/oficial"
-).strip()
+EXCHANGE_API_URL = (os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial").strip()
 DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
 REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "30"))
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 DB_PATH = os.environ.get("DB_PATH", "tercom.db")
+FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
+FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 
 # Umbrales async
 INSTANT_THRESHOLD = 20
@@ -82,7 +84,12 @@ ASYNC_QUICK = 50
 ASYNC_MEDIUM = 100
 MAX_ITEMS = 200
 
-# Twilio
+# Headers para requests
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.7"}
+
+# =========================================================
+# TWILIO
+# =========================================================
 try:
     from twilio.rest import Client as TwilioClient
     from twilio.request_validator import RequestValidator
@@ -91,34 +98,29 @@ except Exception:
     RequestValidator = None
 
 twilio_rest_available = bool(
-    TWILIO_ACCOUNT_SID
-    and TWILIO_AUTH_TOKEN
-    and TWILIO_WHATSAPP_FROM
-    and TwilioClient
+    TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient
 )
-twilio_rest_client = (
-    TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    if twilio_rest_available
-    else None
-)
-twilio_validator = (
-    RequestValidator(TWILIO_AUTH_TOKEN)
-    if (RequestValidator and TWILIO_AUTH_TOKEN)
-    else None
-)
+twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
+twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
+# =========================================================
+# CLIENTES Y LOCKS
+# =========================================================
 client = OpenAI(api_key=OPENAI_API_KEY)
 cart_lock = Lock()
-
-# Cola para procesamiento async
+exchange_lock = Lock()
 bulk_queue = Queue()
 
-# =========================================================
-# DATABASE
-# =========================================================
+# Caché tipo de cambio (1 hora)
+exchange_cache = {"rate": None, "timestamp": None}
+EXCHANGE_CACHE_TTL = 3600  # segundos
 
+# =========================================================
+# BASE DE DATOS
+# =========================================================
 @contextmanager
 def get_db_connection():
+    """Conexión segura a SQLite."""
     conn = None
     try:
         db_dir = os.path.dirname(DB_PATH)
@@ -143,6 +145,7 @@ def get_db_connection():
 
 
 def init_db():
+    """Crea todas las tablas necesarias."""
     with get_db_connection() as conn:
         c = conn.cursor()
         try:
@@ -159,10 +162,7 @@ def init_db():
                 timestamp TEXT
             )
         """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conv_phone 
-            ON conversations(phone, timestamp DESC)
-        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)")
 
         # Carrito
         c.execute("""
@@ -176,10 +176,7 @@ def init_db():
                 created_at TEXT
             )
         """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cart_phone 
-            ON carts(phone)
-        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
 
         # Estado usuario
         c.execute("""
@@ -192,7 +189,7 @@ def init_db():
             )
         """)
 
-        # Multi-búsqueda
+        # Historial de búsquedas
         c.execute("""
             CREATE TABLE IF NOT EXISTS search_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,10 +199,7 @@ def init_db():
                 timestamp TEXT
             )
         """)
-        c.execute("""
-            CREATE INDEX IF NOT EXISTS idx_search_phone 
-            ON search_history(phone, timestamp DESC)
-        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone ON search_history(phone, timestamp DESC)")
 
         # Última búsqueda
         c.execute("""
@@ -217,7 +211,7 @@ def init_db():
             )
         """)
 
-        # Sesión con resumen
+        # Resumen de sesión
         c.execute("""
             CREATE TABLE IF NOT EXISTS session_summary (
                 phone TEXT PRIMARY KEY,
@@ -271,12 +265,41 @@ def init_db():
             )
         """)
 
+        # Analytics
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS interactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                message TEXT,
+                intent_detected TEXT,
+                products_count INTEGER,
+                timestamp TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone ON interactions(phone, timestamp DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
+
 init_db()
+
+# =========================================================
+# ANALYTICS
+# =========================================================
+def log_interaction(phone: str, message: str, intent: str, products_count: int = 0):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO interactions (phone, message, intent_detected, products_count, timestamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (phone, message[:200], intent, products_count, datetime.now().isoformat())
+            )
+    except Exception as e:
+        logger.error(f"Error logging interaction: {e}")
 
 # =========================================================
 # PERSISTENCIA
 # =========================================================
-
 def save_message(phone: str, msg: str, role: str):
     if not phone or not msg:
         return
@@ -304,10 +327,7 @@ def get_history_since(phone: str, days: int = 3, limit: int = 30):
                 (phone, since, limit)
             )
             rows = cur.fetchall()
-            return [
-                {"role": r[1], "content": r[0], "timestamp": r[2]}
-                for r in rows
-            ]
+            return [{"role": r[1], "content": r[0], "timestamp": r[2]} for r in rows]
     except Exception as e:
         logger.error(f"Error leyendo historial: {e}")
         return []
@@ -323,17 +343,15 @@ def save_to_search_history(phone: str, products: list, query: str):
                 "name": p.get("name", ""),
                 "price_ars": float(p.get("price_ars", 0)),
                 "price_usd": float(p.get("price_usd", 0)),
-                "qty": int(p.get("qty", 1))
+                "qty": int(p.get("qty", 1)),
             }
             for p in products
         ]
         with get_db_connection() as conn:
             conn.execute(
-                "INSERT INTO search_history (phone, products_json, query, timestamp) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO search_history (phone, products_json, query, timestamp) VALUES (?, ?, ?, ?)",
                 (phone, json.dumps(serializable, ensure_ascii=False), query or "", datetime.now().isoformat())
             )
-
             # mantener solo últimas 5
             cur = conn.cursor()
             cur.execute(
@@ -361,11 +379,7 @@ def get_search_history(phone: str, limit: int = 5):
             )
             rows = cur.fetchall()
             return [
-                {
-                    "products": json.loads(r[0]),
-                    "query": r[1],
-                    "timestamp": r[2]
-                }
+                {"products": json.loads(r[0]), "query": r[1], "timestamp": r[2]}
                 for r in rows
             ]
     except Exception as e:
@@ -383,7 +397,7 @@ def save_last_search(phone: str, products: list, query: str):
                 "name": p.get("name", ""),
                 "price_ars": float(p.get("price_ars", 0)),
                 "price_usd": float(p.get("price_usd", 0)),
-                "qty": int(p.get("qty", 1))
+                "qty": int(p.get("qty", 1)),
             }
             for p in products
         ]
@@ -513,10 +527,7 @@ def get_customer_data(phone: str):
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT name, address, notes FROM customer_data WHERE phone=?",
-                (phone,)
-            )
+            cur.execute("SELECT name, address, notes FROM customer_data WHERE phone=?", (phone,))
             row = cur.fetchone()
             if not row:
                 return None
@@ -558,10 +569,13 @@ def create_order(phone: str, customer_name: str, customer_address: str, items: l
         logger.error(f"Error creando orden: {e}")
         return None
 
-# Rate limit
+# =========================================================
+# RATE LIMIT POR USUARIO
+# =========================================================
 user_requests = defaultdict(list)
 RATE_LIMIT = 30
-RATE_WINDOW = 60
+RATE_WINDOW = 60  # segundos
+
 
 def rate_limit_check(phone: str) -> bool:
     if not phone:
@@ -575,11 +589,11 @@ def rate_limit_check(phone: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error en rate_limit_check: {e}")
-        return True  # en error, dejamos pasar
+        return True
+
 # =========================================================
 # UTILS
 # =========================================================
-
 def strip_accents(s: str) -> str:
     if not s:
         return ""
@@ -596,7 +610,14 @@ def to_decimal_money(x):
     if x is None or x == "":
         return Decimal("0")
     try:
-        s = str(x).replace("USD", "").replace("ARS", "").replace("$", "").replace(" ", "").strip()
+        s = (
+            str(x)
+            .replace("USD", "")
+            .replace("ARS", "")
+            .replace("$", "")
+            .replace(" ", "")
+            .strip()
+        )
         if not s:
             return Decimal("0")
         if "," in s and "." in s:
@@ -631,26 +652,43 @@ def validate_tercom_code(code: str):
     return False, s
 
 # =========================================================
-# CATÁLOGO Y BÚSQUEDA
+# TIPO DE CAMBIO CON CACHÉ (1 HORA)
 # =========================================================
-
 def get_exchange_rate() -> Decimal:
-    try:
-        res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT)
-        res.raise_for_status()
-        venta = res.json().get("venta", None)
-        return to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
-    except Exception as e:
-        logger.warning(f"Fallo tasa cambio: {e}")
-        return DEFAULT_EXCHANGE
+    """Devuelve el TC; si falla usa cache y sino usa DEFAULT_EXCHANGE."""
+    with exchange_lock:
+        now = datetime.now().timestamp()
 
+        if exchange_cache["rate"] and exchange_cache["timestamp"]:
+            age = now - exchange_cache["timestamp"]
+            if age < EXCHANGE_CACHE_TTL:
+                return exchange_cache["rate"]
+
+        try:
+            res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
+            res.raise_for_status()
+            venta = res.json().get("venta", None)
+            rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
+            exchange_cache["rate"] = rate
+            exchange_cache["timestamp"] = now
+            return rate
+        except Exception as e:
+            logger.warning(f"Fallo tasa cambio: {e}")
+            if exchange_cache["rate"]:
+                return exchange_cache["rate"]
+            return DEFAULT_EXCHANGE
+
+# =========================================================
+# CATÁLOGO + FAISS PERSISTENTE
+# =========================================================
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
+
 
 @lru_cache(maxsize=1)
 def _load_raw_csv():
     try:
-        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT)
+        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
         r.raise_for_status()
         r.encoding = "utf-8"
         return r.text
@@ -709,31 +747,72 @@ def load_catalog():
                 logger.warning(f"Error procesando linea del CSV: {e}")
                 continue
 
-        logger.info(f"Catalogo cargado: {len(catalog)} productos")
+        logger.info(f"Catálogo cargado: {len(catalog)} productos")
         return catalog
     except Exception as e:
-        logger.error(f"Error cargando catalogo: {e}", exc_info=True)
+        logger.error(f"Error cargando catálogo: {e}", exc_info=True)
         return []
+
+
+def save_faiss_index(index, catalog):
+    try:
+        faiss.write_index(index, FAISS_INDEX_PATH)
+        with open(FAISS_MAPPING_PATH, "wb") as f:
+            pickle.dump(catalog, f)
+        logger.info(f"FAISS guardado en disco: {FAISS_INDEX_PATH}")
+    except Exception as e:
+        logger.error(f"Error guardando FAISS: {e}")
+
+
+def load_faiss_index():
+    try:
+        if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_MAPPING_PATH):
+            index = faiss.read_index(FAISS_INDEX_PATH)
+            with open(FAISS_MAPPING_PATH, "rb") as f:
+                catalog = pickle.load(f)
+            logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
+            return index, catalog
+    except Exception as e:
+        logger.warning(f"No se pudo cargar FAISS desde disco: {e}")
+    return None, None
 
 
 def _build_faiss_index_from_catalog(catalog):
     try:
         if not catalog:
             return None, 0
+
         texts = [str(p.get("name", "")).strip() for p in catalog if str(p.get("name", "")).strip()]
         if not texts:
             return None, 0
 
         vectors = []
         batch = 512
+        max_retries = 3
+
         for i in range(0, len(texts), batch):
             chunk = texts[i:i + batch]
-            resp = client.embeddings.create(
-                input=chunk,
-                model="text-embedding-3-small",
-                timeout=REQUESTS_TIMEOUT
-            )
-            vectors.extend([d.embedding for d in resp.data])
+
+            for retry in range(max_retries):
+                try:
+                    resp = client.embeddings.create(
+                        input=chunk,
+                        model="text-embedding-3-small",
+                        timeout=REQUESTS_TIMEOUT
+                    )
+                    vectors.extend([d.embedding for d in resp.data])
+                    break
+                except RateLimitError as e:
+                    if retry < max_retries - 1:
+                        wait_time = 2 ** retry
+                        logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"RateLimitError persistente en embeddings: {e}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Error en embeddings: {e}")
+                    raise
 
         if not vectors:
             return None, 0
@@ -745,7 +824,7 @@ def _build_faiss_index_from_catalog(catalog):
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
 
-        logger.info(f"Indice FAISS creado con {vecs.shape[0]} vectores")
+        logger.info(f"Índice FAISS creado con {vecs.shape[0]} vectores")
         return index, vecs.shape[0]
     except Exception as e:
         logger.error(f"Error construyendo FAISS: {e}", exc_info=True)
@@ -753,21 +832,39 @@ def _build_faiss_index_from_catalog(catalog):
 
 
 def get_catalog_and_index():
+    """Carga FAISS desde disco si existe; si no, lo crea y guarda."""
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None:
             return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+
+        # 1) intentar disco
+        index, catalog = load_faiss_index()
+        if index and catalog:
+            _catalog_and_index_cache["catalog"] = catalog
+            _catalog_and_index_cache["index"] = index
+            _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
+            return catalog, index
+
+        # 2) crear de cero
         catalog = load_catalog()
         index, _ = _build_faiss_index_from_catalog(catalog)
+
+        if index and catalog:
+            save_faiss_index(index, catalog)
+
         _catalog_and_index_cache["catalog"] = catalog
         _catalog_and_index_cache["index"] = index
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         return catalog, index
 
-logger.info("Precargando catalogo e indice FAISS...")
+
+logger.info("Precargando catálogo e índice FAISS...")
 _ = get_catalog_and_index()
-logger.info("Catalogo e indice listos.")
+logger.info("Catálogo e índice listos.")
 
-
+# =========================================================
+# BÚSQUEDA
+# =========================================================
 def fuzzy_search(query: str, limit: int = 20):
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
@@ -786,12 +883,28 @@ def semantic_search(query: str, top_k: int = 20):
     if not catalog or index is None or not query:
         return []
     try:
-        resp = client.embeddings.create(
-            input=[query],
-            model="text-embedding-3-small",
-            timeout=REQUESTS_TIMEOUT
-        )
-        emb = np.array([resp.data[0].embedding]).astype("float32")
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                resp = client.embeddings.create(
+                    input=[query],
+                    model="text-embedding-3-small",
+                    timeout=REQUESTS_TIMEOUT
+                )
+                emb = np.array([resp.data[0].embedding]).astype("float32")
+                break
+            except RateLimitError as e:
+                if retry < max_retries - 1:
+                    wait_time = 2 ** retry
+                    logger.warning(f"RateLimitError en búsqueda semántica, reintentando en {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"RateLimitError persistente: {e}")
+                    return []
+            except Exception as e:
+                logger.error(f"Error en embeddings de búsqueda: {e}")
+                return []
+
         D, I = index.search(emb, top_k)
         results = []
         for dist, idx in zip(D[0], I[0]):
@@ -800,7 +913,7 @@ def semantic_search(query: str, top_k: int = 20):
                 results.append((catalog[idx], score))
         return results
     except Exception as e:
-        logger.error(f"Error en busqueda semantica: {e}")
+        logger.error(f"Error en búsqueda semántica: {e}")
         return []
 
 
@@ -817,7 +930,7 @@ SEARCH_ALIASES = {
     "nsu": "NSU",
     "gulf": "GULF",
     "yamalube": "YAMALUBE",
-    "zusuki": "suzuki"
+    "zusuki": "suzuki",
 }
 
 
@@ -864,7 +977,6 @@ def hybrid_search(query: str, limit: int = 15):
 # =========================================================
 # CARRITO
 # =========================================================
-
 def cart_add(phone: str, code: str, qty: int, name: str, price_ars: Decimal, price_usd: Decimal):
     if not phone or not code:
         return
@@ -958,7 +1070,6 @@ def cart_totals(phone: str):
 # =========================================================
 # LISTAS MASIVAS
 # =========================================================
-
 def parse_bulk_list(text: str):
     if not text:
         return []
@@ -991,7 +1102,6 @@ def is_bulk_list_request(text: str) -> tuple:
 
     is_bulk = (lines_with_qty >= 3) or (has_quote_intent and is_multiline and lines_with_qty >= 1)
     count = len(lines) if is_bulk else 0
-
     return is_bulk, count
 
 
@@ -1117,7 +1227,7 @@ def process_bulk_async(job: dict):
         with get_db_connection() as conn:
             conn.execute(
                 """
-                UPDATE bulk_jobs 
+                UPDATE bulk_jobs
                 SET processed_items=?, found_items=?, results_json=?, status=?, completed_at=?
                 WHERE job_id=?
                 """,
@@ -1136,7 +1246,7 @@ def process_bulk_async(job: dict):
                 "code": r["code"],
                 "name": r["found"],
                 "price_ars": r["price_unit"],
-                "price_usd": float(Decimal(str(r["price_unit"])) / DEFAULT_EXCHANGE),
+                "price_usd": float(Decimal(str(r["price_unit"])) / get_exchange_rate()),
                 "qty": int(r["quantity"])
             }
             for r in results
@@ -1166,7 +1276,7 @@ def bulk_worker():
         except Exception:
             continue
 
-# iniciar worker
+
 threading.Thread(target=bulk_worker, daemon=True).start()
 
 
@@ -1179,7 +1289,7 @@ def send_bulk_completion(phone: str, results: dict):
         total = results.get("total_quoted", 0)
 
         message = (
-            "Listo! Procese tu lista:\n\n"
+            "Listo! Procesé tu lista:\n\n"
             f"{found} productos encontrados\n"
             f"{not_found_count} sin coincidencia exacta\n\n"
             f"TOTAL: {format_price(Decimal(str(total)))}\n\n"
@@ -1197,9 +1307,8 @@ def send_bulk_completion(phone: str, results: dict):
         logger.error(f"Error enviando notificación: {e}")
 
 # =========================================================
-# COMANDOS SIMPLES (sin IA)
+# COMANDOS SIMPLES
 # =========================================================
-
 SIMPLE_COMMANDS = {
     "dale", "ok", "si", "sí", "agregá", "agregalos", "metelos", "sumalos", "confirmá",
     "ver carrito", "mostrar carrito", "mi carrito",
@@ -1215,22 +1324,21 @@ def is_simple_command(message: str) -> bool:
     if lower in SIMPLE_COMMANDS:
         return True
 
-    if len(lower.split()) <= 2 and lower in ["dale", "si", "ok", "agregá"]:
+    if len(lower.split()) <= 2 and lower in ["dale", "si", "sí", "ok", "agregá"]:
         return True
 
     return False
 
 # =========================================================
-# IA INTELIGENTE
+# IA MEJORADA (PROMPT EMPÁTICO)
 # =========================================================
-
 BUSINESS_CONTEXT = """
 TERCOM - Mayorista Motopartes Argentina
 
 ENVIOS:
 - CABA: 24-48hs
 - Interior: 3-5 dias
-- Gratis CABA >$100.000
+- Gratis CABA > $100.000
 
 PAGOS:
 - Transferencia
@@ -1240,42 +1348,58 @@ PAGOS:
 HORARIOS:
 - Lun-Vie: 9-18hs
 - Sab: 9-13hs
-"""
+""".strip()
 
 SMART_SYSTEM_PROMPT = f"""
 Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
-TU TRABAJO:
-1. SIEMPRE busca primero en el catalogo que te paso
-2. Si encontras productos, daselos con PRECIO del catalogo
-3. Si NO estan en catalogo, usa tu conocimiento general
-4. Amplia info tecnica que NO este en catalogo:
-   - Compatibilidades (que motos)
+=== PERSONALIDAD EMPATICA ===
+- Argentino natural: che, dale, mirá, vos (sin forzar)
+- Tolerante con errores: si el cliente escribe mal, entendelo igual
+- Empático: si nota frustración, tranquilizalo
+- Paciente: explicá las veces que haga falta
+- Proactivo: sugerí alternativas si algo no está
+
+=== TU TRABAJO ===
+1. SIEMPRE buscá primero en el catálogo que te paso
+2. Si encontrás productos, dáselos con PRECIO del catálogo
+3. Si NO están en catálogo, usá tu conocimiento general
+4. Ampliá info técnica que NO esté en catálogo:
+   - Compatibilidades (qué motos)
    - Especificaciones (recorrido, amperaje, viscosidad)
    - Comparaciones (diferencias entre productos)
    - Recomendaciones de uso
 
-REGLAS:
-- Precios SIEMPRE del catalogo (NUNCA inventes)
-- Si no tenes el precio, NO lo menciones
-- Info tecnica SI podes ampliarla con tu conocimiento
-- Pregunta detalles para asesorar mejor (modelo, año, uso)
-- Si no esta en catalogo, ofrece alternativa similar
+=== REGLAS DURAS ===
+✓ Precios SIEMPRE del catálogo (NUNCA inventes)
+✓ Si no tenés el precio, NO lo menciones
+✓ Info técnica SÍ podés ampliarla con tu conocimiento
+✓ Preguntá detalles para asesorar mejor (modelo, año, uso)
+✓ Si no está en catálogo, ofrecé alternativa similar
 
-NUNCA:
-- Inventes precios
-- Digas "tengo stock" si no esta en catalogo
-- Garantices compatibilidad sin estar seguro
+✗ NUNCA inventes precios
+✗ NUNCA digas "tengo stock" si no está en catálogo
+✗ NUNCA garantices compatibilidad sin estar seguro
 
-PERSONALIDAD:
-- Argentino: che, dale, mira, vos
-- Directo y claro
-- Respuestas CORTAS (2-4 lineas)
-- Habla natural, sin tecnicismos innecesarios
+=== TONO EMPATICO ===
+- Si escribe mal → entendelo
+- Si está confundido → "Tranqui, te ayudo"
+- Si pregunta lo mismo → "Dale, te lo repito"
+- Si no encuentra algo → "Ese específico no lo tengo, pero te puedo ofrecer X parecido"
+
+=== FORMATO DE RESPUESTA ===
+- Si hay producto en catálogo:
+  "Sí! Tengo el [PRODUCTO] a $[PRECIO].
+   [INFO TECNICA]
+   ¿Lo agregamos?"
+- Si NO hay:
+  "Ese modelo específico no lo tengo.
+   Te puedo ofrecer [ALTERNATIVA] que va bien.
+   ¿Te sirve?"
 
 {BUSINESS_CONTEXT}
 
-Sos vendedor que SABE de motos, no un robot.
+Sos vendedor que SABE de motos y ENTIENDE a la gente, no un robot.
 """.strip()
 
 
@@ -1365,7 +1489,7 @@ def generate_smart_ai_reply(phone: str, user_message: str, catalog_products: lis
             ])
             msgs.append({
                 "role": "assistant",
-                "content": f"(Productos encontrados en catalogo)\n{catalog_text}"
+                "content": f"(Productos encontrados en catálogo)\n{catalog_text}"
             })
 
         resp = client.chat.completions.create(
@@ -1380,27 +1504,38 @@ def generate_smart_ai_reply(phone: str, user_message: str, catalog_products: lis
 
         if not txt or len(txt) < 10:
             return "Uy, tuve un problema. ¿Me repetís?"
-
         return txt
 
     except Exception as e:
-        logger.error(f"IA fallo: {e}", exc_info=True)
+        logger.error(f"IA falló: {e}", exc_info=True)
         return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
 
 # =========================================================
 # AGENTE PRINCIPAL
 # =========================================================
-
 def run_agent(phone: str, user_message: str) -> str:
     if not phone or not user_message:
-        return "Error: mensaje vacio"
+        return "Error: mensaje vacío"
 
     save_message(phone, user_message, "user")
 
-    # 1. Detectar lista masiva
-    is_bulk, item_count = is_bulk_list_request(user_message)
+    # detectar intent
+    if is_bulk_list_request(user_message)[0]:
+        intent = "bulk_quote"
+    elif is_simple_command(user_message):
+        intent = "command"
+    elif any(kw in user_message.lower() for kw in ["precio", "cuanto", "tenes", "busco"]):
+        intent = "search"
+    elif any(kw in user_message.lower() for kw in ["agregar", "carrito", "pedido"]):
+        intent = "cart"
+    else:
+        intent = "chat"
 
+    # 1. Lista masiva
+    is_bulk, item_count = is_bulk_list_request(user_message)
     if is_bulk:
+        log_interaction(phone, user_message, "bulk_quote", item_count)
+
         if item_count < INSTANT_THRESHOLD:
             result = process_bulk_sync(phone, user_message)
             if result.get("success") and result.get("results"):
@@ -1409,7 +1544,7 @@ def run_agent(phone: str, user_message: str) -> str:
                         "code": r["code"],
                         "name": r["found"],
                         "price_ars": r["price_unit"],
-                        "price_usd": float(Decimal(str(r["price_unit"])) / DEFAULT_EXCHANGE),
+                        "price_usd": float(Decimal(str(r["price_unit"])) / get_exchange_rate()),
                         "qty": int(r["quantity"])
                     }
                     for r in result["results"]
@@ -1421,7 +1556,7 @@ def run_agent(phone: str, user_message: str) -> str:
             not_found = result.get("not_found_count", 0)
             total = result.get("total_quoted", 0)
 
-            lines = ["Listo! Aca esta tu cotizacion:\n"]
+            lines = ["Listo! Acá está tu cotización:\n"]
             lines.append(f"{found} productos encontrados")
             if not_found > 0:
                 lines.append(f"{not_found} sin stock")
@@ -1431,7 +1566,7 @@ def run_agent(phone: str, user_message: str) -> str:
             final = "\n".join(lines)
         else:
             if item_count < ASYNC_QUICK:
-                wait_msg = f"Dale! Son {item_count} productos, te preparo la cotizacion y vuelvo con vos en un minuto 👍"
+                wait_msg = f"Dale! Son {item_count} productos, te preparo la cotización y vuelvo con vos en un minuto 👍"
             elif item_count < ASYNC_MEDIUM:
                 wait_msg = (
                     f"Uh, lista grande! Son {item_count} productos 📋\n"
@@ -1440,11 +1575,10 @@ def run_agent(phone: str, user_message: str) -> str:
             else:
                 wait_msg = (
                     f"Tremenda lista che! {item_count} productos 😅\n"
-                    "Me va a llevar unos 4-5 minutos.\nSeguí navegando tranqui, te aviso."
+                    "Me va a llevar unos minutos.\nSeguí navegando tranqui, te aviso."
                 )
 
             job_id = create_bulk_job(phone, user_message, item_count)
-
             if job_id:
                 final = wait_msg
             else:
@@ -1455,6 +1589,7 @@ def run_agent(phone: str, user_message: str) -> str:
 
     # 2. Comando simple
     if is_simple_command(user_message):
+        log_interaction(phone, user_message, "command", 0)
         lower = user_message.lower().strip()
 
         if any(trig in lower for trig in ["dale", "ok", "si", "sí", "agregá", "agregalos"]):
@@ -1490,7 +1625,7 @@ def run_agent(phone: str, user_message: str) -> str:
         elif "carrito" in lower and ("ver" in lower or "mostrar" in lower or lower == "carrito"):
             items = cart_get(phone)
             if not items:
-                final = "Tu carrito está vacío. Nota: se limpia automáticamente cada 24hs."
+                final = "Tu carrito está vacío."
             else:
                 total, discount = cart_totals(phone)
                 lines = ["TU CARRITO:\n"]
@@ -1509,8 +1644,9 @@ def run_agent(phone: str, user_message: str) -> str:
         save_message(phone, final, "assistant")
         return final
 
-    # 3. DEFAULT: IA con búsqueda automática
+    # 3. DEFAULT: IA + búsqueda
     catalog_products = hybrid_search(user_message, limit=10)
+    log_interaction(phone, user_message, intent, len(catalog_products))
 
     if catalog_products:
         save_last_search(
@@ -1548,9 +1684,124 @@ def run_agent(phone: str, user_message: str) -> str:
     return final
 
 # =========================================================
-# HTTP - WEBHOOK TWILIO
+# API REST MODULAR
 # =========================================================
+@app.route("/api/cart/<phone>", methods=["GET"])
+def api_get_cart(phone):
+    try:
+        items = cart_get(phone)
+        total, discount = cart_totals(phone)
+        return jsonify({
+            "ok": True,
+            "phone": phone,
+            "items": [
+                {"code": code, "qty": q, "name": name, "price": float(price)}
+                for code, q, name, price in items
+            ],
+            "total": float(total),
+            "discount": float(discount)
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
+
+@app.route("/api/quote", methods=["POST"])
+def api_quote():
+    try:
+        data = request.get_json(force=True)
+        query = data.get("query", "")
+        limit = data.get("limit", 10)
+
+        if not query:
+            return jsonify({"ok": False, "error": "Falta query"}), 400
+
+        products = hybrid_search(query, limit=limit)
+
+        return jsonify({
+            "ok": True,
+            "query": query,
+            "results": [
+                {
+                    "code": p["code"],
+                    "name": p["name"],
+                    "price_ars": float(p["price_ars"]),
+                    "price_usd": float(p["price_usd"])
+                }
+                for p in products
+            ]
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/orders/<phone>", methods=["GET"])
+def api_get_orders(phone):
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT order_id, customer_name, total_ars, status, created_at "
+                "FROM orders WHERE phone=? ORDER BY created_at DESC LIMIT 10",
+                (phone,)
+            )
+            rows = cur.fetchall()
+
+            return jsonify({
+                "ok": True,
+                "phone": phone,
+                "orders": [
+                    {
+                        "order_id": r[0],
+                        "customer_name": r[1],
+                        "total_ars": r[2],
+                        "status": r[3],
+                        "created_at": r[4]
+                    }
+                    for r in rows
+                ]
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/analytics", methods=["GET"])
+def api_analytics():
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+
+            # Intents
+            cur.execute("""
+                SELECT intent_detected, COUNT(*) as count
+                FROM interactions
+                WHERE timestamp >= datetime('now', '-7 days')
+                GROUP BY intent_detected
+            """)
+            intents = [{"intent": r[0], "count": r[1]} for r in cur.fetchall()]
+
+            # Top búsquedas
+            cur.execute("""
+                SELECT message, COUNT(*) as count
+                FROM interactions
+                WHERE intent_detected = 'search' AND timestamp >= datetime('now', '-7 days')
+                GROUP BY message
+                ORDER BY count DESC
+                LIMIT 10
+            """)
+            top_searches = [{"query": r[0], "count": r[1]} for r in cur.fetchall()]
+
+            return jsonify({
+                "ok": True,
+                "period": "7_days",
+                "intents": intents,
+                "top_searches": top_searches
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+# =========================================================
+# WEBHOOK TWILIO
+# =========================================================
 @app.before_request
 def validate_twilio_signature():
     if request.path.rstrip("/") == "/webhook" and twilio_validator:
@@ -1558,7 +1809,7 @@ def validate_twilio_signature():
         url = request.url.replace("http://", "https://")
         params = request.form.to_dict()
         if not twilio_validator.validate(url, params, signature):
-            logger.warning(f"Firma Twilio invalida desde {request.remote_addr}")
+            logger.warning(f"Firma Twilio inválida desde {request.remote_addr}")
             return Response("Forbidden", status=403)
 
 
@@ -1570,13 +1821,13 @@ def whatsapp_webhook():
     if not from_number or not message_body:
         logger.warning("Webhook sin From o Body")
         resp = MessagingResponse()
-        resp.message("Error: mensaje vacio")
+        resp.message("Error: mensaje vacío")
         return str(resp)
 
     if not rate_limit_check(from_number):
         logger.warning(f"Rate limit excedido para {from_number}")
         resp = MessagingResponse()
-        resp.message("Ey, esperá un toque que me saturaste. Probá en un minuto.")
+        resp.message("Esperá un toque que me saturaste. Probá en un minuto.")
         return str(resp)
 
     logger.info(f"Mensaje recibido de {from_number}: {message_body[:100]}")
@@ -1594,30 +1845,37 @@ def whatsapp_webhook():
 
     return str(twiml)
 
-
+# =========================================================
+# HEALTHCHECK Y ROOT
+# =========================================================
 @app.route("/health", methods=["GET"])
 def health():
     catalog, index = get_catalog_and_index()
-    return {
+    exchange = get_exchange_rate()
+    return jsonify({
         "ok": True,
-        "service": "fran36",
+        "service": "fran37",
+        "version": "3.7",
         "model": MODEL_NAME,
         "catalog_size": len(catalog) if catalog else 0,
         "faiss_ready": index is not None,
+        "exchange_rate": float(exchange),
         "timestamp": datetime.now().isoformat()
-    }, 200
+    }), 200
 
 
 @app.route("/", methods=["GET"])
 def root():
-    return Response("Fran 3.6 - Bot Mayorista Inteligente", status=200, mimetype="text/plain")
+    return Response("Fran 3.7 - Bot Mayorista Inteligente Production-Ready", status=200, mimetype="text/plain")
 
-
+# =========================================================
+# MAIN
+# =========================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.6 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.7 en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
     catalog, _ = get_catalog_and_index()
-    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
+    logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
+    logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
-    
