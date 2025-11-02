@@ -1,19 +1,18 @@
 # coding: utf-8
 
 # =========================================================
-
-# Fran 3.8 - Bot Mayorista Inteligente COMPLETO
-
+# Fran 3.8 - Bot Mayorista Inteligente COMPLETO (CORREGIDO)
 # =========================================================
-
 # Mejoras v3.8:
-
-# Catálogo enriquecido (OEM, keywords, compatibilidad)
-# Multi-mensaje para listas largas
-# Respuestas expandidas mayoristas (hasta 500 productos)
-# FAISS persistente optimizado
-# Todas las funciones de 3.7 incluidas
-
+# - Catálogo enriquecido (OEM, keywords, compatibilidad)
+# - Multi-mensaje para listas largas
+# - Respuestas expandidas mayoristas (hasta 500 productos)
+# - FAISS persistente optimizado
+# - Fix de loops en mensajes largos
+# - Deduplicación de mensajes
+# - Cache de embeddings
+# - Timeouts en búsquedas async
+# - Sanitización de inputs
 # =========================================================
 
 import os
@@ -30,7 +29,7 @@ import pickle
 from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import lru_cache
-from contextlib import contextmanager  # Import corregido
+from contextlib import contextmanager
 from threading import Lock
 from queue import Queue
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
@@ -44,63 +43,23 @@ import faiss
 import numpy as np
 from dotenv import load_dotenv
 
-# ========================================
-# ✅ Envío seguro a WhatsApp sin duplicados
-# ========================================
-def send_whatsapp_message(to, body):
-    from twilio.rest import Client
-    import time
-    import os
-
-    if not body or not to:
-        return
-
-    TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-    TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-    TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
-
-    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-    # Evita reenvíos repetidos
-    if hasattr(send_whatsapp_message, "last_message") and send_whatsapp_message.last_message == body:
-        print("⚠️ Mensaje duplicado detectado, no se reenvía.")
-        return
-
-    send_whatsapp_message.last_message = body
-
-    # Divide mensajes largos
-    MAX_LEN = 1500
-    chunks = [body[i:i + MAX_LEN] for i in range(0, len(body), MAX_LEN)]
-
-    for chunk in chunks:
-        client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            body=chunk,
-            to=to
-        )
-        time.sleep(1.5)  # Pausa leve para Twilio
-        
 load_dotenv()
-app = Flask(__name__)  # CORREGIDO
+app = Flask(__name__)
 
 # =========================================================
-
 # LOGGER
-
 # =========================================================
 
-logger = logging.getLogger("fran38")  # CORREGIDO
+logger = logging.getLogger("fran38")
 logger.setLevel(logging.INFO)
 logger.propagate = False
 if not logger.handlers:
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))  # CORREGIDO
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
 
 # =========================================================
-
 # CONFIGURACIÓN
-
 # =========================================================
 
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -121,27 +80,26 @@ TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
 DB_PATH = os.environ.get("DB_PATH", "tercom.db")
 FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
 FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
+EMBEDDINGS_CACHE_PATH = os.environ.get("EMBEDDINGS_CACHE_PATH", "embeddings_cache.pkl")
 
 # Constantes 3.8
-
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "500"))
 MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "50"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "80"))
 
 # Umbrales async
-
 INSTANT_THRESHOLD = 20
 ASYNC_QUICK = 50
 ASYNC_MEDIUM = 100
 MAX_ITEMS = 200
+BULK_TIMEOUT = 300  # 5 minutos máximo para jobs async
+MAX_BULK_ITEMS = 200
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.8"}  # CORREGIDO
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.8"}
 
 # =========================================================
-
 # TWILIO
-
 # =========================================================
 
 try:
@@ -161,159 +119,24 @@ exchange_lock = Lock()
 bulk_queue = Queue()
 
 # Caché TC
-
 exchange_cache = {"rate": None, "timestamp": None}
 EXCHANGE_CACHE_TTL = 3600
 
 # Rate limit
-
 user_requests = defaultdict(list)
 RATE_LIMIT = 30
 RATE_WINDOW = 60
 
-# Caché catálogo
+# Deduplicación de mensajes
+message_dedup_cache = defaultdict(list)
+DEDUP_WINDOW = 5
 
+# Caché catálogo
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
 
 # =========================================================
-
-# DATABASE
-
-# =========================================================
-
-@contextmanager
-def get_db_connection():
-    conn = None
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo crear dir DB: {e}")
-
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        yield conn
-        conn.commit()
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        logger.error(f"DB error: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-def init_db():
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        try:
-            c.execute("PRAGMA journal_mode=WAL;")
-        except Exception as e:
-            logger.warning(f"No se pudo activar WAL: {e}")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone TEXT, message TEXT, role TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone ON conversations(phone, timestamp DESC)")
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS carts (
-                phone TEXT, code TEXT, quantity INTEGER, name TEXT,
-                price_ars TEXT, price_usd TEXT, created_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS user_state (
-                phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT,
-                last_price_ars TEXT, updated_at TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS search_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, products_json TEXT, query TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone ON search_history(phone, timestamp DESC)")
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS last_search (
-                phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS session_summary (
-                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned TEXT,
-                last_intent TEXT, message_count INTEGER DEFAULT 0, updated_at TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS customer_data (
-                phone TEXT PRIMARY KEY, name TEXT, address TEXT, notes TEXT,
-                created_at TEXT, updated_at TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
-                customer_address TEXT, items_json TEXT, total_ars TEXT,
-                status TEXT, created_at TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS bulk_jobs (
-                job_id TEXT PRIMARY KEY, phone TEXT, raw_list TEXT,
-                total_items INTEGER, processed_items INTEGER, found_items INTEGER,
-                results_json TEXT, status TEXT, created_at TEXT, completed_at TEXT
-            )
-        """)
-        
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS interactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, message TEXT, intent_detected TEXT,
-                products_count INTEGER, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone ON interactions(phone, timestamp DESC)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
-
-init_db()
-
-# =========================================================
-
-# ANALYTICS
-
-# =========================================================
-
-def log_interaction(phone, message, intent, products_count=0):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO interactions (phone, message, intent_detected, products_count, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (phone, message[:200], intent, products_count, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error logging interaction: {e}")
-
-# =========================================================
-
 # UTILS
-
 # =========================================================
 
 def strip_accents(s):
@@ -363,10 +186,191 @@ def validate_tercom_code(code):
         return True, normalized
     return False, s
 
+def sanitize_input(text, max_length=2000):
+    """Prevenir inyección y sobrecarga"""
+    if not text:
+        return ""
+    
+    # Limitar longitud
+    text = text[:max_length]
+    
+    # Permitir caracteres útiles para búsquedas de productos
+    # Mantener letras, números, espacios y signos de puntuación comunes
+    text = re.sub(r'[^\w\s\-.,;:()/áéíóúñÁÉÍÓÚÑ]', '', text, flags=re.UNICODE)
+    
+    return text.strip()
+
+def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
+    """Detecta si un mensaje es duplicado reciente"""
+    now = datetime.now().timestamp()
+    
+    # Limpiar mensajes viejos
+    message_dedup_cache[phone] = [
+        (msg, ts) for msg, ts in message_dedup_cache[phone]
+        if now - ts < window
+    ]
+    
+    # Verificar duplicado
+    for cached_msg, cached_ts in message_dedup_cache[phone]:
+        if cached_msg == message and (now - cached_ts) < window:
+            return True
+    
+    # Agregar al cache
+    message_dedup_cache[phone].append((message, now))
+    return False
+
+# =========================================================
+# DATABASE
 # =========================================================
 
-# TIPO DE CAMBIO CON CACHÉ
+@contextmanager
+def get_db_connection():
+    conn = None
+    try:
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"No se pudo crear dir DB: {e}")
 
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        yield conn
+        conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"DB error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+def init_db():
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        try:
+            c.execute("PRAGMA journal_mode=WAL;")
+        except Exception as e:
+            logger.warning(f"No se pudo activar WAL: {e}")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                phone TEXT, message TEXT, role TEXT, timestamp TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone_timestamp ON conversations(phone, timestamp DESC)")
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS carts (
+                phone TEXT, code TEXT, quantity INTEGER, name TEXT,
+                price_ars TEXT, price_usd TEXT, created_at TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS user_state (
+                phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT,
+                last_price_ars TEXT, updated_at TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS search_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT, products_json TEXT, query TEXT, timestamp TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone_timestamp ON search_history(phone, timestamp DESC)")
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS last_search (
+                phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS session_summary (
+                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned TEXT,
+                last_intent TEXT, message_count INTEGER DEFAULT 0, updated_at TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS customer_data (
+                phone TEXT PRIMARY KEY, name TEXT, address TEXT, notes TEXT,
+                created_at TEXT, updated_at TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
+                customer_address TEXT, items_json TEXT, total_ars TEXT,
+                status TEXT, created_at TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS bulk_jobs (
+                job_id TEXT PRIMARY KEY, phone TEXT, raw_list TEXT,
+                total_items INTEGER, processed_items INTEGER, found_items INTEGER,
+                results_json TEXT, status TEXT, created_at TEXT, completed_at TEXT
+            )
+        """)
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS interactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT, message TEXT, intent_detected TEXT,
+                products_count INTEGER, timestamp TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone_timestamp ON interactions(phone, timestamp DESC)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
+        
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS performance_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT, intent TEXT, duration_ms INTEGER,
+                results_count INTEGER, timestamp TEXT
+            )
+        """)
+
+init_db()
+
+# =========================================================
+# ANALYTICS
+# =========================================================
+
+def log_interaction(phone, message, intent, products_count=0):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO interactions (phone, message, intent_detected, products_count, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (phone, message[:200], intent, products_count, datetime.now().isoformat())
+            )
+    except Exception as e:
+        logger.error(f"Error logging interaction: {e}")
+
+def log_performance(phone, intent, duration, results_count):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO performance_metrics (phone, intent, duration_ms, results_count, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (phone, intent, int(duration * 1000), results_count, datetime.now().isoformat())
+            )
+    except Exception as e:
+        logger.error(f"Error logging metrics: {e}")
+
+# =========================================================
+# TIPO DE CAMBIO CON CACHÉ
 # =========================================================
 
 def get_exchange_rate():
@@ -393,9 +397,7 @@ def get_exchange_rate():
             return DEFAULT_EXCHANGE
 
 # =========================================================
-
 # RATE LIMIT
-
 # =========================================================
 
 def rate_limit_check(phone):
@@ -413,9 +415,7 @@ def rate_limit_check(phone):
         return True
 
 # =========================================================
-
 # PERSISTENCIA
-
 # =========================================================
 
 def save_message(phone, msg, role):
@@ -648,9 +648,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
         return None
 
 # =========================================================
-
-# CATÁLOGO ENRIQUECIDO
-
+# CATÁLOGO ENRIQUECIDO CON CACHE DE EMBEDDINGS
 # =========================================================
 
 @lru_cache(maxsize=1)
@@ -780,28 +778,43 @@ def load_faiss_index():
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
             return index, catalog
         else:
-            # 🔧 FIX agregado: manejar caso sin archivos
-            logger.warning("FAISS no encontrado en disco, se construirá de cero.")
+            logger.warning("FAISS no encontrado en disco, se construira de cero.")
             return None, None
     except Exception as e:
         logger.warning(f"No se pudo cargar FAISS desde disco: {e}")
         return None, None
-        
-def _build_faiss_index_from_catalog(catalog):
-    try:
-        if not catalog:
-            return None, 0
 
-        texts = [c["search_text"] for c in catalog]
-        if not texts:
-            return None, 0
-        
+def generate_embeddings_with_cache(texts):
+    """Genera embeddings con cache para evitar regenerarlos"""
+    cache = {}
+    
+    # Intentar cargar cache existente
+    if os.path.exists(EMBEDDINGS_CACHE_PATH):
+        try:
+            with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
+                cache = pickle.load(f)
+                logger.info(f"Cache de embeddings cargado: {len(cache)} textos")
+        except Exception as e:
+            logger.warning(f"Error cargando cache de embeddings: {e}")
+    
+    # Verificar qué textos necesitan embeddings nuevos
+    texts_to_embed = []
+    text_indices = []
+    
+    for idx, text in enumerate(texts):
+        if text not in cache:
+            texts_to_embed.append(text)
+            text_indices.append(idx)
+    
+    # Generar embeddings solo para textos nuevos
+    if texts_to_embed:
+        logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
         vectors = []
         batch = 512
         max_retries = 3
         
-        for i in range(0, len(texts), batch):
-            chunk = texts[i:i + batch]
+        for i in range(0, len(texts_to_embed), batch):
+            chunk = texts_to_embed[i:i + batch]
             
             for retry in range(max_retries):
                 try:
@@ -810,7 +823,13 @@ def _build_faiss_index_from_catalog(catalog):
                         model="text-embedding-3-small",
                         timeout=REQUESTS_TIMEOUT
                     )
-                    vectors.extend([d.embedding for d in resp.data])
+                    chunk_vectors = [d.embedding for d in resp.data]
+                    vectors.extend(chunk_vectors)
+                    
+                    # Actualizar cache
+                    for text, vec in zip(chunk, chunk_vectors):
+                        cache[text] = vec
+                    
                     break
                 except RateLimitError as e:
                     if retry < max_retries - 1:
@@ -820,6 +839,37 @@ def _build_faiss_index_from_catalog(catalog):
                     else:
                         logger.error(f"RateLimitError persistente: {e}")
                         raise
+        
+        # Guardar cache actualizado
+        try:
+            with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
+                pickle.dump(cache, f)
+            logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
+        except Exception as e:
+            logger.warning(f"Error guardando cache de embeddings: {e}")
+    
+    # Construir lista final de vectores en el orden correcto
+    final_vectors = []
+    for text in texts:
+        if text in cache:
+            final_vectors.append(cache[text])
+        else:
+            logger.error(f"Texto sin embedding: {text[:50]}")
+            # Vector cero como fallback
+            final_vectors.append([0.0] * 1536)
+    
+    return final_vectors
+
+def _build_faiss_index_from_catalog(catalog):
+    try:
+        if not catalog:
+            return None, 0
+
+        texts = [c["search_text"] for c in catalog]
+        if not texts:
+            return None, 0
+        
+        vectors = generate_embeddings_with_cache(texts)
         
         if not vectors:
             return None, 0
@@ -866,9 +916,7 @@ _ = get_catalog_and_index()
 logger.info("Catalogo enriquecido e indice FAISS listos.")
 
 # =========================================================
-
 # BÚSQUEDA HÍBRIDA
-
 # =========================================================
 
 SEARCH_ALIASES = {
@@ -912,12 +960,11 @@ def fuzzy_search(query, limit=200):
         logger.error(f"Error en fuzzy_search: {e}")
         return []
 
-def semantic_search(query, top_k=400):
+def semantic_search(query, top_k=400, max_retries=3):
     catalog, index = get_catalog_and_index()
     if not catalog or index is None or not query:
         return []
     try:
-        max_retries = 3
         for retry in range(max_retries):
             try:
                 resp = client.embeddings.create(
@@ -947,11 +994,15 @@ def semantic_search(query, top_k=400):
         logger.error(f"Error en busqueda semantica: {e}")
         return []
 
-def hybrid_search(query, limit=120):
+@lru_cache(maxsize=100)
+def cached_hybrid_search(query_normalized, limit=120):
+    """Cache de búsquedas frecuentes"""
+    return hybrid_search_impl(query_normalized, limit)
+
+def hybrid_search_impl(query, limit=120):
     if not query:
         return []
     try:
-        query = normalize_search_query(query)
         fuzzy_results = fuzzy_search(query, limit=200)
         semantic_results = semantic_search(query, top_k=400)
 
@@ -978,10 +1029,15 @@ def hybrid_search(query, limit=120):
         logger.error(f"Error en hybrid_search: {e}")
         return []
 
+def hybrid_search(query, limit=120):
+    """Wrapper con cache"""
+    if not query:
+        return []
+    query_normalized = normalize_search_query(query)
+    return cached_hybrid_search(query_normalized, limit)
+
 # =========================================================
-
-# CARRITO (de 3.7)
-
+# CARRITO
 # =========================================================
 
 def cart_add(phone, code, qty, name, price_ars, price_usd):
@@ -1070,9 +1126,7 @@ def cart_totals(phone):
     return final, discount.quantize(Decimal("0.01"))
 
 # =========================================================
-
-# LISTAS MASIVAS
-
+# LISTAS MASIVAS CON TIMEOUT
 # =========================================================
 
 def parse_bulk_list(text):
@@ -1092,6 +1146,12 @@ def parse_bulk_list(text):
             parsed.append((qty, product_name))
         else:
             parsed.append((1, line))
+    
+    # Limitar número de items
+    if len(parsed) > MAX_BULK_ITEMS:
+        logger.warning(f"Lista truncada: {len(parsed)} -> {MAX_BULK_ITEMS}")
+        return parsed[:MAX_BULK_ITEMS]
+    
     return parsed
 
 def is_bulk_list_request(text):
@@ -1174,6 +1234,7 @@ def process_bulk_async(job):
         job_id = job["job_id"]
         phone = job["phone"]
         raw_list = job["raw_list"]
+        start_time = time.time()
 
         logger.info(f"Procesando job {job_id}")
         
@@ -1182,6 +1243,11 @@ def process_bulk_async(job):
         total_quoted = Decimal("0")
         
         for i, (requested_qty, product_name) in enumerate(parsed_items):
+            # Timeout check
+            if time.time() - start_time > BULK_TIMEOUT:
+                logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
+                break
+            
             matches = hybrid_search(product_name, limit=3)
             if matches:
                 best = matches[0]
@@ -1269,8 +1335,8 @@ def send_bulk_completion(phone, results):
         
         message = f"""Listo! Procese tu lista:
 
-{found} productos encontrados
-{not_found_count} sin coincidencia exacta
+Found {found} productos encontrados
+Not found {not_found_count} sin coincidencia exacta
 
 TOTAL: {format_price(Decimal(str(total)))}
 
@@ -1282,41 +1348,64 @@ Los agregamos al carrito? Decime: dale"""
             to=phone
         )
         
-        logger.info(f"Notificación enviada a {phone}")
+        logger.info(f"Notificacion enviada a {phone}")
     except Exception as e:
-        logger.error(f"Error enviando notificación: {e}")
+        logger.error(f"Error enviando notificacion: {e}")
 
 # =========================================================
-
-# MULTI-MENSAJE
-
+# MULTI-MENSAJE MEJORADO
 # =========================================================
 
 def send_long_message(phone, text, chunk_size=1300):
+    """Envia mensajes largos divididos en chunks SIN crear loops"""
     if not twilio_rest_client or not phone:
-        return
+        logger.error("Twilio client no disponible")
+        return False
+    
+    if not text:
+        return True
+    
     try:
+        # Dividir en chunks
         parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        failed_chunks = []
+        
         for idx, part in enumerate(parts):
-            prefix = "" if len(parts) == 1 else f"({idx + 1}/{len(parts)})\n"
-            twilio_rest_client.messages.create(
-                from_=TWILIO_WHATSAPP_FROM,
-                body=prefix + part,
-                to=phone
-            )
-            time.sleep(1.5)
-        logger.info(f"Enviados {len(parts)} mensajes a {phone}")
+            try:
+                # Enviar directamente por REST API (no TwiML)
+                message = twilio_rest_client.messages.create(
+                    from_=TWILIO_WHATSAPP_FROM,
+                    body=f"({idx + 1}/{len(parts)})\n{part}" if len(parts) > 1 else part,
+                    to=phone
+                )
+                logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
+                
+                # Pausa entre mensajes para evitar rate limits
+                if idx < len(parts) - 1:
+                    time.sleep(1.5)
+                    
+            except Exception as e:
+                logger.error(f"Error enviando chunk {idx + 1}: {e}")
+                failed_chunks.append(idx)
+                continue
+        
+        if failed_chunks:
+            logger.warning(f"Chunks fallidos: {failed_chunks}")
+            return False
+        
+        logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
+        return True
+        
     except Exception as e:
         logger.error(f"Error en send_long_message: {e}")
+        return False
 
 # =========================================================
-
 # COMANDOS SIMPLES
-
 # =========================================================
 
 SIMPLE_COMMANDS = {
-    "dale", "ok", "si", "agregá", "agregalos", "metelos", "sumalos",
+    "dale", "ok", "si", "agrega", "agregalos", "metelos", "sumalos",
     "ver carrito", "mostrar carrito", "mi carrito",
     "vaciar carrito", "limpiar carrito", "borrar carrito"
 }
@@ -1329,42 +1418,36 @@ def is_simple_command(message):
     if lower in SIMPLE_COMMANDS:
         return True
 
-    if len(lower.split()) <= 2 and lower in ["dale", "si", "ok", "agregá"]:
+    if len(lower.split()) <= 2 and lower in ["dale", "si", "ok", "agrega"]:
         return True
 
     return False
 
 # =========================================================
-
 # IA EMPÁTICA
-
 # =========================================================
 
 BUSINESS_CONTEXT = """
 TERCOM - Mayorista Motopartes Argentina
 
 ENVIOS:
-
 - CABA: 24-48hs
 - Interior: 3-5 dias
 - Gratis CABA >$100.000
 
 PAGOS:
-
 - Transferencia
 - Efectivo (retiro local)
 - Cheque (clientes habituales)
 
 HORARIOS:
-
 - Lun-Vie: 9-18hs
 - Sab: 9-13hs
-  """
+"""
 
 SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
 === PERSONALIDAD EMPATICA ===
-
 - Argentino natural: che, dale, mira, vos
 - Tolerante con errores: si el cliente escribe mal, entendelo igual
 - Empatico: si nota frustracion, tranquilizalo
@@ -1372,18 +1455,16 @@ SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Ar
 - Proactivo: sugeri alternativas si algo no esta
 
 === TU TRABAJO ===
-
 1. SIEMPRE busca primero en el catalogo que te paso
-1. Si encontras productos, daselos con PRECIO del catalogo
-1. Si NO estan en catalogo, usa tu conocimiento general
-1. Amplia info tecnica que NO este en catalogo:
-- Compatibilidades (que motos)
-- Especificaciones (recorrido, amperaje, viscosidad)
-- Comparaciones (diferencias entre productos)
-- Recomendaciones de uso
+2. Si encontras productos, daselos con PRECIO del catalogo
+3. Si NO estan en catalogo, usa tu conocimiento general
+4. Amplia info tecnica que NO este en catalogo:
+   - Compatibilidades (que motos)
+   - Especificaciones (recorrido, amperaje, viscosidad)
+   - Comparaciones (diferencias entre productos)
+   - Recomendaciones de uso
 
 === REGLAS DURAS ===
-
 - Precios SIEMPRE del catalogo (NUNCA inventes)
 - Si no tenes el precio, NO lo menciones
 - Info tecnica SI podes ampliarla con tu conocimiento
@@ -1391,14 +1472,12 @@ SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Ar
 - Si no esta en catalogo, ofrece alternativa similar
 
 NUNCA:
-
 - Inventes precios
 - Digas "tengo stock" si no esta en catalogo
 - Garantices compatibilidad sin estar seguro
 
 === TONO EMPATICO ===
 Cuando el cliente:
-
 - Escribe mal → Entendelo igual sin corregirlo
 - Esta confundido → "Tranqui, te ayudo a encontrar lo que necesitas"
 - Pregunta lo mismo → "Dale, te repito sin drama"
@@ -1513,14 +1592,25 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         return "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
 
 # =========================================================
-
-# FORMATO RESULTADOS
-
+# FORMATO RESULTADOS CON EMOJIS
 # =========================================================
+
+CATEGORY_EMOJIS = {
+    "aceite": "OIL",
+    "filtro": "WRENCH",
+    "bateria": "BATTERY",
+    "neumatico": "MOTORCYCLE",
+    "cadena": "CHAIN",
+    "bujia": "SPARK",
+    "pastilla": "BRAKE",
+    "amortiguador": "SHOCK",
+    "kit": "PACKAGE",
+}
 
 def format_search_results(products):
     lines = []
     for i, p in enumerate(products, 1):
+        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "PACKAGE")
         price = format_price(p.get("price_ars", 0))
         name = p.get("name", "").strip()
         code = p.get("code", "")
@@ -1532,19 +1622,19 @@ def format_search_results(products):
         if model:
             extra.append(model)
         extra_txt = f" - {' / '.join(extra)}" if extra else ""
-        lines.append(f"{i}. {name} ({code}){extra_txt} - {price}")
-    return "\n".join(lines)
+        
+        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   PRICE {price}")
+    return "\n\n".join(lines)
 
 # =========================================================
-
 # AGENTE PRINCIPAL
-
 # =========================================================
 
 def run_agent(phone, user_message):
     if not phone or not user_message:
         return "Error: mensaje vacio"
 
+    start_time = time.time()
     save_message(phone, user_message, "user")
 
     # Detectar intent
@@ -1598,9 +1688,9 @@ def run_agent(phone, user_message):
             if item_count < ASYNC_QUICK:
                 wait_msg = f"Dale! Son {item_count} productos, te preparo la cotizacion y vuelvo con vos en un minuto"
             elif item_count < ASYNC_MEDIUM:
-                wait_msg = f"Uh, lista grande! Son {item_count} productos\nDame 2-3 minutos que te armo todo y te aviso."
+                wait_msg = f"Uh, lista grande! Son {item_count} productos\nDame 2-3 minutos que te armo todo y te aviso"
             else:
-                wait_msg = f"Tremenda lista che! {item_count} productos\nMe va a llevar unos 4-5 minutos.\nSegui navegando tranqui, te aviso."
+                wait_msg = f"Tremenda lista che! {item_count} productos\nMe va a llevar unos 4-5 minutos\nSegui navegando tranqui, te aviso"
             
             job_id = create_bulk_job(phone, user_message, item_count)
             
@@ -1608,6 +1698,10 @@ def run_agent(phone, user_message):
                 final = wait_msg
             else:
                 final = "Uy, tuve un problema. Me mandas la lista de nuevo?"
+        
+        # Log performance
+        elapsed = time.time() - start_time
+        log_performance(phone, intent, elapsed, item_count)
         
         save_message(phone, final, "assistant")
         return final
@@ -1617,10 +1711,10 @@ def run_agent(phone, user_message):
         log_interaction(phone, user_message, "command", 0)
         lower = user_message.lower().strip()
         
-        if any(trig in lower for trig in ["dale", "ok", "si", "agregá", "agregalos"]):
+        if any(trig in lower for trig in ["dale", "ok", "si", "agrega", "agregalos"]):
             last = get_last_search(phone)
             if not last or not last.get("products"):
-                final = "No tengo productos recientes para agregar. Busca algo primero."
+                final = "No tengo productos recientes para agregar. Busca algo primero"
             else:
                 catalog, _ = get_catalog_and_index()
                 added_count = 0
@@ -1640,7 +1734,7 @@ def run_agent(phone, user_message):
                             total_added += price_ars * qty
                 
                 if added_count > 0:
-                    final = f"Listo! Agregue {added_count} items al carrito por {format_price(total_added)}. Pasame tus datos para el presupuesto: nombre, direccion y telefono."
+                    final = f"Listo! Agregue {added_count} items al carrito por {format_price(total_added)}.\n\nPasame tus datos para el presupuesto: nombre, direccion y telefono."
                 else:
                     final = "No pude agregar los productos al carrito."
         
@@ -1653,7 +1747,7 @@ def run_agent(phone, user_message):
                 lines = ["TU CARRITO:\n"]
                 for code, q, name, price in items:
                     subtotal = (price * q).quantize(Decimal("0.01"))
-                    lines.append(f"- {q}x {name} = {format_price(subtotal)}")
+                    lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
                 lines.append(f"\nTOTAL: {format_price(total)}")
                 final = "\n".join(lines)
         
@@ -1663,6 +1757,9 @@ def run_agent(phone, user_message):
         
         else:
             final = "Hola! Soy Fran de Tercom. Que estas buscando?"
+        
+        elapsed = time.time() - start_time
+        log_performance(phone, intent, elapsed, 0)
         
         save_message(phone, final, "assistant")
         return final
@@ -1697,36 +1794,44 @@ def run_agent(phone, user_message):
 
     if total == 0:
         final = (
-            "No encontre ese repuesto en el catalogo.\n"
+            "No encontre ese repuesto en el catalogo.\n\n"
             "Pasame marca, modelo y año de la moto y te busco lo mas parecido."
         )
+        elapsed = time.time() - start_time
+        log_performance(phone, intent, elapsed, 0)
         save_message(phone, final, "assistant")
         return final
 
     # Si hay MUCHOS → modo listado
     if total > MAX_PRODUCTS_FOR_LLM:
         header = (
-            f"Encontre *{total} productos* para: {user_message}\n"
+            f"Encontre *{total} productos* para: {user_message}\n\n"
             "Te los mando en partes asi WhatsApp no los corta"
         )
         chunks = [catalog_products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, total, PRODUCTS_PER_CHUNK)]
         full_text = [header]
         for idx, ch in enumerate(chunks, 1):
-            full_text.append(f"\nBloque {idx}/{len(chunks)} ({len(ch)} items)")
+            full_text.append(f"\n━━━ Bloque {idx}/{len(chunks)} ({len(ch)} items) ━━━")
             full_text.append(format_search_results(ch))
         final = "\n".join(full_text)
+        
+        elapsed = time.time() - start_time
+        log_performance(phone, intent, elapsed, total)
+        
         save_message(phone, f"[listado largo {total}]", "assistant")
         return final
 
     # Si son pocos → IA
     final = generate_smart_ai_reply(phone, user_message, catalog_products)
+    
+    elapsed = time.time() - start_time
+    log_performance(phone, intent, elapsed, total)
+    
     save_message(phone, final, "assistant")
     return final
 
 # =========================================================
-
 # API REST
-
 # =========================================================
 
 @app.route("/api/cart/<phone>", methods=["GET"])
@@ -1840,9 +1945,7 @@ def api_analytics():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 # =========================================================
-
-# WEBHOOK
-
+# WEBHOOK CORREGIDO (SIN LOOPS)
 # =========================================================
 
 @app.before_request
@@ -1860,64 +1963,48 @@ def whatsapp_webhook():
     from_number = request.form.get("From", "")
     message_body = request.form.get("Body", "").strip()
 
+    # Log detallado para debug
+    logger.info(f"=== WEBHOOK RECIBIDO ===")
+    logger.info(f"From: {from_number}")
+    logger.info(f"Body: {message_body[:100]}")
+    logger.info(f"MessageSid: {request.form.get('MessageSid')}")
+    logger.info(f"========================")
+
+    # Validacion basica
     if not from_number or not message_body:
         logger.warning("Webhook sin From o Body")
-        resp = MessagingResponse()
-        resp.message("Error: mensaje vacio")
-        return str(resp)
+        return Response("", status=200)
 
+    # Sanitizar entrada
+    message_body = sanitize_input(message_body)
+
+    # Proteccion contra duplicados
+    if is_duplicate_message(from_number, message_body):
+        logger.info(f"Mensaje duplicado ignorado de {from_number}")
+        return Response("", status=200)
+
+    # Rate limiting
     if not rate_limit_check(from_number):
         logger.warning(f"Rate limit excedido para {from_number}")
         resp = MessagingResponse()
-        resp.message("Espera un toque que me saturaste. Proba en un minuto.")
+        resp.message("Espera un toque, me saturaste. Proba en un minuto.")
         return str(resp)
 
-    logger.info(f"Mensaje recibido de {from_number}: {message_body[:100]}")
+    logger.info(f"Procesando mensaje de {from_number}: {message_body[:100]}")
 
+    # Procesar mensaje
     try:
         reply = run_agent(from_number, message_body)
     except Exception as e:
         logger.error(f"Error ejecutando agente: {e}", exc_info=True)
         reply = "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
 
-    # Multi-mensaje si es muy largo
+    # Enviar respuesta
     if len(reply) > 1300:
-        send_long_message(from_number, reply)
-        twiml = MessagingResponse()
-        twiml.message("Te mande la respuesta en varios mensajes")
-        return str(twiml)
-    else:
-        twiml = MessagingResponse()
-        twiml.message(reply)
-        logger.info(f"Respuesta enviada a {from_number}: {reply[:100]}")
-        return str(twiml)
-
-@app.route("/health", methods=["GET"])
-def health():
-    catalog, index = get_catalog_and_index()
-    exchange = get_exchange_rate()
-
-    return jsonify({
-        "ok": True,
-        "service": "fran38",
-        "version": "3.8",
-        "model": MODEL_NAME,
-        "catalog_size": len(catalog) if catalog else 0,
-        "faiss_ready": index is not None,
-        "exchange_rate": float(exchange),
-        "timestamp": datetime.now().isoformat()
-    }), 200
-
-@app.route("/", methods=["GET"])
-def root():
-    return Response("Fran 3.8 - Bot Mayorista Inteligente (Catalogo Enriquecido + Multi-Mensaje)", status=200, mimetype="text/plain")
-
-if __name__ == "__main__":  # CORREGIDO
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.8 en puerto {port}")
-    logger.info(f"Modelo LLM: {MODEL_NAME}")
-    catalog, _ = get_catalog_and_index()
-    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
-    logger.info(f"TC inicial: {get_exchange_rate()}")
-    app.run(host="0.0.0.0", port=port, debug=False)
-    
+        # Mensaje largo: usar REST API directamente
+        success = send_long_message(from_number, reply)
+        if not success:
+            # Fallback si falla el envio
+            twiml = MessagingResponse()
+            twiml.message("Tuve un problema enviando la respuesta completa. Proba de nuevo.")
+            return str(twiml)
