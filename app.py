@@ -1915,14 +1915,14 @@ def api_analytics():
             top_searches = [{"query": r[0], "count": r[1]} for r in cur.fetchall()]
             
             return jsonify({
-    "ok": True,
-    "period": "7_days",
-    "intents": intents,
-    "top_searches": top_searches
-})
-except Exception as e:
-    return jsonify({"ok": False, "error": str(e)}), 500
-
+                "ok": True,
+                "period": "7_days",
+                "intents": intents,
+                "top_searches": top_searches
+            })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+        
 # =========================================================
 # WEBHOOK CORREGIDO CON DEBUG MEJORADO
 # =========================================================
