@@ -968,7 +968,7 @@ def semantic_search(query, top_k=400, max_retries=3):
                     logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time}s...")
                     time.sleep(wait_time)
                 else:
-                    logger.error  logger.error(f"RateLimitError persistente: {e}")
+                    logger.error(f"RateLimitError persistente: {e}")
                     return []
 
         D, I = index.search(emb, top_k)
