@@ -1,5 +1,3 @@
-# coding: utf-8
-
 # =========================================================
 # Fran 3.8 - Bot Mayorista Inteligente COMPLETO (CORREGIDO)
 # =========================================================
@@ -13,6 +11,7 @@
 # - Cache de embeddings
 # - Timeouts en búsquedas async
 # - Sanitización de inputs
+# - Debug mejorado
 # =========================================================
 
 import os
@@ -93,7 +92,7 @@ INSTANT_THRESHOLD = 20
 ASYNC_QUICK = 50
 ASYNC_MEDIUM = 100
 MAX_ITEMS = 200
-BULK_TIMEOUT = 300  # 5 minutos máximo para jobs async
+BULK_TIMEOUT = 300
 MAX_BULK_ITEMS = 200
 
 REQUEST_HEADERS = {"User-Agent": "FranBot/3.8"}
@@ -112,6 +111,17 @@ except Exception:
 twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
+
+# Verificación de configuración
+logger.info("=" * 60)
+logger.info("VERIFICANDO CONFIGURACIÓN")
+logger.info(f"TWILIO_ACCOUNT_SID: {'OK' if TWILIO_ACCOUNT_SID else 'FALTA'}")
+logger.info(f"TWILIO_AUTH_TOKEN: {'OK' if TWILIO_AUTH_TOKEN else 'FALTA'}")
+logger.info(f"TWILIO_WHATSAPP_FROM: {TWILIO_WHATSAPP_FROM if TWILIO_WHATSAPP_FROM else 'FALTA'}")
+logger.info(f"OPENAI_API_KEY: {'OK' if OPENAI_API_KEY else 'FALTA'}")
+logger.info(f"twilio_rest_available: {twilio_rest_available}")
+logger.info(f"twilio_rest_client: {'Inicializado' if twilio_rest_client else 'NULL'}")
+logger.info("=" * 60)
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 cart_lock = Lock()
@@ -187,35 +197,21 @@ def validate_tercom_code(code):
     return False, s
 
 def sanitize_input(text, max_length=2000):
-    """Prevenir inyección y sobrecarga"""
     if not text:
         return ""
-    
-    # Limitar longitud
     text = text[:max_length]
-    
-    # Permitir caracteres útiles para búsquedas de productos
-    # Mantener letras, números, espacios y signos de puntuación comunes
     text = re.sub(r'[^\w\s\-.,;:()/áéíóúñÁÉÍÓÚÑ]', '', text, flags=re.UNICODE)
-    
     return text.strip()
 
 def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
-    """Detecta si un mensaje es duplicado reciente"""
     now = datetime.now().timestamp()
-    
-    # Limpiar mensajes viejos
     message_dedup_cache[phone] = [
         (msg, ts) for msg, ts in message_dedup_cache[phone]
         if now - ts < window
     ]
-    
-    # Verificar duplicado
     for cached_msg, cached_ts in message_dedup_cache[phone]:
         if cached_msg == message and (now - cached_ts) < window:
             return True
-    
-    # Agregar al cache
     message_dedup_cache[phone].append((message, now))
     return False
 
@@ -785,10 +781,8 @@ def load_faiss_index():
         return None, None
 
 def generate_embeddings_with_cache(texts):
-    """Genera embeddings con cache para evitar regenerarlos"""
     cache = {}
     
-    # Intentar cargar cache existente
     if os.path.exists(EMBEDDINGS_CACHE_PATH):
         try:
             with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
@@ -797,7 +791,6 @@ def generate_embeddings_with_cache(texts):
         except Exception as e:
             logger.warning(f"Error cargando cache de embeddings: {e}")
     
-    # Verificar qué textos necesitan embeddings nuevos
     texts_to_embed = []
     text_indices = []
     
@@ -806,7 +799,6 @@ def generate_embeddings_with_cache(texts):
             texts_to_embed.append(text)
             text_indices.append(idx)
     
-    # Generar embeddings solo para textos nuevos
     if texts_to_embed:
         logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
         vectors = []
@@ -826,7 +818,6 @@ def generate_embeddings_with_cache(texts):
                     chunk_vectors = [d.embedding for d in resp.data]
                     vectors.extend(chunk_vectors)
                     
-                    # Actualizar cache
                     for text, vec in zip(chunk, chunk_vectors):
                         cache[text] = vec
                     
@@ -840,7 +831,6 @@ def generate_embeddings_with_cache(texts):
                         logger.error(f"RateLimitError persistente: {e}")
                         raise
         
-        # Guardar cache actualizado
         try:
             with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
                 pickle.dump(cache, f)
@@ -848,14 +838,12 @@ def generate_embeddings_with_cache(texts):
         except Exception as e:
             logger.warning(f"Error guardando cache de embeddings: {e}")
     
-    # Construir lista final de vectores en el orden correcto
     final_vectors = []
     for text in texts:
         if text in cache:
             final_vectors.append(cache[text])
         else:
             logger.error(f"Texto sin embedding: {text[:50]}")
-            # Vector cero como fallback
             final_vectors.append([0.0] * 1536)
     
     return final_vectors
@@ -980,7 +968,7 @@ def semantic_search(query, top_k=400, max_retries=3):
                     logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time}s...")
                     time.sleep(wait_time)
                 else:
-                    logger.error(f"RateLimitError persistente: {e}")
+                    logger.error  logger.error(f"RateLimitError persistente: {e}")
                     return []
 
         D, I = index.search(emb, top_k)
@@ -996,7 +984,6 @@ def semantic_search(query, top_k=400, max_retries=3):
 
 @lru_cache(maxsize=100)
 def cached_hybrid_search(query_normalized, limit=120):
-    """Cache de búsquedas frecuentes"""
     return hybrid_search_impl(query_normalized, limit)
 
 def hybrid_search_impl(query, limit=120):
@@ -1030,7 +1017,6 @@ def hybrid_search_impl(query, limit=120):
         return []
 
 def hybrid_search(query, limit=120):
-    """Wrapper con cache"""
     if not query:
         return []
     query_normalized = normalize_search_query(query)
@@ -1147,7 +1133,6 @@ def parse_bulk_list(text):
         else:
             parsed.append((1, line))
     
-    # Limitar número de items
     if len(parsed) > MAX_BULK_ITEMS:
         logger.warning(f"Lista truncada: {len(parsed)} -> {MAX_BULK_ITEMS}")
         return parsed[:MAX_BULK_ITEMS]
@@ -1197,7 +1182,7 @@ def process_bulk_sync(phone, raw_list):
 
     return {
         "success": True,
-        "found_count": len(results),
+        "found_count": len(results), 
         "not_found_count": len(not_found),
         "results": results,
         "not_found": not_found,
@@ -1243,7 +1228,6 @@ def process_bulk_async(job):
         total_quoted = Decimal("0")
         
         for i, (requested_qty, product_name) in enumerate(parsed_items):
-            # Timeout check
             if time.time() - start_time > BULK_TIMEOUT:
                 logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
                 break
@@ -1335,12 +1319,12 @@ def send_bulk_completion(phone, results):
         
         message = f"""Listo! Procese tu lista:
 
-Found {found} productos encontrados
-Not found {not_found_count} sin coincidencia exacta
+{found} productos encontrados
+{not_found_count} sin coincidencia exacta
 
 TOTAL: {format_price(Decimal(str(total)))}
 
-Los agregamos al carrito? Decime: dale"""
+¿Los agregamos al carrito? Decime: dale"""
 
         twilio_rest_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
@@ -1353,26 +1337,29 @@ Los agregamos al carrito? Decime: dale"""
         logger.error(f"Error enviando notificacion: {e}")
 
 # =========================================================
-# MULTI-MENSAJE MEJORADO
+# MULTI-MENSAJE MEJORADO CON DEBUG
 # =========================================================
 
 def send_long_message(phone, text, chunk_size=1300):
-    """Envia mensajes largos divididos en chunks SIN crear loops"""
-    if not twilio_rest_client or not phone:
+    if not twilio_rest_client:
         logger.error("Twilio client no disponible")
         return False
     
+    if not phone:
+        logger.error("Phone number vacio")
+        return False
+    
     if not text:
+        logger.warning("Texto vacio, no hay nada que enviar")
         return True
     
     try:
-        # Dividir en chunks
         parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        logger.info(f"Enviando {len(parts)} chunks a {phone}")
         failed_chunks = []
         
         for idx, part in enumerate(parts):
             try:
-                # Enviar directamente por REST API (no TwiML)
                 message = twilio_rest_client.messages.create(
                     from_=TWILIO_WHATSAPP_FROM,
                     body=f"({idx + 1}/{len(parts)})\n{part}" if len(parts) > 1 else part,
@@ -1380,7 +1367,6 @@ def send_long_message(phone, text, chunk_size=1300):
                 )
                 logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
                 
-                # Pausa entre mensajes para evitar rate limits
                 if idx < len(parts) - 1:
                     time.sleep(1.5)
                     
@@ -1397,7 +1383,7 @@ def send_long_message(phone, text, chunk_size=1300):
         return True
         
     except Exception as e:
-        logger.error(f"Error en send_long_message: {e}")
+        logger.error(f f"Error critico en send_long_message: {e}", exc_info=True)
         return False
 
 # =========================================================
@@ -1583,7 +1569,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         txt = (resp.choices[0].message.content or "").strip()
         
         if not txt or len(txt) < 10:
-            return "Uy, tuve un problema. Me repetis?"
+            return "Uy, tuve un problema. ¿Me repetis?"
         
         return txt
         
@@ -1596,21 +1582,21 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
 # =========================================================
 
 CATEGORY_EMOJIS = {
-    "aceite": "OIL",
-    "filtro": "WRENCH",
-    "bateria": "BATTERY",
-    "neumatico": "MOTORCYCLE",
-    "cadena": "CHAIN",
-    "bujia": "SPARK",
-    "pastilla": "BRAKE",
-    "amortiguador": "SHOCK",
-    "kit": "PACKAGE",
+    "aceite": "óleo",
+    "filtro": "filtro",
+    "bateria": "batería",
+    "neumatico": "rueda",
+    "cadena": "cadena",
+    "bujia": "chispa",
+    "pastilla": "pastilla",
+    "amortiguador": "amortiguador",
+    "kit": "caja",
 }
 
 def format_search_results(products):
     lines = []
     for i, p in enumerate(products, 1):
-        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "PACKAGE")
+        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "caja")
         price = format_price(p.get("price_ars", 0))
         name = p.get("name", "").strip()
         code = p.get("code", "")
@@ -1623,7 +1609,7 @@ def format_search_results(products):
             extra.append(model)
         extra_txt = f" - {' / '.join(extra)}" if extra else ""
         
-        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   PRICE {price}")
+        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   precio {price}")
     return "\n\n".join(lines)
 
 # =========================================================
@@ -1637,7 +1623,6 @@ def run_agent(phone, user_message):
     start_time = time.time()
     save_message(phone, user_message, "user")
 
-    # Detectar intent
     intent = "unknown"
     is_bulk, item_count = is_bulk_list_request(user_message)
 
@@ -1652,7 +1637,6 @@ def run_agent(phone, user_message):
     else:
         intent = "chat"
 
-    # 1. LISTAS MASIVAS
     if is_bulk:
         log_interaction(phone, user_message, "bulk_quote", item_count)
         
@@ -1681,7 +1665,7 @@ def run_agent(phone, user_message):
             if not_found > 0:
                 lines.append(f"{not_found} sin stock")
             lines.append(f"\nTOTAL: {format_price(Decimal(str(total)))}")
-            lines.append("\nLos agregamos? Decime: dale")
+            lines.append("\n¿Los agregamos? Decime: dale")
             
             final = "\n".join(lines)
         else:
@@ -1699,14 +1683,12 @@ def run_agent(phone, user_message):
             else:
                 final = "Uy, tuve un problema. Me mandas la lista de nuevo?"
         
-        # Log performance
         elapsed = time.time() - start_time
         log_performance(phone, intent, elapsed, item_count)
         
         save_message(phone, final, "assistant")
         return final
 
-    # 2. COMANDOS SIMPLES
     if is_simple_command(user_message):
         log_interaction(phone, user_message, "command", 0)
         lower = user_message.lower().strip()
@@ -1756,7 +1738,7 @@ def run_agent(phone, user_message):
             final = "Listo! Vacie tu carrito."
         
         else:
-            final = "Hola! Soy Fran de Tercom. Que estas buscando?"
+            final = "Hola! Soy Fran de Tercom. ¿Que estas buscando?"
         
         elapsed = time.time() - start_time
         log_performance(phone, intent, elapsed, 0)
@@ -1764,7 +1746,6 @@ def run_agent(phone, user_message):
         save_message(phone, final, "assistant")
         return final
 
-    # 3. BÚSQUEDA NORMAL
     catalog_products = hybrid_search(user_message, limit=MAX_SEARCH_RESULTS)
     total = len(catalog_products)
 
@@ -1802,7 +1783,6 @@ def run_agent(phone, user_message):
         save_message(phone, final, "assistant")
         return final
 
-    # Si hay MUCHOS → modo listado
     if total > MAX_PRODUCTS_FOR_LLM:
         header = (
             f"Encontre *{total} productos* para: {user_message}\n\n"
@@ -1821,7 +1801,6 @@ def run_agent(phone, user_message):
         save_message(phone, f"[listado largo {total}]", "assistant")
         return final
 
-    # Si son pocos → IA
     final = generate_smart_ai_reply(phone, user_message, catalog_products)
     
     elapsed = time.time() - start_time
@@ -1834,7 +1813,7 @@ def run_agent(phone, user_message):
 # API REST
 # =========================================================
 
-@app.route("/api/cart/<phone>", methods=["GET"])
+@app.route("/api/cart/", methods=["GET"])
 def api_get_cart(phone):
     try:
         items = cart_get(phone)
@@ -1883,7 +1862,7 @@ def api_quote():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route("/api/orders/<phone>", methods=["GET"])
+@app.route("/api/orders/", methods=["GET"])
 def api_get_orders(phone):
     try:
         with get_db_connection() as conn:
@@ -1936,16 +1915,16 @@ def api_analytics():
             top_searches = [{"query": r[0], "count": r[1]} for r in cur.fetchall()]
             
             return jsonify({
-                "ok": True,
-                "period": "7_days",
-                "intents": intents,
-                "top_searches": top_searches
-            })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    "ok": True,
+    "period": "7_days",
+    "intents": intents,
+    "top_searches": top_searches
+})
+except Exception as e:
+    return jsonify({"ok": False, "error": str(e)}), 500
 
 # =========================================================
-# WEBHOOK CORREGIDO (SIN LOOPS)
+# WEBHOOK CORREGIDO CON DEBUG MEJORADO
 # =========================================================
 
 @app.before_request
@@ -1963,27 +1942,25 @@ def whatsapp_webhook():
     from_number = request.form.get("From", "")
     message_body = request.form.get("Body", "").strip()
 
-    # Log detallado para debug
-    logger.info(f"=== WEBHOOK RECIBIDO ===")
+    logger.info("=" * 50)
+    logger.info("WEBHOOK RECIBIDO")
     logger.info(f"From: {from_number}")
     logger.info(f"Body: {message_body[:100]}")
     logger.info(f"MessageSid: {request.form.get('MessageSid')}")
-    logger.info(f"========================")
+    logger.info(f"Body length: {len(message_body)}")
+    logger.info("=" * 50)
 
-    # Validacion basica
     if not from_number or not message_body:
         logger.warning("Webhook sin From o Body")
         return Response("", status=200)
 
-    # Sanitizar entrada
     message_body = sanitize_input(message_body)
+    logger.info(f"Mensaje sanitizado: {message_body[:100]}")
 
-    # Proteccion contra duplicados
     if is_duplicate_message(from_number, message_body):
         logger.info(f"Mensaje duplicado ignorado de {from_number}")
         return Response("", status=200)
 
-    # Rate limiting
     if not rate_limit_check(from_number):
         logger.warning(f"Rate limit excedido para {from_number}")
         resp = MessagingResponse()
@@ -1992,19 +1969,79 @@ def whatsapp_webhook():
 
     logger.info(f"Procesando mensaje de {from_number}: {message_body[:100]}")
 
-    # Procesar mensaje
     try:
         reply = run_agent(from_number, message_body)
+        logger.info(f"Respuesta generada: {len(reply)} caracteres")
+        logger.info(f"Preview: {reply[:100]}...")
     except Exception as e:
         logger.error(f"Error ejecutando agente: {e}", exc_info=True)
-        reply = "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
+        reply = "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
 
-    # Enviar respuesta
+    if not twilio_rest_client:
+        logger.error("CRITICAL: twilio_rest_client no esta disponible!")
+        twiml = MessagingResponse()
+        twiml.message("Error de configuración. Contactá al administrador.")
+        return str(twiml)
+
+    logger.info(f"Longitud de respuesta: {len(reply)} caracteres")
+    
     if len(reply) > 1300:
-        # Mensaje largo: usar REST API directamente
+        logger.info("Mensaje largo detectado, usando send_long_message")
         success = send_long_message(from_number, reply)
+        
         if not success:
-            # Fallback si falla el envio
+            logger.error("send_long_message fallo")
+            try:
+                truncated = reply[:1200] + "... (mensaje truncado)"
+                twiml = MessagingResponse()
+                twiml.message(truncated)
+                logger.warning("Enviando version truncada por TwiML")
+                return str(twiml)
+            except Exception as e:
+                logger.error(f"Fallback tambien fallo: {e}")
+                twiml = MessagingResponse()
+                twiml.message("Tuve un problema enviando la respuesta completa. Probá de nuevo.")
+                return str(twiml)
+        
+        logger.info("Mensaje largo enviado correctamente via REST API")
+        return Response("", status=200)
+    else:
+        logger.info("Mensaje corto, usando TwiML")
+        try:
             twiml = MessagingResponse()
-            twiml.message("Tuve un problema enviando la respuesta completa. Proba de nuevo.")
+            twiml.message(reply)
+            logger.info(f"Respuesta TwiML generada: {reply[:100]}")
             return str(twiml)
+        except Exception as e:
+            logger.error(f"Error generando TwiML: {e}", exc_info=True)
+            return Response("Error interno", status=500)
+
+@app.route("/health", methods=["GET"])
+def health():
+    catalog, index = get_catalog_and_index()
+    exchange = get_exchange_rate()
+
+    return jsonify({
+        "ok": True,
+        "service": "fran38",
+        "version": "3.8-fixed",
+        "model": MODEL_NAME,
+        "catalog_size": len(catalog) if catalog else 0,
+        "faiss_ready": index is not None,
+        "exchange_rate": float(exchange),
+        "timestamp": datetime.now().isoformat()
+    }), 200
+
+@app.route("/", methods=["GET"])
+def root():
+    return Response("Fran 3.8 - Bot Mayorista Inteligente (FIXED)", status=200, mimetype="text/plain")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Iniciando Fran 3.8 (FIXED) en puerto {port}")
+    logger.info(f"Modelo LLM: {MODEL_NAME}")
+    catalog, _ = get_catalog_and_index()
+    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
+    logger.info(f"TC inicial: {get_exchange_rate()}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+            
