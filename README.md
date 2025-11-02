@@ -1,1 +1,1 @@
-con FAISS persistente para evitar recalcular embeddings, manejo automático de errores y límites de API, caché inteligente del tipo de cambio, nuevos endpoints REST (carrito, cotizaciones, órdenes y analíticas), y una base de datos expandida que empieza a darle memoria real al asistente. Además incorpora logging limpio, procesamiento asíncrono para listas grandes y un prompt más natural y empático, mejorando tanto la robustez técnica como la experiencia de conversación.
+
