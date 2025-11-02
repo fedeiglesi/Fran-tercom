@@ -44,6 +44,42 @@ import faiss
 import numpy as np
 from dotenv import load_dotenv
 
+# ========================================
+# ✅ Envío seguro a WhatsApp sin duplicados
+# ========================================
+def send_whatsapp_message(to, body):
+    from twilio.rest import Client
+    import time
+    import os
+
+    if not body or not to:
+        return
+
+    TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+    TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+    TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
+
+    client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+    # Evita reenvíos repetidos
+    if hasattr(send_whatsapp_message, "last_message") and send_whatsapp_message.last_message == body:
+        print("⚠️ Mensaje duplicado detectado, no se reenvía.")
+        return
+
+    send_whatsapp_message.last_message = body
+
+    # Divide mensajes largos
+    MAX_LEN = 1500
+    chunks = [body[i:i + MAX_LEN] for i in range(0, len(body), MAX_LEN)]
+
+    for chunk in chunks:
+        client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            body=chunk,
+            to=to
+        )
+        time.sleep(1.5)  # Pausa leve para Twilio
+        
 load_dotenv()
 app = Flask(__name__)  # CORREGIDO
 
