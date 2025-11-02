@@ -743,10 +743,14 @@ def load_faiss_index():
                 catalog = pickle.load(f)
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
             return index, catalog
+        else:
+            # 🔧 FIX agregado: manejar caso sin archivos
+            logger.warning("FAISS no encontrado en disco, se construirá de cero.")
+            return None, None
     except Exception as e:
         logger.warning(f"No se pudo cargar FAISS desde disco: {e}")
         return None, None
-
+        
 def _build_faiss_index_from_catalog(catalog):
     try:
         if not catalog:
