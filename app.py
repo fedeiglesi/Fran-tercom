@@ -1383,7 +1383,7 @@ def send_long_message(phone, text, chunk_size=1300):
         return True
         
     except Exception as e:
-        logger.error(f f"Error critico en send_long_message: {e}", exc_info=True)
+        logger.error(f"Error critico en send_long_message: {e}", exc_info=True)
         return False
 
 # =========================================================
