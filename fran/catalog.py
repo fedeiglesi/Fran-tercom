@@ -14,6 +14,7 @@ import pickle
 import requests
 import numpy as np
 import faiss
+from typing import Optional, List, Dict, Tuple
 from functools import lru_cache
 from typing import List, Dict, Tuple
 from fran.config import (
