@@ -1863,6 +1863,7 @@ def run_agent(phone, user_message):
         # Usuario está conversando - NO buscar productos, responder conversacionalmente
         log_interaction(phone, user_message, "chat", 0)
         catalog_products = []
+        total = 0
         final = generate_smart_ai_reply(phone, user_message, catalog_products)
     
     elapsed = time.time() - start_time
