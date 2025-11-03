@@ -16,7 +16,6 @@ import numpy as np
 import faiss
 from typing import Optional, List, Dict, Tuple
 from functools import lru_cache
-from typing import List, Dict, Tuple
 from fran.config import (
     CATALOG_URL,
     FAISS_INDEX_PATH,
@@ -32,13 +31,11 @@ from fran.config import (
 from fran.utils import strip_accents, normalize_search_query
 from openai import OpenAI
 
-
 # =========================================================
 # CLIENTE OPENAI (para embeddings)
 # =========================================================
 
 client = OpenAI()
-
 
 # =========================================================
 # DESCARGA Y CARGA DEL CATÁLOGO CSV
@@ -48,34 +45,53 @@ def _load_raw_csv() -> List[Dict[str, str]]:
     """Descarga y parsea el catálogo CSV desde la URL configurada."""
     logger.info(f"📦 Cargando catálogo desde {CATALOG_URL}")
     try:
-        response = requests.get(CATALOG_URL, headers=REQUEST_HEADERS, timeout=REQUESTS_TIMEOUT)
+        response = requests.get(
+            CATALOG_URL,
+            headers=REQUEST_HEADERS,
+            timeout=REQUESTS_TIMEOUT,
+        )
         response.raise_for_status()
+
+        # 🔹 Compatibilidad con GitHub RAW (a veces devuelve charset incorrecto)
         content = response.content.decode("utf-8", errors="ignore")
         rows = list(csv.DictReader(io.StringIO(content)))
-        logger.info(f"✅ Catálogo cargado con {len(rows)} productos.")
+
+        if not rows:
+            logger.warning("⚠️ Catálogo CSV descargado pero vacío o sin encabezados.")
+        else:
+            logger.info(f"✅ Catálogo cargado con {len(rows)} productos.")
         return rows
     except Exception as e:
         logger.error(f"❌ Error cargando catálogo: {e}")
         return []
 
-
 def load_catalog_enriched() -> List[Dict[str, str]]:
     """Normaliza columnas y agrega campos auxiliares para búsquedas."""
     rows = _load_raw_csv()
+    if not rows:
+        logger.warning("⚠️ No se pudieron cargar filas del catálogo.")
+        return []
+
     catalog = []
     for r in rows:
         name = strip_accents((r.get("name") or r.get("producto") or "").strip())
         code = (r.get("code") or r.get("codigo") or "").strip().upper()
-        price = r.get("price_usd") or r.get("price") or "0"
+        price_raw = (r.get("price_usd") or r.get("price") or "0").strip()
+
+        # 🔹 Limpieza de valor numérico de precio
+        try:
+            price = float(price_raw.replace(",", "."))
+        except ValueError:
+            price = 0.0
 
         catalog.append({
             "code": code,
             "name": name,
-            "price": float(price) if price.replace(".", "", 1).isdigit() else 0.0,
+            "price": price,
             "full_text": f"{code} {name}".lower(),
         })
+    logger.info(f"🧾 Catálogo enriquecido con {len(catalog)} ítems procesados.")
     return catalog
-
 
 # =========================================================
 # GENERACIÓN DE EMBEDDINGS
@@ -84,10 +100,7 @@ def load_catalog_enriched() -> List[Dict[str, str]]:
 def generate_embeddings_with_cache(
     catalog: List[Dict[str, str]]
 ) -> Tuple[np.ndarray, List[str]]:
-    """
-    Genera embeddings con cache local para evitar recomputar todo el catálogo.
-    Devuelve una tupla (matriz_embeddings, lista_textos)
-    """
+    """Genera embeddings con cache local para evitar recomputar todo el catálogo."""
     cache = {}
     if os.path.exists(EMBEDDINGS_CACHE_PATH):
         try:
@@ -99,9 +112,7 @@ def generate_embeddings_with_cache(
 
     texts = [p["full_text"] for p in catalog]
     new_texts = [t for t in texts if t not in cache]
-    all_embeddings = []
 
-    # Generamos embeddings faltantes
     if new_texts:
         logger.info(f"⚙️ Generando {len(new_texts)} embeddings nuevos...")
         for i in range(0, len(new_texts), EMBEDDING_BATCH):
@@ -120,12 +131,10 @@ def generate_embeddings_with_cache(
         except Exception as e:
             logger.warning(f"⚠️ No se pudo guardar embeddings_cache: {e}")
 
-    # Construimos matriz numpy
     all_embeddings = [cache[t] for t in texts if t in cache]
     embeddings = np.array(all_embeddings).astype("float32")
     logger.info(f"✅ Total embeddings en memoria: {len(embeddings)}")
     return embeddings, texts
-
 
 # =========================================================
 # FAISS INDEX
@@ -135,11 +144,12 @@ def _build_faiss_index_from_catalog(
     catalog: List[Dict[str, str]], embeddings: np.ndarray
 ) -> faiss.IndexFlatL2:
     """Crea índice FAISS en memoria a partir de embeddings."""
+    if embeddings.size == 0:
+        raise ValueError("❌ No hay embeddings para construir el índice.")
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
     logger.info(f"📈 FAISS index construido ({index.ntotal} items)")
     return index
-
 
 def save_faiss_index(index, mapping):
     """Guarda índice FAISS y mapping (posición → producto)."""
@@ -150,7 +160,6 @@ def save_faiss_index(index, mapping):
         logger.info("💾 FAISS index guardado en disco.")
     except Exception as e:
         logger.error(f"❌ Error guardando FAISS index: {e}")
-
 
 def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[str, str]]]]:
     """Carga el índice FAISS y su mapping, si existen."""
@@ -167,20 +176,16 @@ def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[
         logger.error(f"❌ Error cargando FAISS index: {e}")
         return None, None
 
-
 # =========================================================
 # CARGA COMPLETA DEL CATÁLOGO + ÍNDICE
 # =========================================================
 
 @lru_cache(maxsize=1)
 def get_catalog_and_index() -> Tuple[List[Dict[str, str]], faiss.IndexFlatL2, List[str]]:
-    """
-    Carga (o construye) todo el stack de catálogo + embeddings + índice FAISS.
-    Se cachea para performance (solo se carga una vez por proceso).
-    """
+    """Carga todo el stack de catálogo + embeddings + índice FAISS (cacheado)."""
     catalog = load_catalog_enriched()
     if not catalog:
-        raise RuntimeError("Catálogo vacío o no disponible")
+        raise RuntimeError("❌ Catálogo vacío o no disponible.")
 
     index, mapping = load_faiss_index()
     if index and mapping:
@@ -194,7 +199,6 @@ def get_catalog_and_index() -> Tuple[List[Dict[str, str]], faiss.IndexFlatL2, Li
     save_faiss_index(index, mapping)
 
     return catalog, index, texts
-
 
 # =========================================================
 # BÚSQUEDA EN FAISS
@@ -212,9 +216,10 @@ def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
         results = []
         for idx, dist in zip(indices[0], distances[0]):
             if idx < len(catalog):
-                item = catalog[idx]
+                item = dict(catalog[idx])
                 item["score"] = float(1 - dist / (dist + 1e-5))
                 results.append(item)
+        logger.info(f"🔍 Búsqueda completada: {len(results)} resultados para '{query}'.")
         return results
     except Exception as e:
         logger.error(f"❌ Error en búsqueda FAISS: {e}")
