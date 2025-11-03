@@ -1393,7 +1393,9 @@ def send_long_message(phone, text, chunk_size=1300):
 SIMPLE_COMMANDS = {
     "dale", "ok", "si", "agrega", "agregalos", "metelos", "sumalos",
     "ver carrito", "mostrar carrito", "mi carrito",
-    "vaciar carrito", "limpiar carrito", "borrar carrito"
+    "vaciar carrito", "limpiar carrito", "borrar carrito",
+    "hola", "hola fran", "buenos dias", "buenas tardes", "buen dia",
+    "hey", "que tal", "como estas", "buenas"
 }
 
 def is_simple_command(message):
@@ -1407,6 +1409,55 @@ def is_simple_command(message):
     if len(lower.split()) <= 2 and lower in ["dale", "si", "ok", "agrega"]:
         return True
 
+    return False
+
+def has_search_intent(message):
+    """
+    Detecta si el mensaje contiene intención explícita de búsqueda de productos.
+    Retorna True solo si hay keywords claras de búsqueda.
+    """
+    if not message:
+        return False
+    
+    lower = message.lower().strip()
+    
+    # Excluir preguntas sobre servicios (envíos, pagos, horarios)
+    service_keywords = ["envio", "envios", "pago", "pagos", "horario", "horarios", "atencion", "demora"]
+    if any(kw in lower for kw in service_keywords):
+        # Si pregunta sobre servicios, no es búsqueda de productos
+        return False
+    
+    # Keywords de búsqueda de productos
+    search_keywords = [
+        "precio", "cuanto", "cuesta", "vale",
+        "tenes", "stock", "disponible",
+        "codigo", "referencia",
+        "busco", "necesito", "quiero", "me das",
+        "cotiza", "presupuesto"
+    ]
+    
+    # Detectar búsqueda explícita
+    for keyword in search_keywords:
+        if keyword in lower:
+            return True
+    
+    # Detectar patrón "modelo marca" (ej: "filtro yamaha", "aceite honda")
+    brand_keywords = ["yamaha", "honda", "suzuki", "zanella", "rouser", "guerrero", 
+                      "corven", "gilera", "motomel", "bajaj", "ktm", "kawasaki"]
+    product_keywords = ["aceite", "filtro", "bujia", "pastilla", "cadena", "kit", 
+                        "amortiguador", "bateria", "neumatico", "disco", "llanta"]
+    
+    has_product = any(prod in lower for prod in product_keywords)
+    has_brand = any(brand in lower for brand in brand_keywords)
+    
+    # Si menciona producto Y marca, probablemente está buscando
+    if has_product and has_brand:
+        return True
+    
+    # Si menciona un código tipo TERCOM (letras+números)
+    if re.search(r'\b[A-Z]{2,}\d{2,}|\d{2,}[A-Z]{2,}\b', message.upper()):
+        return True
+    
     return False
 
 # =========================================================
@@ -1737,6 +1788,9 @@ def run_agent(phone, user_message):
             cart_clear(phone)
             final = "Listo! Vacie tu carrito."
         
+        elif lower in ["hola", "hola fran", "buenos dias", "buenas tardes", "buen dia", "hey", "que tal", "como estas", "buenas"]:
+            final = "Hola! Soy Fran de Tercom 👋\n\n¿Qué repuesto estás buscando hoy?"
+        
         else:
             final = "Hola! Soy Fran de Tercom. ¿Que estas buscando?"
         
@@ -1746,62 +1800,70 @@ def run_agent(phone, user_message):
         save_message(phone, final, "assistant")
         return final
 
-    catalog_products = hybrid_search(user_message, limit=MAX_SEARCH_RESULTS)
-    total = len(catalog_products)
+    # Detectar si el usuario quiere buscar productos o solo conversar
+    if has_search_intent(user_message):
+        # Usuario está buscando productos - ejecutar búsqueda en catálogo
+        catalog_products = hybrid_search(user_message, limit=MAX_SEARCH_RESULTS)
+        total = len(catalog_products)
 
-    log_interaction(phone, user_message, intent, total)
+        log_interaction(phone, user_message, intent, total)
 
-    if catalog_products:
-        save_last_search(phone, [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "price_ars": p["price_ars"],
-                "price_usd": p["price_usd"],
-                "qty": 1
-            }
-            for p in catalog_products[:200]
-        ], user_message)
-        save_to_search_history(phone, [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "price_ars": p["price_ars"],
-                "price_usd": p["price_usd"],
-                "qty": 1
-            }
-            for p in catalog_products[:200]
-        ], user_message)
+        if catalog_products:
+            save_last_search(phone, [
+                {
+                    "code": p["code"],
+                    "name": p["name"],
+                    "price_ars": p["price_ars"],
+                    "price_usd": p["price_usd"],
+                    "qty": 1
+                }
+                for p in catalog_products[:200]
+            ], user_message)
+            save_to_search_history(phone, [
+                {
+                    "code": p["code"],
+                    "name": p["name"],
+                    "price_ars": p["price_ars"],
+                    "price_usd": p["price_usd"],
+                    "qty": 1
+                }
+                for p in catalog_products[:200]
+            ], user_message)
 
-    if total == 0:
-        final = (
-            "No encontre ese repuesto en el catalogo.\n\n"
-            "Pasame marca, modelo y año de la moto y te busco lo mas parecido."
-        )
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, 0)
-        save_message(phone, final, "assistant")
-        return final
+        if total == 0:
+            final = (
+                "No encontre ese repuesto en el catalogo.\n\n"
+                "Pasame marca, modelo y año de la moto y te busco lo mas parecido."
+            )
+            elapsed = time.time() - start_time
+            log_performance(phone, intent, elapsed, 0)
+            save_message(phone, final, "assistant")
+            return final
 
-    if total > MAX_PRODUCTS_FOR_LLM:
-        header = (
-            f"Encontre *{total} productos* para: {user_message}\n\n"
-            "Te los mando en partes asi WhatsApp no los corta"
-        )
-        chunks = [catalog_products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, total, PRODUCTS_PER_CHUNK)]
-        full_text = [header]
-        for idx, ch in enumerate(chunks, 1):
-            full_text.append(f"\n━━━ Bloque {idx}/{len(chunks)} ({len(ch)} items) ━━━")
-            full_text.append(format_search_results(ch))
-        final = "\n".join(full_text)
-        
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, total)
-        
-        save_message(phone, f"[listado largo {total}]", "assistant")
-        return final
+        if total > MAX_PRODUCTS_FOR_LLM:
+            header = (
+                f"Encontre *{total} productos* para: {user_message}\n\n"
+                "Te los mando en partes asi WhatsApp no los corta"
+            )
+            chunks = [catalog_products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, total, PRODUCTS_PER_CHUNK)]
+            full_text = [header]
+            for idx, ch in enumerate(chunks, 1):
+                full_text.append(f"\n━━━ Bloque {idx}/{len(chunks)} ({len(ch)} items) ━━━")
+                full_text.append(format_search_results(ch))
+            final = "\n".join(full_text)
+            
+            elapsed = time.time() - start_time
+            log_performance(phone, intent, elapsed, total)
+            
+            save_message(phone, f"[listado largo {total}]", "assistant")
+            return final
 
-    final = generate_smart_ai_reply(phone, user_message, catalog_products)
+        final = generate_smart_ai_reply(phone, user_message, catalog_products)
+    else:
+        # Usuario está conversando - NO buscar productos, responder conversacionalmente
+        log_interaction(phone, user_message, "chat", 0)
+        catalog_products = []
+        final = generate_smart_ai_reply(phone, user_message, catalog_products)
     
     elapsed = time.time() - start_time
     log_performance(phone, intent, elapsed, total)
