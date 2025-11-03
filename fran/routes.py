@@ -19,7 +19,9 @@ from fran.search import search_products
 from fran.cart import cart_add, cart_get, cart_clear, cart_summary_text
 from fran.ai import detect_intent, rule_based_reply, generate_llm_reply, summarize_message_for_log
 from fran.config import logger, INSTANT_THRESHOLD
+from fran.catalog import eager_warmup  # ✅ Import del warmup del catálogo
 
+import os
 import time
 
 # =========================================================
@@ -28,6 +30,18 @@ import time
 
 app = Flask(__name__)
 
+# =========================================================
+# WARMUP DEL CATÁLOGO Y FAISS (al arrancar)
+# =========================================================
+# Esto asegura que el catálogo y FAISS se carguen desde el inicio,
+# en lugar de hacerlo recién cuando llega el primer mensaje.
+try:
+    if os.environ.get("EAGER_CATALOG", "1") == "1":
+        logger.info("🚀 Iniciando warmup de catálogo FAISS al arrancar servidor...")
+        eager_warmup()
+        logger.info("✅ Warmup de catálogo completado correctamente.")
+except Exception as e:
+    logger.error(f"❌ Error en warmup inicial: {e}")
 
 # =========================================================
 # ENDPOINT /api/quote
@@ -35,14 +49,7 @@ app = Flask(__name__)
 
 @app.route("/api/quote", methods=["POST"])
 def api_quote():
-    """
-    Cotiza un producto individual o varios a la vez.
-    Request JSON:
-    {
-        "phone": "112233",
-        "message": "tapa valvula ybr"
-    }
-    """
+    """Cotiza un producto individual o varios a la vez."""
     data = request.get_json(silent=True) or {}
     phone = data.get("phone", "").strip()
     user_message = data.get("message", "").strip()
@@ -54,7 +61,7 @@ def api_quote():
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
-    # Procesamos listas masivas
+    # Listas masivas
     is_bulk, item_count = is_bulk_list_request(user_message)
     if is_bulk and item_count < INSTANT_THRESHOLD:
         result = process_bulk_sync(phone, user_message)
@@ -82,9 +89,7 @@ def api_quote():
 
 @app.route("/api/analytics", methods=["GET"])
 def api_analytics():
-    """
-    Devuelve métricas simples: intenciones detectadas y mensajes más frecuentes.
-    """
+    """Devuelve métricas simples: intenciones detectadas y mensajes más frecuentes."""
     from fran.db import get_db_connection
     try:
         with get_db_connection() as conn:
@@ -130,10 +135,7 @@ def health():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """
-    Endpoint principal del bot WhatsApp.
-    Recibe mensajes del cliente y responde en tiempo real.
-    """
+    """Endpoint principal del bot WhatsApp."""
     start_time = time.time()
 
     # Datos entrantes
@@ -150,7 +152,7 @@ def webhook():
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
-    # Intent rule-based (respuestas rápidas)
+    # Intent rule-based
     fast_reply = rule_based_reply(intent, user_message)
     if fast_reply:
         resp = MessagingResponse()
