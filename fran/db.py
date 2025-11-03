@@ -186,5 +186,7 @@ def clear_cart(phone: str):
 
 try:
     init_db()
+    logger.info("🧠 Módulo DB inicializado correctamente")
+
 except Exception as e:
     logger.warning(f"⚠️ No se pudo inicializar DB: {e}")
