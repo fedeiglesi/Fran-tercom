@@ -1398,6 +1398,23 @@ SIMPLE_COMMANDS = {
     "hey", "que tal", "como estas", "buenas"
 }
 
+# Keywords para detección de intención de búsqueda
+SERVICE_KEYWORDS = ["envio", "envios", "pago", "pagos", "horario", "horarios", "atencion", "demora"]
+SEARCH_KEYWORDS = [
+    "precio", "cuanto", "cuesta", "vale",
+    "tenes", "stock", "disponible",
+    "codigo", "referencia",
+    "busco", "necesito", "quiero", "me das",
+    "cotiza", "presupuesto"
+]
+BRAND_KEYWORDS = ["yamaha", "honda", "suzuki", "zanella", "rouser", "guerrero", 
+                  "corven", "gilera", "motomel", "bajaj", "ktm", "kawasaki"]
+PRODUCT_KEYWORDS = ["aceite", "filtro", "bujia", "pastilla", "cadena", "kit", 
+                    "amortiguador", "bateria", "neumatico", "disco", "llanta"]
+
+# Regex precompilado para códigos de producto
+PRODUCT_CODE_PATTERN = re.compile(r'\b[A-Z]{2,}\d{2,}|\d{2,}[A-Z]{2,}\b')
+
 def is_simple_command(message):
     if not message:
         return False
@@ -1422,40 +1439,25 @@ def has_search_intent(message):
     lower = message.lower().strip()
     
     # Excluir preguntas sobre servicios (envíos, pagos, horarios)
-    service_keywords = ["envio", "envios", "pago", "pagos", "horario", "horarios", "atencion", "demora"]
-    if any(kw in lower for kw in service_keywords):
+    if any(kw in lower for kw in SERVICE_KEYWORDS):
         # Si pregunta sobre servicios, no es búsqueda de productos
         return False
     
-    # Keywords de búsqueda de productos
-    search_keywords = [
-        "precio", "cuanto", "cuesta", "vale",
-        "tenes", "stock", "disponible",
-        "codigo", "referencia",
-        "busco", "necesito", "quiero", "me das",
-        "cotiza", "presupuesto"
-    ]
-    
     # Detectar búsqueda explícita
-    for keyword in search_keywords:
+    for keyword in SEARCH_KEYWORDS:
         if keyword in lower:
             return True
     
     # Detectar patrón "modelo marca" (ej: "filtro yamaha", "aceite honda")
-    brand_keywords = ["yamaha", "honda", "suzuki", "zanella", "rouser", "guerrero", 
-                      "corven", "gilera", "motomel", "bajaj", "ktm", "kawasaki"]
-    product_keywords = ["aceite", "filtro", "bujia", "pastilla", "cadena", "kit", 
-                        "amortiguador", "bateria", "neumatico", "disco", "llanta"]
-    
-    has_product = any(prod in lower for prod in product_keywords)
-    has_brand = any(brand in lower for brand in brand_keywords)
+    has_product = any(prod in lower for prod in PRODUCT_KEYWORDS)
+    has_brand = any(brand in lower for brand in BRAND_KEYWORDS)
     
     # Si menciona producto Y marca, probablemente está buscando
     if has_product and has_brand:
         return True
     
     # Si menciona un código tipo TERCOM (letras+números)
-    if re.search(r'\b[A-Z]{2,}\d{2,}|\d{2,}[A-Z]{2,}\b', message.upper()):
+    if PRODUCT_CODE_PATTERN.search(message.upper()):
         return True
     
     return False
