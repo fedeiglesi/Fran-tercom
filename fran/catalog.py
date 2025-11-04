@@ -1,12 +1,13 @@
 # coding: utf-8
 
 """
-Módulo: catalog.py (VERSIÓN CORREGIDA)
+Módulo: catalog.py (VERSIÓN MEJORADA CON ENRIQUECIMIENTO FLEXIBLE)
 Responsable de:
 
-- Cargar catálogo CSV (desde GitHub o local)
-- Generar embeddings y FAISS index
-- Cachear resultados para performance
+- Cargar catálogo CSV con múltiples formatos
+- Enriquecer con todos los campos disponibles
+- Generar embeddings optimizados
+- Cachear resultados
 """
 
 import os
@@ -35,7 +36,7 @@ from fran.utils import strip_accents, normalize_search_query
 from openai import OpenAI
 
 # =========================================================
-# CLIENTE OPENAI (para embeddings)
+# CLIENTE OPENAI
 # =========================================================
 
 if not OPENAI_API_KEY:
@@ -59,7 +60,7 @@ def _load_raw_csv() -> List[Dict[str, str]]:
         )
         response.raise_for_status()
 
-        # 🔹 Compatibilidad con GitHub RAW - intentar múltiples encodings
+        # Intentar múltiples encodings
         try:
             content = response.content.decode("utf-8")
         except UnicodeDecodeError:
@@ -81,8 +82,12 @@ def _load_raw_csv() -> List[Dict[str, str]]:
         logger.error(f"❌ Error inesperado cargando catálogo: {e}")
         return []
 
+
 def load_catalog_enriched() -> List[Dict[str, str]]:
-    """Normaliza columnas y agrega campos auxiliares para búsquedas."""
+    """
+    Normaliza columnas y agrega campos auxiliares para búsquedas.
+    Soporta múltiples formatos de CSV con nombres de columna flexibles.
+    """
     rows = _load_raw_csv()
     if not rows:
         logger.warning("⚠️ No se pudieron cargar filas del catálogo.")
@@ -90,23 +95,61 @@ def load_catalog_enriched() -> List[Dict[str, str]]:
 
     catalog = []
     for r in rows:
-        name = strip_accents((r.get("name") or r.get("producto") or "").strip())
+
+        # CAMPOS BÁSICOS
+        name = strip_accents((r.get("name") or r.get("producto") or r.get("nombre") or "").strip())
         code = (r.get("code") or r.get("codigo") or "").strip().upper()
-        price_raw = (r.get("price_usd") or r.get("price") or "0").strip()
 
-        # 🔹 Limpieza de valor numérico de precio
+        price_raw = (r.get("price_usd") or r.get("price") or r.get("precio_usd") or "0").strip()
         try:
-            price = float(price_raw.replace(",", "."))
+            price_usd = float(price_raw.replace(",", "."))
         except ValueError:
-            price = 0.0
+            price_usd = 0.0
 
-        if name and code:  # Solo agregar productos válidos
-            catalog.append({
-                "code": code,
-                "name": name,
-                "price": price,
-                "full_text": f"{code} {name}".lower(),
-            })
+        price_ars_raw = (r.get("price_ars") or r.get("precio_ars") or "0").strip()
+        try:
+            price_ars = float(price_ars_raw.replace(",", "."))
+        except ValueError:
+            price_ars = 0.0
+
+        if not (name and code):
+            continue
+
+        # CAMPOS OPCIONALES ENRIQUECIMIENTO
+        brand = strip_accents((r.get("brand") or r.get("marca") or "").strip())
+        category = strip_accents((r.get("category") or r.get("categoria") or "").strip())
+        models = strip_accents(
+            (r.get("models") or r.get("modelos") or r.get("compatibilidad") or r.get("compatible") or "").strip()
+        )
+        oem = strip_accents((r.get("oem") or r.get("oem_code") or "").strip())
+        keywords = strip_accents((r.get("keywords") or r.get("palabras_clave") or "").strip())
+        description = strip_accents((r.get("description") or r.get("descripcion") or "").strip())
+
+        # FULL TEXT enriquecido para embeddings
+        full_text_parts = [
+            code,
+            name,
+            brand,
+            category,
+            models,
+            oem,
+            keywords,
+        ]
+
+        full_text = " ".join(part for part in full_text_parts if part)
+        full_text = " ".join(full_text.lower().split())
+
+        catalog.append({
+            "code": code,
+            "name": name,
+            "brand": brand,
+            "category": category,
+            "price": price_usd,
+            "price_ars": price_ars,
+            "full_text": full_text,
+            "models": models,
+            "oem": oem,
+        })
 
     logger.info(f"🧾 Catálogo enriquecido con {len(catalog)} ítems procesados.")
     return catalog
@@ -118,8 +161,7 @@ def load_catalog_enriched() -> List[Dict[str, str]]:
 def generate_embeddings_with_cache(
     catalog: List[Dict[str, str]]
 ) -> Tuple[np.ndarray, List[str]]:
-    """Genera embeddings con cache local para evitar recomputar todo el catálogo."""
-
+    """Genera embeddings con cache local."""
     if not client:
         logger.error("❌ No se puede generar embeddings sin OpenAI client")
         return np.array([]), []
@@ -172,7 +214,7 @@ def generate_embeddings_with_cache(
 def _build_faiss_index_from_catalog(
     catalog: List[Dict[str, str]], embeddings: np.ndarray
 ) -> Optional[faiss.IndexFlatL2]:
-    """Crea índice FAISS en memoria a partir de embeddings."""
+    """Crea índice FAISS en memoria."""
     if embeddings.size == 0:
         logger.error("❌ No hay embeddings para construir el índice.")
         return None
@@ -187,7 +229,7 @@ def _build_faiss_index_from_catalog(
         return None
 
 def save_faiss_index(index, mapping):
-    """Guarda índice FAISS y mapping (posición → producto)."""
+    """Guarda índice FAISS y mapping."""
     try:
         faiss.write_index(index, FAISS_INDEX_PATH)
         with open(FAISS_MAPPING_PATH, "wb") as f:
@@ -197,7 +239,7 @@ def save_faiss_index(index, mapping):
         logger.error(f"❌ Error guardando FAISS index: {e}")
 
 def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[str, str]]]]:
-    """Carga el índice FAISS y su mapping, si existen."""
+    """Carga el índice FAISS y su mapping."""
     if not (os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_MAPPING_PATH)):
         logger.warning("⚠️ No se encontró FAISS index. Se generará uno nuevo.")
         return None, None
@@ -212,12 +254,12 @@ def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[
         return None, None
 
 # =========================================================
-# CARGA COMPLETA DEL CATÁLOGO + ÍNDICE
+# CARGA COMPLETA
 # =========================================================
 
 @lru_cache(maxsize=1)
 def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexFlatL2], List[str]]:
-    """Carga todo el stack de catálogo + embeddings + índice FAISS (cacheado)."""
+    """Carga catálogo + embeddings + índice FAISS (cacheado)."""
     catalog = load_catalog_enriched()
     if not catalog:
         logger.error("❌ Catálogo vacío o no disponible.")
@@ -228,7 +270,6 @@ def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexF
         logger.info("🟢 FAISS index cargado desde disco (cache).")
         return catalog, index, [m["full_text"] for m in mapping]
 
-    # Generar nuevo índice
     if not client:
         logger.warning("⚠️ No se puede generar FAISS index sin OpenAI client")
         return catalog, None, []
@@ -242,7 +283,16 @@ def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexF
     index = _build_faiss_index_from_catalog(catalog, embeddings)
 
     if index:
-        mapping = [{"code": p["code"], "name": p["name"], "full_text": p["full_text"]} for p in catalog]
+        mapping = [
+            {
+                "code": p["code"],
+                "name": p["name"],
+                "full_text": p["full_text"],
+                "brand": p.get("brand", ""),
+                "category": p.get("category", ""),
+            }
+            for p in catalog
+        ]
         save_faiss_index(index, mapping)
 
     return catalog, index, texts
@@ -259,24 +309,24 @@ def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
 
     try:
         catalog, index, texts = get_catalog_and_index()
-        
+
         if not index:
             logger.warning("⚠️ FAISS index no disponible")
             return []
-        
+
         query_norm = normalize_search_query(query)
 
         emb_query = client.embeddings.create(model=EMBEDDING_MODEL, input=[query_norm])
         vector = np.array(emb_query.data[0].embedding, dtype="float32").reshape(1, -1)
         distances, indices = index.search(vector, min(top_k, len(catalog)))
-        
+
         results = []
         for idx, dist in zip(indices[0], distances[0]):
             if 0 <= idx < len(catalog):
                 item = dict(catalog[idx])
                 item["score"] = float(1 - dist / (dist + 1e-5))
                 results.append(item)
-        
+
         logger.info(f"🔍 Búsqueda completada: {len(results)} resultados para '{query}'.")
         return results
 
@@ -285,14 +335,11 @@ def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
         return []
 
 # =========================================================
-# WARMUP EAGER (PRECARGA AL INICIO)
+# WARMUP EAGER
 # =========================================================
 
 def eager_warmup():
-    """
-    Precarga el catálogo y FAISS index al iniciar el servidor.
-    Esto evita que el primer usuario tenga que esperar la carga inicial.
-    """
+    """Precarga el catálogo y FAISS index al iniciar."""
     try:
         logger.info("🔥 Iniciando warmup del catálogo…")
         catalog, index, texts = get_catalog_and_index()
@@ -300,11 +347,11 @@ def eager_warmup():
         if not catalog:
             logger.error("❌ Warmup falló: catálogo vacío")
             return False
-        
+
         if not index:
             logger.warning("⚠️ Warmup completado pero FAISS index no disponible")
             return True
-        
+
         logger.info(f"✅ Warmup exitoso: {len(catalog)} productos, FAISS con {index.ntotal} vectores")
         return True
 
