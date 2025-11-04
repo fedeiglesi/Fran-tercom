@@ -82,7 +82,6 @@ def _load_raw_csv() -> List[Dict[str, str]]:
         logger.error(f"❌ Error inesperado cargando catálogo: {e}")
         return []
 
-
 def load_catalog_enriched() -> List[Dict[str, str]]:
     """
     Normaliza columnas y agrega campos auxiliares para búsquedas.
@@ -95,50 +94,67 @@ def load_catalog_enriched() -> List[Dict[str, str]]:
 
     catalog = []
     for r in rows:
-
-        # CAMPOS BÁSICOS
+        # =========================================================
+        # CAMPOS BÁSICOS (requeridos)
+        # =========================================================
         name = strip_accents((r.get("name") or r.get("producto") or r.get("nombre") or "").strip())
         code = (r.get("code") or r.get("codigo") or "").strip().upper()
 
+        # Precio USD
         price_raw = (r.get("price_usd") or r.get("price") or r.get("precio_usd") or "0").strip()
         try:
             price_usd = float(price_raw.replace(",", "."))
         except ValueError:
             price_usd = 0.0
 
+        # Precio ARS (opcional)
         price_ars_raw = (r.get("price_ars") or r.get("precio_ars") or "0").strip()
         try:
             price_ars = float(price_ars_raw.replace(",", "."))
         except ValueError:
             price_ars = 0.0
 
+        # Solo procesar productos con código y nombre
         if not (name and code):
             continue
 
-        # CAMPOS OPCIONALES ENRIQUECIMIENTO
+        # =========================================================
+        # CAMPOS OPCIONALES (para enriquecer búsqueda)
+        # =========================================================
         brand = strip_accents((r.get("brand") or r.get("marca") or "").strip())
         category = strip_accents((r.get("category") or r.get("categoria") or "").strip())
-        models = strip_accents(
-            (r.get("models") or r.get("modelos") or r.get("compatibilidad") or r.get("compatible") or "").strip()
-        )
+
+        # Modelos compatibles (múltiples nombres posibles)
+        models = strip_accents((
+            r.get("models") or
+            r.get("modelos") or
+            r.get("compatibilidad") or
+            r.get("compatible") or
+            ""
+        ).strip())
+
+        # Códigos OEM originales
         oem = strip_accents((r.get("oem") or r.get("oem_code") or "").strip())
+
+        # Keywords adicionales
         keywords = strip_accents((r.get("keywords") or r.get("palabras_clave") or "").strip())
+
+        # Descripción (opcional)
         description = strip_accents((r.get("description") or r.get("descripcion") or "").strip())
 
-        # FULL TEXT enriquecido para embeddings
+        # =========================================================
+        # CONSTRUCCIÓN DEL full_text PARA EMBEDDINGS
+        # =========================================================
         full_text_parts = [
-            code,
-            name,
-            brand,
-            category,
-            models,
-            oem,
-            keywords,
+            code, name, brand, category, models, oem, keywords
         ]
 
-        full_text = " ".join(part for part in full_text_parts if part)
-        full_text = " ".join(full_text.lower().split())
+        full_text = " ".join(part for part in full_text_parts if part).lower()
+        full_text = " ".join(full_text.split())
 
+        # =========================================================
+        # AGREGAR AL CATÁLOGO
+        # =========================================================
         catalog.append({
             "code": code,
             "name": name,
@@ -162,6 +178,7 @@ def generate_embeddings_with_cache(
     catalog: List[Dict[str, str]]
 ) -> Tuple[np.ndarray, List[str]]:
     """Genera embeddings con cache local."""
+
     if not client:
         logger.error("❌ No se puede generar embeddings sin OpenAI client")
         return np.array([]), []
@@ -213,16 +230,22 @@ def generate_embeddings_with_cache(
 
 def _build_faiss_index_from_catalog(
     catalog: List[Dict[str, str]], embeddings: np.ndarray
-) -> Optional[faiss.IndexFlatL2]:
-    """Crea índice FAISS en memoria."""
+) -> Optional[faiss.IndexFlatIP]:
+    """
+    Crea índice FAISS en memoria usando Inner Product (similitud por coseno).
+
+    IMPORTANTE: OpenAI devuelve embeddings normalizados, por lo que:
+    - Producto interno = Similitud por coseno
+    - IndexFlatIP es el índice correcto para embeddings de OpenAI
+    """
     if embeddings.size == 0:
         logger.error("❌ No hay embeddings para construir el índice.")
         return None
 
     try:
-        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index = faiss.IndexFlatIP(embeddings.shape[1])
         index.add(embeddings)
-        logger.info(f"📈 FAISS index construido ({index.ntotal} items)")
+        logger.info(f"📈 FAISS index construido con IndexFlatIP ({index.ntotal} items)")
         return index
     except Exception as e:
         logger.error(f"❌ Error construyendo índice FAISS: {e}")
@@ -238,7 +261,7 @@ def save_faiss_index(index, mapping):
     except Exception as e:
         logger.error(f"❌ Error guardando FAISS index: {e}")
 
-def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[str, str]]]]:
+def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatIP], Optional[List[Dict[str, str]]]]:
     """Carga el índice FAISS y su mapping."""
     if not (os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_MAPPING_PATH)):
         logger.warning("⚠️ No se encontró FAISS index. Se generará uno nuevo.")
@@ -258,7 +281,7 @@ def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatL2], Optional[List[Dict[
 # =========================================================
 
 @lru_cache(maxsize=1)
-def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexFlatL2], List[str]]:
+def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexFlatIP], List[str]]:
     """Carga catálogo + embeddings + índice FAISS (cacheado)."""
     catalog = load_catalog_enriched()
     if not catalog:
@@ -302,7 +325,15 @@ def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexF
 # =========================================================
 
 def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
-    """Realiza búsqueda semántica con FAISS."""
+    """
+    Realiza búsqueda semántica con FAISS usando similitud por coseno.
+
+    Con IndexFlatIP, los scores son productos internos (0 a 1):
+    - 1.0 = idéntico
+    - 0.9+ = muy similar
+    - 0.7-0.9 = relacionado
+    - <0.7 = poco relacionado
+    """
     if not client:
         logger.warning("⚠️ Búsqueda semántica no disponible sin OpenAI client")
         return []
@@ -318,16 +349,20 @@ def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
 
         emb_query = client.embeddings.create(model=EMBEDDING_MODEL, input=[query_norm])
         vector = np.array(emb_query.data[0].embedding, dtype="float32").reshape(1, -1)
+
         distances, indices = index.search(vector, min(top_k, len(catalog)))
 
         results = []
-        for idx, dist in zip(indices[0], distances[0]):
+        for idx, score in zip(indices[0], distances[0]):
             if 0 <= idx < len(catalog):
                 item = dict(catalog[idx])
-                item["score"] = float(1 - dist / (dist + 1e-5))
+                item["score"] = float(score * 100)
                 results.append(item)
 
         logger.info(f"🔍 Búsqueda completada: {len(results)} resultados para '{query}'.")
+        if results:
+            logger.info(f"   Top resultado: {results[0]['name']} (score: {results[0]['score']:.1f})")
+
         return results
 
     except Exception as e:
