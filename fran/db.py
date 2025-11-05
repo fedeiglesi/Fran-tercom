@@ -1,4 +1,5 @@
 # coding: utf-8
+
 """
 Módulo de base de datos (SQLite) para Fran 3.8
 
@@ -87,14 +88,13 @@ def init_db():
             )
         """)
 
-        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversation_summary (
                 phone TEXT PRIMARY KEY,
                 summary TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-             )
-         """)        
+            )
+        """)
 
         conn.commit()
         logger.info("✅ Tablas creadas o verificadas correctamente")
@@ -196,6 +196,5 @@ def clear_cart(phone: str):
 try:
     init_db()
     logger.info("🧠 Módulo DB inicializado correctamente")
-
 except Exception as e:
     logger.warning(f"⚠️ No se pudo inicializar DB: {e}")
