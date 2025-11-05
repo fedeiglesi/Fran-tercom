@@ -1,44 +1,50 @@
 # coding: utf-8
 """
-Modulo: fran_agent.py
-Logica central del asistente Fran 3.8
+Módulo: fran_agent.py
+Lógica central del asistente Fran 3.8
 -------------------------------------------------
 Responsable de:
 - Interpretar mensajes entrantes
-- Detectar intencion (bulk, search, cart, IA)
-- Coordinar catalogo, carrito y OpenAI
+- Detectar intención (bulk, search, cart, IA)
+- Coordinar catálogo, carrito y OpenAI
 - Guardar logs y rendimiento
+- Actualizar resumen conversacional
 """
 
 import time
 from fran.db import save_message, log_interaction, log_performance
 from fran.bulk import is_bulk_list_request, process_bulk_sync, format_bulk_response
 from fran.cart import cart_summary_text
-from fran.ai import detect_intent, rule_based_reply, generate_llm_reply, generate_product_based_reply
+from fran.ai import (
+    detect_intent,
+    rule_based_reply,
+    generate_llm_reply,
+    generate_product_based_reply,
+)
 from fran.config import INSTANT_THRESHOLD, logger
 
 
 # =========================================================
-# FUNCION PRINCIPAL
+# FUNCIÓN PRINCIPAL
 # =========================================================
 
 def run_agent(phone: str, user_message: str) -> str:
     """
-    Ejecuta todo el flujo de decision de Fran:
+    Ejecuta todo el flujo de decisión de Fran:
     1. Guarda el mensaje
-    2. Detecta intencion
-    3. Procesa segun tipo (bulk, search, cart, IA)
+    2. Detecta intención
+    3. Procesa según tipo (bulk, search, cart, IA)
     4. Devuelve respuesta lista para enviar
     """
     if not phone or not user_message:
-        return "⚠️ Error: mensaje vacio."
+        return "⚠️ Error: mensaje vacío."
 
     start_time = time.time()
     save_message(phone, user_message, "user")
     intent = "unknown"
 
     # =========================================================
-    # 1. DETECTAR LISTAS MASIVAS (PRIORIDAD MAXIMA)
+    # 1. DETECTAR LISTAS MASIVAS (PRIORIDAD MÁXIMA)
     # =========================================================
     is_bulk, item_count = is_bulk_list_request(user_message)
     if is_bulk:
@@ -50,45 +56,60 @@ def run_agent(phone: str, user_message: str) -> str:
             text = format_bulk_response(result)
             save_message(phone, text, "bot")
             log_performance(phone, "bulk_sync", start_time)
+
+            # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+            from fran.ai import update_conversation_summary
+            update_conversation_summary(phone, user_message, text)
+
             return text
         else:
-            text = "📦 Tu lista es muy larga. Estoy procesandola, esto puede tardar unos segundos..."
+            text = "📦 Tu lista es muy larga. Estoy procesándola, esto puede tardar unos segundos..."
             save_message(phone, text, "bot")
             return text
 
     # =========================================================
-    # 2. DETECTAR INTENCION GENERAL
+    # 2. DETECTAR INTENCIÓN GENERAL
     # =========================================================
     intent = detect_intent(user_message)
     logger.info(f"🎯 Intent detectado: {intent}")
 
     # =========================================================
-    # 3. RESPUESTAS RAPIDAS (RULE-BASED)
+    # 3. RESPUESTAS RÁPIDAS (RULE-BASED)
     # =========================================================
     quick = rule_based_reply(intent, user_message)
     if quick:
         save_message(phone, quick, "bot")
         log_performance(phone, "rule_based", start_time)
-        return quick
+        return quick  # ❌ No actualizamos resumen en saludos/agradecimientos
 
     # =========================================================
-    # 4. INTENCION DE CARRITO
+    # 4. INTENCIÓN DE CARRITO
     # =========================================================
     if intent == "cart":
         reply = cart_summary_text(phone)
         save_message(phone, reply, "bot")
         log_interaction(phone, user_message, intent)
         log_performance(phone, "cart", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN (para que recuerde estado del carrito)
+        from fran.ai import update_conversation_summary
+        update_conversation_summary(phone, user_message, reply)
+
         return reply
 
     # =========================================================
-    # 5. INTENCION DE BUSQUEDA TECNICA (USANDO CATALOGO + FRAN)
+    # 5. INTENCIÓN DE BÚSQUEDA TÉCNICA
     # =========================================================
     if intent == "search":
         reply = generate_product_based_reply(phone, user_message)
         save_message(phone, reply, "bot")
         log_interaction(phone, user_message, intent)
         log_performance(phone, "search_rag", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN (producto + contexto)
+        from fran.ai import update_conversation_summary
+        update_conversation_summary(phone, user_message, reply)
+
         return reply
 
     # =========================================================
@@ -99,7 +120,12 @@ def run_agent(phone: str, user_message: str) -> str:
         save_message(phone, reply, "bot")
         log_interaction(phone, user_message, intent)
         log_performance(phone, "llm_reply", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN (para consultas abiertas)
+        from fran.ai import update_conversation_summary
+        update_conversation_summary(phone, user_message, reply)
+
         return reply
     except Exception as e:
         logger.error(f"❌ Error en run_agent fallback IA: {e}")
-        return "⚠️ No pude procesar tu mensaje. Intenta de nuevo en unos segundos."
+        return "⚠️ No pude procesar tu mensaje. Intentá de nuevo en unos segundos."
