@@ -1,4 +1,5 @@
 # coding: utf-8
+
 """
 Módulo: fran_agent.py
 Lógica central del asistente Fran 3.8
@@ -18,7 +19,6 @@ from fran.cart import cart_summary_text
 from fran.ai import (
     detect_intent,
     rule_based_reply,
-    generate_llm_reply,
     generate_product_based_reply,
 )
 from fran.config import INSTANT_THRESHOLD, logger
@@ -56,11 +56,11 @@ def run_agent(phone: str, user_message: str) -> str:
             text = format_bulk_response(result)
             save_message(phone, text, "bot")
             log_performance(phone, "bulk_sync", start_time)
-
+            
             # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
             from fran.ai import update_conversation_summary
             update_conversation_summary(phone, user_message, text)
-
+            
             return text
         else:
             text = "📦 Tu lista es muy larga. Estoy procesándola, esto puede tardar unos segundos..."
@@ -80,7 +80,7 @@ def run_agent(phone: str, user_message: str) -> str:
     if quick:
         save_message(phone, quick, "bot")
         log_performance(phone, "rule_based", start_time)
-        return quick  # ❌ No actualizamos resumen en saludos/agradecimientos
+        return quick
 
     # =========================================================
     # 4. INTENCIÓN DE CARRITO
@@ -90,42 +90,23 @@ def run_agent(phone: str, user_message: str) -> str:
         save_message(phone, reply, "bot")
         log_interaction(phone, user_message, intent)
         log_performance(phone, "cart", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN (para que recuerde estado del carrito)
+        
+        # ✅ ACTUALIZAR RESUMEN
         from fran.ai import update_conversation_summary
         update_conversation_summary(phone, user_message, reply)
-
+        
         return reply
 
     # =========================================================
-    # 5. INTENCIÓN DE BÚSQUEDA TÉCNICA
+    # 5. INTENCIÓN DE BÚSQUEDA TÉCNICA O MENSAJE ABIERTO
     # =========================================================
-    if intent == "search":
-        reply = generate_product_based_reply(phone, user_message)
-        save_message(phone, reply, "bot")
-        log_interaction(phone, user_message, intent)
-        log_performance(phone, "search_rag", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN (producto + contexto)
-        from fran.ai import update_conversation_summary
-        update_conversation_summary(phone, user_message, reply)
-
-        return reply
-
-    # =========================================================
-    # 6. FALLBACK IA (para dudas o mensajes naturales)
-    # =========================================================
-    try:
-        reply = generate_llm_reply(phone, user_message)
-        save_message(phone, reply, "bot")
-        log_interaction(phone, user_message, intent)
-        log_performance(phone, "llm_reply", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN (para consultas abiertas)
-        from fran.ai import update_conversation_summary
-        update_conversation_summary(phone, user_message, reply)
-
-        return reply
-    except Exception as e:
-        logger.error(f"❌ Error en run_agent fallback IA: {e}")
-        return "⚠️ No pude procesar tu mensaje. Intentá de nuevo en unos segundos."
+    reply = generate_product_based_reply(phone, user_message)
+    save_message(phone, reply, "bot")
+    log_interaction(phone, user_message, intent)
+    log_performance(phone, "search_rag", start_time)
+    
+    # ✅ ACTUALIZAR RESUMEN
+    from fran.ai import update_conversation_summary
+    update_conversation_summary(phone, user_message, reply)
+    
+    return reply
