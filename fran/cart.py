@@ -3,7 +3,7 @@
 Módulo de carrito de compras (Fran 3.8)
 
 Funciones:
-- Agregar productos
+- Agregar productos (sin race conditions)
 - Eliminar / actualizar cantidades
 - Consultar y limpiar carrito
 - Calcular totales
@@ -28,22 +28,19 @@ def cart_add(phone: str, code: str, name: str, price: float, qty: int = 1):
     """Agrega un producto al carrito, o incrementa cantidad si ya existe."""
     with cart_lock, get_db_connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, qty FROM carts WHERE phone = ? AND code = ?",
-            (phone, code)
-        )
-        row = cur.fetchone()
-        if row:
-            new_qty = row["qty"] + qty
-            cur.execute("UPDATE carts SET qty = ? WHERE id = ?", (new_qty, row["id"]))
-            logger.info(f"🛒 Cantidad actualizada: {code} x{new_qty}")
-        else:
-            cur.execute(
-                "INSERT INTO carts (phone, code, name, price, qty) VALUES (?, ?, ?, ?, ?)",
-                (phone, code, name, price, qty),
-            )
-            logger.info(f"🛒 Producto agregado: {code} x{qty}")
+        # ✅ Usamos INSERT OR IGNORE + UPDATE para evitar race conditions
+        cur.execute("""
+            INSERT OR IGNORE INTO carts (phone, code, name, price, qty)
+            VALUES (?, ?, ?, ?, ?)
+        """, (phone, code, name, price, qty))
+        
+        cur.execute("""
+            UPDATE carts SET qty = qty + ? 
+            WHERE phone = ? AND code = ? AND (SELECT qty FROM carts WHERE phone = ? AND code = ?) > 0
+        """, (qty, phone, code, phone, code))
+        
         conn.commit()
+        logger.info(f"🛒 Producto agregado/actualizado: {code} x{qty} para {phone}")
 
 
 def cart_update_qty(phone: str, code: str, qty: int):
@@ -53,7 +50,7 @@ def cart_update_qty(phone: str, code: str, qty: int):
     with cart_lock, get_db_connection() as conn:
         conn.execute("UPDATE carts SET qty = ? WHERE phone = ? AND code = ?", (qty, phone, code))
         conn.commit()
-        logger.info(f"🔢 Cantidad actualizada {code} = {qty}")
+        logger.info(f"🔢 Cantidad actualizada {code} = {qty} para {phone}")
 
 
 def cart_remove(phone: str, code: str):
@@ -61,7 +58,7 @@ def cart_remove(phone: str, code: str):
     with cart_lock, get_db_connection() as conn:
         conn.execute("DELETE FROM carts WHERE phone = ? AND code = ?", (phone, code))
         conn.commit()
-        logger.info(f"❌ Producto eliminado: {code}")
+        logger.info(f"❌ Producto eliminado: {code} para {phone}")
 
 
 def cart_clear(phone: str):
@@ -114,7 +111,7 @@ def cart_summary_text(phone: str) -> str:
     for p in items:
         subtotal = Decimal(str(p["price"])) * p["qty"]
         total += subtotal
-        lines.append(f"• {p['name']} ({p['code']}) x{p['qty']} — ${subtotal:.2f}")
+        lines.append(f"• {p['name']} ({p['code']}) x{p['qty']} — {format_price(subtotal, 'USD')}")
 
-    lines.append(f"\nTOTAL: ${total:.2f}")
+    lines.append(f"\nTOTAL: {format_price(total, 'USD')}")
     return "\n".join(lines)
