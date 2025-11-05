@@ -87,6 +87,15 @@ def init_db():
             )
         """)
 
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_summary (
+                phone TEXT PRIMARY KEY,
+                summary TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+             )
+         """)        
+
         conn.commit()
         logger.info("✅ Tablas creadas o verificadas correctamente")
 
