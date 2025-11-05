@@ -160,8 +160,8 @@ def generate_product_based_reply(phone: str, query: str, products: List[Dict[str
     Usa la personalidad de Fran y evita alucinaciones.
     """
     if products is None:
-        from fran.catalog import get_relevant_products_for_query
-        products = get_relevant_products_for_query(query, top_k=10)
+        from fran.search import search_products
+products = search_products(query, top_k=10)
 
     if not products:
         return generate_llm_reply(
