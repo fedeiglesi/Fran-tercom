@@ -1,15 +1,15 @@
 # coding: utf-8
 """
-Módulo de búsqueda híbrida (Fran 3.8)
+Módulo de búsqueda híbrida (Fran 3.8) - CON CONTEXTO
 
 Combina:
 - Búsqueda semántica (FAISS)
 - Búsqueda por similitud de texto (RapidFuzz)
-- Limpieza y alias automáticos
+- ✅ INYECCIÓN DE CONTEXTO CONVERSACIONAL
 """
 
 from rapidfuzz import process, fuzz
-from typing import List, Dict
+from typing import List, Dict, Optional
 from fran.catalog import get_catalog_and_index, search_catalog
 from fran.utils import normalize_search_query, strip_accents
 from fran.config import MAX_SEARCH_RESULTS, logger
@@ -98,16 +98,42 @@ def hybrid_search(query: str, top_k: int = 50) -> List[Dict[str, str]]:
 
 
 # =========================================================
-# FUNCIÓN PRINCIPAL DE BUSCA
+# FUNCIÓN PRINCIPAL CON CONTEXTO CONVERSACIONAL
 # =========================================================
 
-def search_products(user_query: str, top_k: int = 50) -> List[Dict[str, str]]:
-    """Busca productos en el catálogo combinando FAISS y fuzzy."""
+def search_products(user_query: str, top_k: int = 50, phone: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Busca productos en el catálogo combinando FAISS y fuzzy.
+    
+    ✅ Si se pasa phone, inyecta el contexto de la conversación.
+    
+    Ejemplos:
+    - Usuario: "amortiguadores honda wave" → Búsqueda normal
+    - Usuario: "y para adelante?" → Con contexto: "honda wave amortiguadores delanteros"
+    - Usuario: "el far" → Con contexto: "honda wave amortiguador far"
+    """
     try:
-        results = hybrid_search(user_query, top_k=top_k)
+        # ✅ INYECTAR CONTEXTO SI ESTÁ DISPONIBLE
+        refined_query = user_query
+        
+        if phone:
+            from fran.ai import get_conversation_summary
+            summary = get_conversation_summary(phone)
+            
+            if summary and len(summary) > 10:
+                # Combinar contexto + consulta actual
+                refined_query = f"{summary} {user_query}"
+                logger.info(f"🔍 Búsqueda con contexto: '{user_query}' + contexto")
+        
+        results = hybrid_search(refined_query, top_k=top_k)
+        
         if not results:
             logger.info(f"🔍 Sin resultados para: {user_query}")
+        else:
+            logger.info(f"🔍 Encontrados {len(results)} resultados para: {user_query}")
+        
         return results
+        
     except Exception as e:
         logger.error(f"❌ Error en search_products: {e}")
         return []
