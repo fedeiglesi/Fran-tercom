@@ -1,6 +1,6 @@
 # coding: utf-8
 """
-Modulo: routes.py
+Módulo: routes.py
 Endpoints principales de Fran 3.8 (Flask)
 -------------------------------------------------
 Incluye:
@@ -22,6 +22,7 @@ from fran.ai import (
     generate_llm_reply,
     generate_product_based_reply,
     summarize_message_for_log,
+    update_conversation_summary,  # ✅ Importado
 )
 from fran.config import logger, INSTANT_THRESHOLD
 from fran.catalog import eager_warmup
@@ -36,13 +37,13 @@ import time
 app = Flask(__name__)
 
 # =========================================================
-# WARMUP DEL CATALOGO Y FAISS (al arrancar)
+# WARMUP DEL CATÁLOGO Y FAISS (al arrancar)
 # =========================================================
 try:
     if os.environ.get("EAGER_CATALOG", "1") == "1":
-        logger.info("🚀 Iniciando warmup de catalogo FAISS al arrancar servidor...")
+        logger.info("🚀 Iniciando warmup de catálogo FAISS al arrancar servidor...")
         eager_warmup()
-        logger.info("✅ Warmup de catalogo completado correctamente.")
+        logger.info("✅ Warmup de catálogo completado correctamente.")
 except Exception as e:
     logger.error(f"❌ Error en warmup inicial: {e}")
 
@@ -58,7 +59,7 @@ def api_quote():
     user_message = data.get("message", "").strip()
 
     if not phone or not user_message:
-        return jsonify({"error": "Faltan parametros"}), 400
+        return jsonify({"error": "Faltan parámetros"}), 400
 
     start_time = time.time()
     save_message(phone, user_message, "user")
@@ -71,18 +72,30 @@ def api_quote():
         text = format_bulk_response(result)
         save_message(phone, text, "bot")
         log_performance(phone, "bulk_sync", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, text)
+
         return jsonify({"response": text, "intent": "bulk_quote"})
 
-    # Busqueda tecnica usando Fran + Catalogo + FAISS
+    # Búsqueda técnica usando Fran + Catálogo + FAISS
     if intent == "search":
         reply = generate_product_based_reply(phone, user_message)
         save_message(phone, reply, "bot")
         log_performance(phone, "search_rag", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, reply)
+
         return jsonify({"response": reply, "intent": intent})
     else:
         reply = generate_llm_reply(phone, user_message)
         save_message(phone, reply, "bot")
         log_performance(phone, "llm_reply", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, reply)
+
         return jsonify({"response": reply, "intent": intent})
 
 
@@ -92,7 +105,7 @@ def api_quote():
 
 @app.route("/api/analytics", methods=["GET"])
 def api_analytics():
-    """Devuelve metricas simples: intenciones detectadas y mensajes mas frecuentes."""
+    """Devuelve métricas simples: intenciones detectadas y mensajes más frecuentes."""
     from fran.db import get_db_connection
     try:
         with get_db_connection() as conn:
@@ -128,9 +141,8 @@ def api_analytics():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Verifica que la app este viva."""
+    """Verifica que la app esté viva."""
     return jsonify({"status": "ok"})
-
 
 # =========================================================
 # ENDPOINT /webhook (Twilio WhatsApp)
@@ -153,14 +165,14 @@ def webhook():
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
-    # Respuestas rapidas
+    # Respuestas rápidas
     fast_reply = rule_based_reply(intent, user_message)
     if fast_reply:
         resp = MessagingResponse()
         resp.message(fast_reply)
         save_message(phone, fast_reply, "bot")
         log_performance(phone, "rule_based", start_time)
-        return str(resp)
+        return str(resp)  # ❌ No actualizamos resumen en saludos
 
     # Listas masivas
     is_bulk, count = is_bulk_list_request(user_message)
@@ -172,14 +184,22 @@ def webhook():
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "bulk_quote", count)
         log_performance(phone, "bulk_sync", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, reply_text)
+
         return str(resp)
 
-    # Busqueda tecnica usando RAG + Catalogo
+    # Búsqueda técnica usando RAG + Catálogo
     if intent == "search":
         reply_text = generate_product_based_reply(phone, user_message)
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "search")
         log_performance(phone, "search_rag", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, reply_text)
+
         resp = MessagingResponse()
         resp.message(reply_text)
         return str(resp)
@@ -192,6 +212,10 @@ def webhook():
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "cart")
         log_performance(phone, "cart", start_time)
+
+        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        update_conversation_summary(phone, user_message, reply_text)
+
         return str(resp)
 
     # IA general
@@ -199,6 +223,9 @@ def webhook():
     save_message(phone, llm_reply, "bot")
     log_interaction(phone, user_message, intent)
     log_performance(phone, "llm_reply", start_time)
+
+    # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+    update_conversation_summary(phone, user_message, llm_reply)
 
     resp = MessagingResponse()
     resp.message(llm_reply)
