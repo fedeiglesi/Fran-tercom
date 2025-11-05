@@ -108,17 +108,27 @@ def format_price(value: Decimal, currency: str = "ARS") -> str:
 
 
 def parse_price_str(text: str) -> Optional[Decimal]:
-    """Extrae valor decimal de un string de precio."""
+    """Extrae valor decimal de un string de precio (soporta 1.250,75 y 1250.50)."""
     if not text:
         return None
+    # Eliminar simbolos de moneda y espacios
     text = text.replace("$", "").replace("USD", "").strip()
     text = re.sub(r"[^\d.,-]", "", text)
-    text = text.replace(".", "").replace(",", ".")
+
+    # Caso 1: hay coma y al menos un punto → asumir formato ARS: 1.250,75
+    if "," in text and "." in text:
+        # Eliminar puntos (miles), convertir coma a punto (decimal)
+        text = text.replace(".", "").replace(",", ".")
+    # Caso 2: solo hay coma → podría ser decimal (ej: 12,50)
+    elif "," in text and text.count(",") == 1:
+        text = text.replace(",", ".")
+    # Caso 3: solo puntos → ya está en formato decimal (ej: 1250.75)
+    # (no hacemos nada)
+
     try:
         return Decimal(text)
-    except InvalidOperation:
+    except (InvalidOperation, ValueError):
         return None
-
 
 # =========================================================
 # DEDUPLICACIÓN DE MENSAJES
