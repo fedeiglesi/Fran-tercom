@@ -1,4 +1,5 @@
 # coding: utf-8
+
 """
 Módulo: routes.py
 Endpoints principales de Fran 3.8 (Flask)
@@ -19,10 +20,9 @@ from fran.cart import cart_add, cart_get, cart_clear, cart_summary_text
 from fran.ai import (
     detect_intent,
     rule_based_reply,
-    generate_llm_reply,
     generate_product_based_reply,
     summarize_message_for_log,
-    update_conversation_summary,  # ✅ Importado
+    update_conversation_summary,
 )
 from fran.config import logger, INSTANT_THRESHOLD
 from fran.catalog import eager_warmup
@@ -72,31 +72,21 @@ def api_quote():
         text = format_bulk_response(result)
         save_message(phone, text, "bot")
         log_performance(phone, "bulk_sync", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        
+        # ✅ ACTUALIZAR RESUMEN
         update_conversation_summary(phone, user_message, text)
-
+        
         return jsonify({"response": text, "intent": "bulk_quote"})
 
-    # Búsqueda técnica usando Fran + Catálogo + FAISS
-    if intent == "search":
-        reply = generate_product_based_reply(phone, user_message)
-        save_message(phone, reply, "bot")
-        log_performance(phone, "search_rag", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
-        update_conversation_summary(phone, user_message, reply)
-
-        return jsonify({"response": reply, "intent": intent})
-    else:
-        reply = generate_llm_reply(phone, user_message)
-        save_message(phone, reply, "bot")
-        log_performance(phone, "llm_reply", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
-        update_conversation_summary(phone, user_message, reply)
-
-        return jsonify({"response": reply, "intent": intent})
+    # Búsqueda técnica o mensaje abierto
+    reply = generate_product_based_reply(phone, user_message)
+    save_message(phone, reply, "bot")
+    log_performance(phone, "search_rag", start_time)
+    
+    # ✅ ACTUALIZAR RESUMEN
+    update_conversation_summary(phone, user_message, reply)
+    
+    return jsonify({"response": reply, "intent": intent})
 
 
 # =========================================================
@@ -144,6 +134,7 @@ def health():
     """Verifica que la app esté viva."""
     return jsonify({"status": "ok"})
 
+
 # =========================================================
 # ENDPOINT /webhook (Twilio WhatsApp)
 # =========================================================
@@ -172,7 +163,7 @@ def webhook():
         resp.message(fast_reply)
         save_message(phone, fast_reply, "bot")
         log_performance(phone, "rule_based", start_time)
-        return str(resp)  # ❌ No actualizamos resumen en saludos
+        return str(resp)
 
     # Listas masivas
     is_bulk, count = is_bulk_list_request(user_message)
@@ -184,24 +175,10 @@ def webhook():
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "bulk_quote", count)
         log_performance(phone, "bulk_sync", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        
+        # ✅ ACTUALIZAR RESUMEN
         update_conversation_summary(phone, user_message, reply_text)
-
-        return str(resp)
-
-    # Búsqueda técnica usando RAG + Catálogo
-    if intent == "search":
-        reply_text = generate_product_based_reply(phone, user_message)
-        save_message(phone, reply_text, "bot")
-        log_interaction(phone, user_message, "search")
-        log_performance(phone, "search_rag", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
-        update_conversation_summary(phone, user_message, reply_text)
-
-        resp = MessagingResponse()
-        resp.message(reply_text)
+        
         return str(resp)
 
     # Carrito
@@ -212,22 +189,22 @@ def webhook():
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "cart")
         log_performance(phone, "cart", start_time)
-
-        # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
+        
+        # ✅ ACTUALIZAR RESUMEN
         update_conversation_summary(phone, user_message, reply_text)
-
+        
         return str(resp)
 
-    # IA general
-    llm_reply = generate_llm_reply(phone, user_message)
-    save_message(phone, llm_reply, "bot")
+    # SIEMPRE usar el catálogo como contexto (incluso en mensajes abiertos)
+    reply_text = generate_product_based_reply(phone, user_message)
+    save_message(phone, reply_text, "bot")
     log_interaction(phone, user_message, intent)
-    log_performance(phone, "llm_reply", start_time)
-
-    # ✅ ACTUALIZAR RESUMEN CONVERSACIONAL
-    update_conversation_summary(phone, user_message, llm_reply)
+    log_performance(phone, "search_rag", start_time)
+    
+    # ✅ ACTUALIZAR RESUMEN
+    update_conversation_summary(phone, user_message, reply_text)
 
     resp = MessagingResponse()
-    resp.message(llm_reply)
-    logger.info(summarize_message_for_log(phone, user_message, intent, llm_reply))
+    resp.message(reply_text)
+    logger.info(summarize_message_for_log(phone, user_message, intent, reply_text))
     return str(resp)
