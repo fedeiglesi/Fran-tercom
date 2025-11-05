@@ -57,44 +57,47 @@ Reglas criticas:
 # =========================================================
 
 def generate_llm_reply(phone: str, user_message: str, structured_data: Optional[Dict[str, str]] = None) -> str:
-    """
-    Usa el modelo GPT para generar una respuesta amigable.
-    Puede reformular resultados del catalogo o responder consultas directas.
-    """
     if not client:
         logger.warning("⚠️ OpenAI client no disponible")
-        return "⚠️ El sistema de IA no esta disponible en este momento."
+        return "⚠️ El sistema de IA no está disponible en este momento."
 
     try:
+        # ✅ Obtener resumen conversacional
+        conversation_summary = get_conversation_summary(phone)
+        context_section = f"Resumen de la conversación previa:\n{conversation_summary}\n\n" if conversation_summary else ""
+
         if structured_data:
             structured_text = json.dumps(structured_data, ensure_ascii=False, indent=2)
-            user_message = f"Estos son los datos que obtuve:\n{structured_text}\n\nRedacta una respuesta clara para el cliente."
+            user_prompt = f"{context_section}Datos técnicos:\n{structured_text}\n\nRedactá una respuesta clara para el cliente."
+        else:
+            user_prompt = (
+                f"{context_section}Último mensaje del usuario:\n{user_message}\n\n"
+                "Responde como Fran, recordando el contexto anterior."
+            )
 
         start_time = time.time()
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": SMART_SYSTEM_PROMPT},
-                {"role": "user", "content": user_message}
+                {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
             max_tokens=400,
         )
         reply = response.choices[0].message.content.strip()
         duration = round(time.time() - start_time, 2)
-
         logger.info(f"🤖 Respuesta IA generada en {duration}s ({len(reply)} chars)")
         return reply
 
     except RateLimitError:
-        logger.warning("⚠️ Limite de uso OpenAI alcanzado, reintentando en 5s...")
+        logger.warning("⚠️ Límite de uso OpenAI alcanzado, reintentando en 5s...")
         time.sleep(5)
         return generate_llm_reply(phone, user_message, structured_data)
-
     except Exception as e:
         logger.error(f"❌ Error en generate_llm_reply: {e}")
-        return "⚠️ Estoy teniendo un problema para responder ahora. Intenta de nuevo en unos segundos."
-
+        return "⚠️ Estoy teniendo un problema para responder ahora. Intentá de nuevo en unos segundos."
+        
 # =========================================================
 # DETECTOR DE INTENCION (RULE-BASED)
 # =========================================================
