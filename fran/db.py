@@ -1,5 +1,4 @@
 # coding: utf-8
-
 """
 Módulo de base de datos (SQLite) para Fran 3.8
 
@@ -55,6 +54,7 @@ def init_db():
             )
         """)
 
+        # ✅ ÍNDICE ÚNICO (phone, code) para evitar race conditions
         cur.execute("""
             CREATE TABLE IF NOT EXISTS carts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,7 +63,8 @@ def init_db():
                 name TEXT,
                 price REAL,
                 qty INTEGER DEFAULT 1,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(phone, code)
             )
         """)
 
