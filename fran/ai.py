@@ -203,3 +203,63 @@ def summarize_message_for_log(phone: str, user_message: str, intent: str, respon
     user_preview = ellipsis(user_message, 50)
     response_preview = ellipsis(response, 80)
     return f"{phone} | {intent} | U: {user_preview} → R: {response_preview}"
+
+# =========================================================
+# MEMORIA CONVERSACIONAL PROGRESIVA (con IA barata)
+# =========================================================
+
+def get_conversation_summary(phone: str) -> str:
+    """Obtiene el resumen actual de la conversación."""
+    from fran.db import get_db_connection
+    with get_db_connection() as conn:
+        cur = conn.execute("SELECT summary FROM conversation_summary WHERE phone = ?", (phone,))
+        row = cur.fetchone()
+        return row["summary"] if row and row["summary"] else ""
+
+def update_conversation_summary(phone: str, user_message: str, bot_reply: str):
+    """
+    Actualiza el resumen de la conversación usando gpt-3.5-turbo (barato).
+    Solo se llama en interacciones relevantes.
+    """
+    if not client:
+        return
+
+    current_summary = get_conversation_summary(phone)
+    new_exchange = f"Usuario: {user_message}\nFran: {bot_reply}"
+
+    # Prompt para resumir
+    prompt = f"""Actualizá el resumen de la conversación con el nuevo intercambio.
+- Mantenelo breve (1-2 oraciones).
+- Incluí solo información relevante: productos, precios, decisiones, dudas técnicas.
+- Usá tercera persona y lenguaje neutral.
+- Si el intercambio es un saludo o despedida, mantené el resumen anterior.
+
+Resumen actual:
+{current_summary}
+
+Nuevo intercambio:
+{new_exchange}
+
+Resumen actualizado:"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",  # más barato que gpt-4
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=120,
+            timeout=5
+        )
+        new_summary = response.choices[0].message.content.strip()
+
+        # Guardar en DB
+        from fran.db import get_db_connection
+        with get_db_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO conversation_summary (phone, summary, updated_at)
+                VALUES (?, ?, datetime('now'))
+            """, (phone, new_summary))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo actualizar resumen para {phone}: {e}")
+        # Si falla, no pasa nada: seguimos sin resumen
