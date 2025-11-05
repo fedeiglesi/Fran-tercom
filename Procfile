@@ -1,1 +1,1 @@
-web: gunicorn fran.routes:app
+web: gunicorn --bind 0.0.0.0:$PORT fran.routes:app
