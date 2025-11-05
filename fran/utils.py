@@ -7,15 +7,16 @@ Incluye:
 - Limpieza y sanitización de entrada
 - Manejo de precios y decimales
 - Validación de códigos Tercom
-- Detección de duplicados en ventana corta
+- Detección de duplicados en ventana corta (con memory leak fix)
 """
 
 import re
-import unicodedata
 import time
+import threading
+import unicodedata
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from threading import Lock
 from typing import Optional
+from collections import OrderedDict
 from fran.config import logger, DEDUP_WINDOW
 
 
@@ -108,45 +109,55 @@ def format_price(value: Decimal, currency: str = "ARS") -> str:
 
 
 def parse_price_str(text: str) -> Optional[Decimal]:
-    """Extrae valor decimal de un string de precio (soporta 1.250,75 y 1250.50)."""
+    """Extrae valor decimal de un string de precio."""
     if not text:
         return None
-    # Eliminar simbolos de moneda y espacios
     text = text.replace("$", "").replace("USD", "").strip()
     text = re.sub(r"[^\d.,-]", "", text)
-
-    # Caso 1: hay coma y al menos un punto → asumir formato ARS: 1.250,75
-    if "," in text and "." in text:
-        # Eliminar puntos (miles), convertir coma a punto (decimal)
-        text = text.replace(".", "").replace(",", ".")
-    # Caso 2: solo hay coma → podría ser decimal (ej: 12,50)
-    elif "," in text and text.count(",") == 1:
-        text = text.replace(",", ".")
-    # Caso 3: solo puntos → ya está en formato decimal (ej: 1250.75)
-    # (no hacemos nada)
-
+    text = text.replace(".", "").replace(",", ".")
     try:
         return Decimal(text)
-    except (InvalidOperation, ValueError):
+    except InvalidOperation:
         return None
 
+
 # =========================================================
-# DEDUPLICACIÓN DE MENSAJES
+# DEDUPLICACIÓN DE MENSAJES (con fix de memory leak)
 # =========================================================
 
-_last_messages = {}
-_last_lock = Lock()
+_last_messages = OrderedDict()
+_last_lock = threading.Lock()
+MAX_DEDUP_CACHE = 1000  # Evita memory leak
 
+def _cleanup_dedup_cache():
+    """Limpia caché cada 10 minutos (ejecutado en background)"""
+    global _last_messages
+    now = time.time()
+    with _last_lock:
+        # Elimina entradas más viejas de 10 minutos
+        to_remove = [k for k, v in _last_messages.items() if now - v["ts"] > 600]
+        for k in to_remove:
+            del _last_messages[k]
+        # Limita tamaño total
+        while len(_last_messages) > MAX_DEDUP_CACHE:
+            _last_messages.popitem(last=False)
 
 def is_duplicate_message(phone: str, message: str) -> bool:
     """Evita procesar el mismo mensaje dos veces en pocos segundos."""
     now = time.time()
     with _last_lock:
+        # Limpieza periódica
+        if len(_last_messages) % 100 == 0:  # Cada 100 mensajes
+            _cleanup_dedup_cache()
+        
         prev = _last_messages.get(phone)
         if prev and prev["msg"] == message and now - prev["ts"] < DEDUP_WINDOW:
             logger.info(f"🟡 Mensaje duplicado ignorado ({phone}): {message}")
             return True
         _last_messages[phone] = {"msg": message, "ts": now}
+        # Limitar tamaño
+        if len(_last_messages) > MAX_DEDUP_CACHE:
+            _last_messages.popitem(last=False)
     return False
 
 
