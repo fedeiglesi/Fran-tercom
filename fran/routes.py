@@ -1,6 +1,6 @@
 # coding: utf-8
 """
-Módulo: routes.py
+Modulo: routes.py
 Endpoints principales de Fran 3.8 (Flask)
 -------------------------------------------------
 Incluye:
@@ -15,11 +15,16 @@ from twilio.twiml.messaging_response import MessagingResponse
 from fran.utils import is_duplicate_message
 from fran.db import save_message, log_interaction, log_performance
 from fran.bulk import is_bulk_list_request, process_bulk_sync, format_bulk_response
-from fran.search import search_products
 from fran.cart import cart_add, cart_get, cart_clear, cart_summary_text
-from fran.ai import detect_intent, rule_based_reply, generate_llm_reply, summarize_message_for_log
+from fran.ai import (
+    detect_intent,
+    rule_based_reply,
+    generate_llm_reply,
+    generate_product_based_reply,
+    summarize_message_for_log,
+)
 from fran.config import logger, INSTANT_THRESHOLD
-from fran.catalog import eager_warmup  # ✅ Import del warmup del catálogo
+from fran.catalog import eager_warmup
 
 import os
 import time
@@ -31,15 +36,13 @@ import time
 app = Flask(__name__)
 
 # =========================================================
-# WARMUP DEL CATÁLOGO Y FAISS (al arrancar)
+# WARMUP DEL CATALOGO Y FAISS (al arrancar)
 # =========================================================
-# Esto asegura que el catálogo y FAISS se carguen desde el inicio,
-# en lugar de hacerlo recién cuando llega el primer mensaje.
 try:
     if os.environ.get("EAGER_CATALOG", "1") == "1":
-        logger.info("🚀 Iniciando warmup de catálogo FAISS al arrancar servidor...")
+        logger.info("🚀 Iniciando warmup de catalogo FAISS al arrancar servidor...")
         eager_warmup()
-        logger.info("✅ Warmup de catálogo completado correctamente.")
+        logger.info("✅ Warmup de catalogo completado correctamente.")
 except Exception as e:
     logger.error(f"❌ Error en warmup inicial: {e}")
 
@@ -55,7 +58,7 @@ def api_quote():
     user_message = data.get("message", "").strip()
 
     if not phone or not user_message:
-        return jsonify({"error": "Faltan parámetros"}), 400
+        return jsonify({"error": "Faltan parametros"}), 400
 
     start_time = time.time()
     save_message(phone, user_message, "user")
@@ -70,17 +73,17 @@ def api_quote():
         log_performance(phone, "bulk_sync", start_time)
         return jsonify({"response": text, "intent": "bulk_quote"})
 
-    # Búsqueda individual
-    results = search_products(user_message, top_k=5)
-    if not results:
-        reply = "No encontré ese producto en el catálogo. ¿Podés darme más detalles?"
+    # Busqueda tecnica usando Fran + Catalogo + FAISS
+    if intent == "search":
+        reply = generate_product_based_reply(phone, user_message)
+        save_message(phone, reply, "bot")
+        log_performance(phone, "search_rag", start_time)
+        return jsonify({"response": reply, "intent": intent})
     else:
-        lines = [f"{r['name']} ({r['code']}) — USD {r['price']:.2f}" for r in results[:3]]
-        reply = "🔍 Resultados:\n" + "\n".join(lines)
-
-    save_message(phone, reply, "bot")
-    log_performance(phone, "quote", start_time)
-    return jsonify({"response": reply, "intent": intent})
+        reply = generate_llm_reply(phone, user_message)
+        save_message(phone, reply, "bot")
+        log_performance(phone, "llm_reply", start_time)
+        return jsonify({"response": reply, "intent": intent})
 
 
 # =========================================================
@@ -89,7 +92,7 @@ def api_quote():
 
 @app.route("/api/analytics", methods=["GET"])
 def api_analytics():
-    """Devuelve métricas simples: intenciones detectadas y mensajes más frecuentes."""
+    """Devuelve metricas simples: intenciones detectadas y mensajes mas frecuentes."""
     from fran.db import get_db_connection
     try:
         with get_db_connection() as conn:
@@ -125,7 +128,7 @@ def api_analytics():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Verifica que la app esté viva."""
+    """Verifica que la app este viva."""
     return jsonify({"status": "ok"})
 
 
@@ -138,21 +141,19 @@ def webhook():
     """Endpoint principal del bot WhatsApp."""
     start_time = time.time()
 
-    # Datos entrantes
     phone = request.form.get("From", "").replace("whatsapp:", "")
     user_message = request.form.get("Body", "").strip()
 
     if not phone or not user_message:
         return Response("Faltan datos", status=400)
 
-    # Evitamos procesar duplicados
     if is_duplicate_message(phone, user_message):
         return Response("Mensaje duplicado ignorado", status=200)
 
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
-    # Intent rule-based
+    # Respuestas rapidas
     fast_reply = rule_based_reply(intent, user_message)
     if fast_reply:
         resp = MessagingResponse()
@@ -161,7 +162,7 @@ def webhook():
         log_performance(phone, "rule_based", start_time)
         return str(resp)
 
-    # Intent lista masiva
+    # Listas masivas
     is_bulk, count = is_bulk_list_request(user_message)
     if is_bulk and count < INSTANT_THRESHOLD:
         result = process_bulk_sync(phone, user_message)
@@ -173,22 +174,17 @@ def webhook():
         log_performance(phone, "bulk_sync", start_time)
         return str(resp)
 
-    # Intent búsqueda individual
+    # Busqueda tecnica usando RAG + Catalogo
     if intent == "search":
-        results = search_products(user_message, top_k=5)
-        if results:
-            lines = [f"{r['name']} ({r['code']}) — USD {r['price']:.2f}" for r in results[:3]]
-            reply_text = "🔍 Resultados:\n" + "\n".join(lines)
-        else:
-            reply_text = "No encontré ese producto en el catálogo. ¿Podés darme más detalles?"
+        reply_text = generate_product_based_reply(phone, user_message)
         save_message(phone, reply_text, "bot")
         log_interaction(phone, user_message, "search")
-        log_performance(phone, "search", start_time)
+        log_performance(phone, "search_rag", start_time)
         resp = MessagingResponse()
         resp.message(reply_text)
         return str(resp)
 
-    # Intent carrito
+    # Carrito
     if intent == "cart":
         reply_text = cart_summary_text(phone)
         resp = MessagingResponse()
@@ -198,7 +194,7 @@ def webhook():
         log_performance(phone, "cart", start_time)
         return str(resp)
 
-    # Intent general o desconocido (IA)
+    # IA general
     llm_reply = generate_llm_reply(phone, user_message)
     save_message(phone, llm_reply, "bot")
     log_interaction(phone, user_message, intent)
