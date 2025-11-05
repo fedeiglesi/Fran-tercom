@@ -161,7 +161,7 @@ def generate_product_based_reply(phone: str, query: str, products: List[Dict[str
     """
     if products is None:
         from fran.search import search_products
-products = search_products(query, top_k=10)
+        products = search_products(query, top_k=10)
 
     if not products:
         return generate_llm_reply(
