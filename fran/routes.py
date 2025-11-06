@@ -3,8 +3,9 @@
 """
 Módulo: routes.py
 Endpoints principales de Fran 3.8 (Flask)
--------------------------------------------------
+
 Incluye:
+
 - /api/quote
 - /api/analytics
 - /webhook (Twilio con validación before_request)
@@ -61,30 +62,40 @@ def validate_twilio_signature():
         try:
             signature = request.headers.get("X-Twilio-Signature", "")
             url = request.url
+
             # Twilio usa HTTPS en producción
             if url.startswith("http://") and not url.startswith("http://localhost"):
                 url = url.replace("http://", "https://")
-            
+
             params = request.form.to_dict()
-            
+
             if not twilio_validator.validate(url, params, signature):
                 logger.warning(f"⚠️ Firma Twilio inválida desde {request.remote_addr}")
                 return Response("Forbidden", status=403)
+
         except Exception as e:
             logger.error(f"❌ Error validando firma Twilio: {e}")
             return Response("Forbidden", status=403)
 
 
 # =========================================================
-# WARMUP DEL CATÁLOGO Y FAISS (al arrancar)
+# WARMUP ASINCRÓNICO DEL CATÁLOGO
 # =========================================================
-try:
-    if os.environ.get("EAGER_CATALOG", "1") == "1":
-        logger.info("🚀 Iniciando warmup de catálogo FAISS al arrancar servidor...")
-        eager_warmup()
-        logger.info("✅ Warmup de catálogo completado correctamente.")
-except Exception as e:
-    logger.error(f"❌ Error en warmup inicial: {e}")
+
+def _async_warmup():
+    """Carga el catálogo en background sin bloquear el servidor."""
+    try:
+        if os.environ.get("EAGER_CATALOG", "1") == "1":
+            logger.info("🔥 Iniciando warmup asincrónico del catálogo...")
+            eager_warmup()
+            logger.info("✅ Warmup completado en background")
+    except Exception as e:
+        logger.error(f"❌ Error en warmup async: {e}")
+
+
+# Iniciar warmup en thread separado
+threading.Thread(target=_async_warmup, daemon=True).start()
+
 
 # =========================================================
 # ENDPOINT /api/quote
@@ -111,18 +122,19 @@ def api_quote():
         text = format_bulk_response(result)
         save_message(phone, text, "bot")
         log_performance(phone, "bulk_sync", start_time)
-        
+
         # Actualización asíncrona de resumen
         def _update():
             try:
                 update_conversation_summary(phone, user_message, text)
             except:
                 pass
+
         threading.Thread(target=_update, daemon=True).start()
-        
+
         return jsonify({"response": text, "intent": "bulk_quote"})
 
-    # Búsqueda con timeout
+    # Búsqueda con timeout en IA
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(generate_product_based_reply, phone, user_message)
@@ -132,15 +144,15 @@ def api_quote():
 
     save_message(phone, reply, "bot")
     log_performance(phone, "search_rag", start_time)
-    
-    # Actualización asíncrona
+
     def _update():
         try:
             update_conversation_summary(phone, user_message, reply)
         except:
             pass
+
     threading.Thread(target=_update, daemon=True).start()
-    
+
     return jsonify({"response": reply, "intent": intent})
 
 
@@ -175,6 +187,7 @@ def api_analytics():
             top_searches = [{"message": r[0], "count": r[1]} for r in cur.fetchall()]
 
         return jsonify({"intents": intents, "top_searches": top_searches})
+
     except Exception as e:
         logger.error(f"❌ Error en /api/analytics: {e}")
         return jsonify({"error": str(e)}), 500
@@ -198,9 +211,7 @@ def health():
 def webhook():
     """Endpoint principal del bot WhatsApp con manejo robusto de errores y timeout."""
     start_time = time.time()
-    
-    # La validación ya se hizo en @app.before_request
-    
+
     try:
         phone = request.form.get("From", "").replace("whatsapp:", "")
         user_message = request.form.get("Body", "").strip()
@@ -225,21 +236,19 @@ def webhook():
             resp.message(fast_reply)
             save_message(phone, fast_reply, "bot")
             log_performance(phone, "rule_based", start_time)
-            logger.info(f"✅ Respuesta rápida a {phone}")
             return str(resp)
 
-        # Lógica principal con timeout
+        # Lógica principal
         is_bulk, count = is_bulk_list_request(user_message)
-        
+
         if is_bulk and count < INSTANT_THRESHOLD:
             result = process_bulk_sync(phone, user_message)
             reply_text = format_bulk_response(result)
-            
+
         elif intent == "cart":
             reply_text = cart_summary_text(phone)
-            
+
         else:
-            # ✅ TIMEOUT EN IA (máx 10s)
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(generate_product_based_reply, phone, user_message)
                 try:
@@ -251,13 +260,11 @@ def webhook():
                     logger.error(f"❌ Error en IA: {e}")
                     reply_text = "⚠️ Tuve un problema técnico. Intentá de nuevo."
 
-        # Guardar y loggear
         save_message(phone, reply_text, "bot")
         if intent != "cart":
             log_interaction(phone, user_message, intent)
         log_performance(phone, "webhook", start_time)
 
-        # ✅ ACTUALIZAR RESUMEN EN BACKGROUND
         def _update_summary():
             try:
                 update_conversation_summary(phone, user_message, reply_text)
@@ -266,19 +273,16 @@ def webhook():
 
         threading.Thread(target=_update_summary, daemon=True).start()
 
-        # Responder
         resp = MessagingResponse()
         resp.message(reply_text)
-        
+
         duration = round(time.time() - start_time, 2)
         logger.info(f"✅ Respuesta a {phone} en {duration}s: {reply_text[:80]}")
-        
+
         return str(resp)
 
     except Exception as e:
-        # ✅ MANEJO GENERAL DE ERRORES
         logger.error(f"❌ Error crítico en webhook: {e}", exc_info=True)
-        
         try:
             resp = MessagingResponse()
             resp.message("⚠️ Perdón, tuve un problema técnico. Intentá de nuevo.")
