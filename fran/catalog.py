@@ -78,7 +78,7 @@ def _load_raw_csv() -> List[Dict[str, str]]:
 
 
 # =========================================================
-# ENRIQUECIMIENTO DEL CATÁLOGO
+# ENRIQUECIMIENTO DEL CATALOGO
 # =========================================================
 
 def load_catalog_enriched() -> List[Dict[str, str]]:
@@ -246,7 +246,7 @@ def load_faiss_index() -> Tuple[Optional[faiss.IndexFlatIP], Optional[List[Dict[
 
 
 # =========================================================
-# ORQUESTADOR (con cache)
+# CARGA DE INDEX (CON CACHE)
 # =========================================================
 
 @lru_cache(maxsize=1)
@@ -261,36 +261,12 @@ def get_catalog_and_index() -> Tuple[List[Dict[str, str]], Optional[faiss.IndexF
         logger.info("🟢 FAISS index cargado desde disco (cache).")
         return catalog, index, [m["full_text"] for m in mapping]
 
-    if not client:
-        logger.warning("⚠️ No se puede generar FAISS index sin OpenAI client")
-        return catalog, None, []
-
-    embeddings, texts = generate_embeddings_with_cache(catalog)
-
-    if embeddings.size == 0:
-        logger.warning("⚠️ No se pudieron generar embeddings, FAISS no disponible")
-        return catalog, None, []
-
-    index = _build_faiss_index_from_catalog(catalog, embeddings)
-
-    if index:
-        mapping = [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "full_text": p["full_text"],
-                "brand": p.get("brand", ""),
-                "category": p.get("category", ""),
-            }
-            for p in catalog
-        ]
-        save_faiss_index(index, mapping)
-
-    return catalog, index, texts
+    logger.warning("⚠️ FAISS index no disponible - usando solo búsqueda fuzzy")
+    return catalog, None, []
 
 
 # =========================================================
-# BUSQUEDA SEMÁNTICA EN CATÁLOGO
+# BUSQUEDA SEMÁNTICA
 # =========================================================
 
 def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
@@ -331,7 +307,7 @@ def search_catalog(query: str, top_k: int = 10) -> List[Dict[str, str]]:
 
 
 # =========================================================
-# WARMUP AUTOMÁTICO
+# WARMUP AUTOMATICO
 # =========================================================
 
 def eager_warmup():
@@ -356,7 +332,7 @@ def eager_warmup():
 
 
 # =========================================================
-# API PRINCIPAL PARA OTROS MÓDULOS
+# FUNCIÓN PRINCIPAL PARA OTROS MÓDULOS
 # =========================================================
 
 def get_relevant_products_for_query(query: str, top_k: int = 15) -> List[Dict[str, str]]:
