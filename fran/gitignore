@@ -1,0 +1,34 @@
+# Base de datos
+*.db
+*.sqlite
+*.sqlite3
+
+# Archivos temporales Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Entorno virtual
+venv/
+env/
+ENV/
+
+# Variables de entorno
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# NO IGNORAR estos archivos (deben subirse a Railway):
+!catalog.faiss
+!catalog_mapping.pkl
+!embeddings_cache.pkl
+
+# Logs
+*.log
