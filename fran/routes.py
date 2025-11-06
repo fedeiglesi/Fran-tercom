@@ -34,11 +34,13 @@ import time
 import threading
 import concurrent.futures
 
+
 # =========================================================
 # APP PRINCIPAL
 # =========================================================
 
 app = Flask(__name__)
+
 
 # =========================================================
 # VALIDADOR TWILIO (estilo 3.7)
@@ -97,6 +99,7 @@ def _async_warmup():
 
 threading.Thread(target=_async_warmup, daemon=True).start()
 
+
 # =========================================================
 # ENDPOINT /api/quote
 # =========================================================
@@ -127,6 +130,7 @@ def api_quote():
                 update_conversation_summary(phone, user_message, text)
             except:
                 pass
+
         threading.Thread(target=_update, daemon=True).start()
 
         return jsonify({"response": text, "intent": "bulk_quote"})
@@ -183,7 +187,6 @@ def api_analytics():
             top_searches = [{"message": r[0], "count": r[1]} for r in cur.fetchall()]
 
         return jsonify({"intents": intents, "top_searches": top_searches})
-
     except Exception as e:
         logger.error(f"❌ Error en /api/analytics: {e}")
         return jsonify({"error": str(e)}), 500
@@ -231,6 +234,7 @@ def webhook():
             resp.message(fast_reply)
             save_message(phone, fast_reply, "bot")
             log_performance(phone, "rule_based", start_time)
+            logger.info(f"✅ Respuesta rápida a {phone}")
             return str(resp)
 
         is_bulk, count = is_bulk_list_request(user_message)
@@ -277,6 +281,7 @@ def webhook():
 
     except Exception as e:
         logger.error(f"❌ Error crítico en webhook: {e}", exc_info=True)
+
         try:
             resp = MessagingResponse()
             resp.message("⚠️ Perdón, tuve un problema técnico. Intentá de nuevo.")
