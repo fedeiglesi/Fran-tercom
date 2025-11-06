@@ -63,7 +63,6 @@ def validate_twilio_signature():
             signature = request.headers.get("X-Twilio-Signature", "")
             url = request.url
 
-            # Twilio usa HTTPS en producción
             if url.startswith("http://") and not url.startswith("http://localhost"):
                 url = url.replace("http://", "https://")
 
@@ -85,17 +84,18 @@ def validate_twilio_signature():
 def _async_warmup():
     """Carga el catálogo en background sin bloquear el servidor."""
     try:
-        if os.environ.get("EAGER_CATALOG", "1") == "1":
+        time.sleep(10)
+        if os.environ.get("EAGER_CATALOG", "0") == "1":
             logger.info("🔥 Iniciando warmup asincrónico del catálogo...")
             eager_warmup()
             logger.info("✅ Warmup completado en background")
+        else:
+            logger.info("⚡ Warmup desactivado - catálogo se cargará en el primer request")
     except Exception as e:
         logger.error(f"❌ Error en warmup async: {e}")
 
 
-# Iniciar warmup en thread separado
 threading.Thread(target=_async_warmup, daemon=True).start()
-
 
 # =========================================================
 # ENDPOINT /api/quote
@@ -115,7 +115,6 @@ def api_quote():
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
-    # Listas masivas
     is_bulk, item_count = is_bulk_list_request(user_message)
     if is_bulk and item_count < INSTANT_THRESHOLD:
         result = process_bulk_sync(phone, user_message)
@@ -123,18 +122,15 @@ def api_quote():
         save_message(phone, text, "bot")
         log_performance(phone, "bulk_sync", start_time)
 
-        # Actualización asíncrona de resumen
         def _update():
             try:
                 update_conversation_summary(phone, user_message, text)
             except:
                 pass
-
         threading.Thread(target=_update, daemon=True).start()
 
         return jsonify({"response": text, "intent": "bulk_quote"})
 
-    # Búsqueda con timeout en IA
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(generate_product_based_reply, phone, user_message)
@@ -229,7 +225,6 @@ def webhook():
         save_message(phone, user_message, "user")
         intent = detect_intent(user_message)
 
-        # Respuestas rápidas
         fast_reply = rule_based_reply(intent, user_message)
         if fast_reply:
             resp = MessagingResponse()
@@ -238,7 +233,6 @@ def webhook():
             log_performance(phone, "rule_based", start_time)
             return str(resp)
 
-        # Lógica principal
         is_bulk, count = is_bulk_list_request(user_message)
 
         if is_bulk and count < INSTANT_THRESHOLD:
