@@ -10,6 +10,7 @@ Incluye:
 - /api/analytics
 - /webhook (Twilio con validación before_request)
 - /health (ping)
+- /admin/build-index (generación FAISS en servidor)
 """
 
 from flask import Flask, request, jsonify, Response
@@ -27,7 +28,6 @@ from fran.ai import (
     update_conversation_summary,
 )
 from fran.config import logger, INSTANT_THRESHOLD, TWILIO_AUTH_TOKEN
-from fran.catalog import eager_warmup
 
 import os
 import time
@@ -65,6 +65,7 @@ def validate_twilio_signature():
             signature = request.headers.get("X-Twilio-Signature", "")
             url = request.url
 
+            # Twilio firma pensando en HTTPS en prod
             if url.startswith("http://") and not url.startswith("http://localhost"):
                 url = url.replace("http://", "https://")
 
@@ -80,24 +81,10 @@ def validate_twilio_signature():
 
 
 # =========================================================
-# WARMUP ASINCRÓNICO DEL CATÁLOGO
+# WARMUP DESACTIVADO (lazy loading)
 # =========================================================
 
-def _async_warmup():
-    """Carga el catálogo en background sin bloquear el servidor."""
-    try:
-        time.sleep(10)
-        if os.environ.get("EAGER_CATALOG", "0") == "1":
-            logger.info("🔥 Iniciando warmup asincrónico del catálogo...")
-            eager_warmup()
-            logger.info("✅ Warmup completado en background")
-        else:
-            logger.info("⚡ Warmup desactivado - catálogo se cargará en el primer request")
-    except Exception as e:
-        logger.error(f"❌ Error en warmup async: {e}")
-
-
-threading.Thread(target=_async_warmup, daemon=True).start()
+logger.info("⚡ Warmup desactivado - catálogo lazy loading")
 
 
 # =========================================================
@@ -118,6 +105,7 @@ def api_quote():
     save_message(phone, user_message, "user")
     intent = detect_intent(user_message)
 
+    # Listas masivas instantáneas
     is_bulk, item_count = is_bulk_list_request(user_message)
     if is_bulk and item_count < INSTANT_THRESHOLD:
         result = process_bulk_sync(phone, user_message)
@@ -125,6 +113,7 @@ def api_quote():
         save_message(phone, text, "bot")
         log_performance(phone, "bulk_sync", start_time)
 
+        # Actualización asíncrona de resumen
         def _update():
             try:
                 update_conversation_summary(phone, user_message, text)
@@ -135,6 +124,7 @@ def api_quote():
 
         return jsonify({"response": text, "intent": "bulk_quote"})
 
+    # Búsqueda con timeout
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(generate_product_based_reply, phone, user_message)
@@ -145,6 +135,7 @@ def api_quote():
     save_message(phone, reply, "bot")
     log_performance(phone, "search_rag", start_time)
 
+    # Actualización asíncrona
     def _update():
         try:
             update_conversation_summary(phone, user_message, reply)
@@ -228,6 +219,7 @@ def webhook():
         save_message(phone, user_message, "user")
         intent = detect_intent(user_message)
 
+        # Respuestas rápidas
         fast_reply = rule_based_reply(intent, user_message)
         if fast_reply:
             resp = MessagingResponse()
@@ -237,6 +229,7 @@ def webhook():
             logger.info(f"✅ Respuesta rápida a {phone}")
             return str(resp)
 
+        # Lógica principal con timeout
         is_bulk, count = is_bulk_list_request(user_message)
 
         if is_bulk and count < INSTANT_THRESHOLD:
@@ -258,11 +251,13 @@ def webhook():
                     logger.error(f"❌ Error en IA: {e}")
                     reply_text = "⚠️ Tuve un problema técnico. Intentá de nuevo."
 
+        # Guardar y loggear
         save_message(phone, reply_text, "bot")
         if intent != "cart":
             log_interaction(phone, user_message, intent)
         log_performance(phone, "webhook", start_time)
 
+        # Resumen en background
         def _update_summary():
             try:
                 update_conversation_summary(phone, user_message, reply_text)
@@ -271,6 +266,7 @@ def webhook():
 
         threading.Thread(target=_update_summary, daemon=True).start()
 
+        # Responder
         resp = MessagingResponse()
         resp.message(reply_text)
 
@@ -280,6 +276,7 @@ def webhook():
         return str(resp)
 
     except Exception as e:
+        # Manejo general de errores
         logger.error(f"❌ Error crítico en webhook: {e}", exc_info=True)
 
         try:
@@ -300,5 +297,81 @@ def root():
     return jsonify({
         "service": "Fran 3.8",
         "status": "running",
-        "endpoints": ["/webhook", "/api/quote", "/api/analytics", "/health"]
+        "endpoints": ["/webhook", "/api/quote", "/api/analytics", "/health", "/admin/build-index"]
     })
+
+
+# =========================================================
+# ENDPOINT ADMIN - GENERAR FAISS INDEX (lazy import)
+# =========================================================
+
+@app.route("/admin/build-index", methods=["POST"])
+def admin_build_index():
+    """
+    Genera el índice FAISS en el servidor (Railway/Render/Heroku).
+    ⚠️ SOLO EJECUTAR LUEGO DEL PRIMER DEPLOY O TRAS ACTUALIZAR EL CATÁLOGO.
+    Requiere header: Authorization: Bearer <ADMIN_SECRET>
+    """
+    # Lazy import para evitar costo al iniciar
+    from fran.catalog import (
+        load_catalog_enriched,
+        generate_embeddings_with_cache,
+        _build_faiss_index_from_catalog,
+        save_faiss_index,
+    )
+
+    # Validación básica de autorización
+    auth_header = request.headers.get("Authorization", "")
+    secret = os.environ.get("ADMIN_SECRET", "changeme123")
+
+    if not secret or auth_header != f"Bearer {secret}":
+        logger.warning(f"⚠️ Intento no autorizado a /admin/build-index desde {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        logger.info("🔨 Iniciando generación de FAISS index...")
+
+        # 1) Cargar catálogo
+        catalog = load_catalog_enriched()
+        if not catalog:
+            return jsonify({"error": "No se pudo cargar catálogo"}), 500
+        logger.info(f"✅ {len(catalog)} productos cargados")
+
+        # 2) Generar embeddings (usa cache incremental si existe)
+        logger.info("⚙️ Generando embeddings (puede demorar)...")
+        embeddings, texts = generate_embeddings_with_cache(catalog)
+        if embeddings.size == 0:
+            return jsonify({"error": "No se pudieron generar embeddings"}), 500
+        logger.info(f"✅ {len(embeddings)} embeddings generados")
+
+        # 3) Construir índice
+        logger.info("📊 Construyendo índice FAISS...")
+        index = _build_faiss_index_from_catalog(catalog, embeddings)
+        if not index:
+            return jsonify({"error": "No se pudo construir índice"}), 500
+        logger.info(f"✅ Índice con {index.ntotal} vectores")
+
+        # 4) Guardar índice y mapping
+        mapping = [
+            {
+                "code": p["code"],
+                "name": p["name"],
+                "full_text": p["full_text"],
+                "brand": p.get("brand", ""),
+                "category": p.get("category", ""),
+            }
+            for p in catalog
+        ]
+        save_faiss_index(index, mapping)
+        logger.info("💾 Índice guardado a disco")
+
+        return jsonify({
+            "success": True,
+            "message": "Índice FAISS generado correctamente",
+            "products": len(catalog),
+            "vectors": index.ntotal
+        })
+
+    except Exception as e:
+        logger.error(f"❌ Error generando índice: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
