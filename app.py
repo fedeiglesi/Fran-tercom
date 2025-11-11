@@ -931,7 +931,7 @@ def fuzzy_search(query, limit=200):
         return []
     try:
         names = [p["search_text"] for p in catalog]
-        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
+        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
         results = []
         for _, score, idx in matches:
             if score >= 60 and idx < len(catalog):
