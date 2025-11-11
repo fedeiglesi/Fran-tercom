@@ -1,16 +1,14 @@
 # =========================================================
-# Fran 3.8.1 – Bot Mayorista Inteligente (LISTO PARA PROD)
+# Fran 3.8.2 – Bot Mayorista Inteligente (CONVERSACIONAL)
 # =========================================================
-# Fixes v3.8.1
-# – SQLite: re-intento automático en "database is locked"
-# – FAISS: cache versionado + workers en RapidFuzz
-# – Carrito: valida que el producto exista ANTES de agregar
-# – Descuento: tope de $500.000
-# – TC: garantiza valor inicial si falla
-# – Rate-limit global OpenAI (semáforo)
-# – Seguridad: sanitización más estricta
-# – Performance: LRU 2048, RapidFuzz workers=-1, sleep 0.35 s
-# – Validación: total en create_order vs carrito real
+# Novedades v3.8.2
+# – Detector de intenciones LLM (JSON estricto)
+# – Respuestas técnicas especializadas con contexto mínimo
+# – Sistema de estados conversacionales (explorando/decidiendo/confirmando)
+# – Referencias implícitas ("el primero", "los 3 primeros", "ese")
+# – Confirmaciones y cancelaciones explícitas
+# – Memoria de contexto de última interacción
+# – Mejor manejo de decisiones que se pueden cambiar/cancelar
 # =========================================================
 
 import os
@@ -48,7 +46,7 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran38")
+logger = logging.getLogger("fran382")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -80,7 +78,8 @@ FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
 FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 
 # Cache versionado
-EMBEDDINGS_CACHE_PATH = "/tmp/embeddings_cache.pkl"
+EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{CATALOG_URL[-40:-4]}.pkl"
+
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
 MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "20"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
@@ -93,7 +92,7 @@ MAX_ITEMS = 200
 BULK_TIMEOUT = 300
 MAX_BULK_ITEMS = 200
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.8.1"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.8.2"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -129,6 +128,29 @@ DEDUP_WINDOW = 5
 
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
+
+# ------------------------------------------------------------
+# NUEVO: ESTADOS CONVERSACIONALES
+# ------------------------------------------------------------
+conversation_states = {}  # {phone: {"state": "exploring", "data": {...}}}
+state_lock = Lock()
+
+def get_conversation_state(phone):
+    with state_lock:
+        return conversation_states.get(phone, {"state": "idle", "data": {}})
+
+def set_conversation_state(phone, state, data=None):
+    with state_lock:
+        conversation_states[phone] = {
+            "state": state,
+            "data": data or {},
+            "timestamp": datetime.now().isoformat()
+        }
+
+def clear_conversation_state(phone):
+    with state_lock:
+        if phone in conversation_states:
+            del conversation_states[phone]
 
 # ------------------------------------------------------------
 # UTILS
@@ -930,7 +952,7 @@ def fuzzy_search(query, limit=200):
         return []
     try:
         names = [p["search_text"] for p in catalog]
-        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)
+        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
         results = []
         for _, score, idx in matches:
             if score >= 60 and idx < len(catalog):
@@ -1387,26 +1409,129 @@ def send_long_message(phone, text, chunk_size=1300):
         return False
 
 # ------------------------------------------------------------
-# COMANDOS SIMPLES
+# NUEVO: DETECTOR DE INTENCIONES LLM
 # ------------------------------------------------------------
-SIMPLE_COMMANDS = {
-    "dale", "ok", "si", "agrega", "agregalos", "metelos", "sumalos",
-    "ver carrito", "mostrar carrito", "mi carrito",
-    "vaciar carrito", "limpiar carrito", "borrar carrito"
-}
+INTENT_SYSTEM_PROMPT = """
+Sos un clasificador de intenciones para un vendedor mayorista (WhatsApp).
+No respondas al usuario. No agregues explicaciones.
+Tu única salida será un JSON válido (una línea), con este esquema:
+{"intent":"<uno de: saludo|busqueda_catalogo|pregunta_tecnica|pedido_codigo|agregar_carrito|ver_carrito|vaciar_carrito|confirmar|cancelar|desconocido>", "query":"<texto util para buscar o ''>"}
 
-def is_simple_command(message):
-    if not message:
-        return False
-    lower = message.lower().strip()
+Criterios rápidos:
+- "hola", "buen día", "que tal" → saludo
+- Contiene código tipo 1234/56789-012 → pedido_codigo
+- "tenes", "precio", "busco", nombre de pieza/marca → busqueda_catalogo
+- "cuánto mide", "longitud", "amperaje", "equivalencia", "sirve para", "diferencia" → pregunta_tecnica
+- "agregalo", "sumalo", "metelo", "los primeros", "el segundo" → agregar_carrito
+- "ver carrito", "mostrar carrito" → ver_carrito
+- "vaciar carrito", "limpiar carrito" → vaciar_carrito
+- "si", "ok", "dale" justo después de oferta → confirmar
+- "no", "cancelar", "dejalo", "olvida" → cancelar
+- Otro caso → desconocido
 
-    if lower in SIMPLE_COMMANDS:
-        return True
+Devolvé SIEMPRE JSON de una línea.
+"""
 
-    if len(lower.split()) <= 2 and lower in ["dale", "si", "ok", "agrega"]:
-        return True
+def detect_intent_llm(msg: str) -> dict:
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            temperature=0,
+            max_tokens=60,
+            messages=[
+                {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+                {"role": "user", "content": msg.strip()[:800]}
+            ],
+            timeout=REQUESTS_TIMEOUT
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        # Fallback por si el modelo agrega texto: extraer primer objeto JSON
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1:
+            raw = raw[start:end+1]
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {"intent": "desconocido", "query": ""}
+        intent = str(data.get("intent", "desconocido")).strip()
+        query = str(data.get("query", "")).strip()
+        if intent not in {
+            "saludo","busqueda_catalogo","pregunta_tecnica","pedido_codigo",
+            "agregar_carrito","ver_carrito","vaciar_carrito","confirmar","cancelar","desconocido"
+        }:
+            intent = "desconocido"
+        return {"intent": intent, "query": query}
+    except Exception as e:
+        logger.error(f"detect_intent_llm error: {e}")
+        return {"intent": "desconocido", "query": ""}
 
-    return False
+# ------------------------------------------------------------
+# NUEVO: RESPUESTAS TÉCNICAS ESPECIALIZADAS
+# ------------------------------------------------------------
+TECH_SYSTEM_PROMPT = """
+Sos Fran, vendedor experto en motopartes. Respondé claro y útil.
+Si recibís "contexto_catalogo", usalo para anclar el producto/modelo, pero no inventes precios.
+Si el usuario pide especificaciones técnicas (medidas, amperaje, equivalencias, compatibilidades), podés responder con conocimiento general del rubro si el CSV no lo trae, aclarando cuando corresponda "medida típica/estándar".
+Evitá afirmaciones tajantes si hay variaciones por año/modelo; ofrecé verificar.
+Cerrá siempre con una mini-acción: ejemplo "¿Querés que lo agregue al carrito?".
+"""
+
+def build_technical_answer(user_message: str, top_products: list) -> str:
+    # Empaquetar hasta 3 productos como contexto compacto
+    context_lines = []
+    for p in (top_products or [])[:3]:
+        context_lines.append(f"- {p.get('name','')} (cod {p.get('code','')}) marca {p.get('brand','')} modelo {p.get('model','')}")
+    ctx = "Contexto CSV:\n" + "\n".join(context_lines) if context_lines else "Contexto CSV: (sin coincidencias exactas)"
+    try:
+        msgs = [
+            {"role": "system", "content": TECH_SYSTEM_PROMPT},
+            {"role": "user", "content": f"{ctx}\n\nPregunta del cliente: {user_message[:800]}"},
+        ]
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=msgs,
+            temperature=0.3,
+            max_tokens=500,
+            timeout=REQUESTS_TIMEOUT
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        return txt if txt else "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
+    except Exception as e:
+        logger.error(f"build_technical_answer error: {e}")
+        return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise y mientras vemos alternativas?"
+
+# ------------------------------------------------------------
+# NUEVO: MANEJO DE REFERENCIAS IMPLÍCITAS
+# ------------------------------------------------------------
+def parse_implicit_reference(message: str, last_products: list) -> list:
+    """
+    Detecta referencias como "el primero", "los 3 primeros", "el segundo", "ese"
+    Devuelve lista de productos seleccionados
+    """
+    if not last_products:
+        return []
+    
+    lower = message.lower()
+    selected = []
+    
+    # Patrones de referencia
+    if re.search(r'\bel primero\b|\bel 1\b|\bprimera\b', lower):
+        selected = [last_products[0]] if len(last_products) >= 1 else []
+    elif re.search(r'\bel segundo\b|\bel 2\b|\bsegunda\b', lower):
+        selected = [last_products[1]] if len(last_products) >= 2 else []
+    elif re.search(r'\bel tercero\b|\bel 3\b|\btercera\b', lower):
+        selected = [last_products[2]] if len(last_products) >= 3 else []
+    elif re.search(r'\blos (\d+) primeros\b', lower):
+        match = re.search(r'\blos (\d+) primeros\b', lower)
+        n = int(match.group(1))
+        selected = last_products[:min(n, len(last_products))]
+    elif re.search(r'\bese\b|\besa\b|\besos\b', lower):
+        # Si dice "ese", asume el primero
+        selected = [last_products[0]] if len(last_products) >= 1 else []
+    elif re.search(r'\btodos\b', lower):
+        selected = last_products
+    
+    return selected
 
 # ------------------------------------------------------------
 # IA EMPÁTICA
@@ -1579,21 +1704,21 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
 # FORMATO RESULTADOS
 # ------------------------------------------------------------
 CATEGORY_EMOJIS = {
-    "aceite": "óleo",
-    "filtro": "filtro",
-    "bateria": "batería",
-    "neumatico": "rueda",
-    "cadena": "cadena",
-    "bujia": "chispa",
-    "pastilla": "pastilla",
-    "amortiguador": "amortiguador",
-    "kit": "caja",
+    "aceite": "🛢️",
+    "filtro": "🔧",
+    "bateria": "🔋",
+    "neumatico": "🛞",
+    "cadena": "⛓️",
+    "bujia": "⚡",
+    "pastilla": "🟥",
+    "amortiguador": "🔩",
+    "kit": "📦",
 }
 
 def format_search_results(products):
     lines = []
     for i, p in enumerate(products, 1):
-        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "caja")
+        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "📦")
         price = format_price(p.get("price_ars", 0))
         name = p.get("name", "").strip()
         code = p.get("code", "")
@@ -1606,11 +1731,11 @@ def format_search_results(products):
             extra.append(model)
         extra_txt = f" - {' / '.join(extra)}" if extra else ""
 
-        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   precio {price}")
+        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   💰 {price}")
     return "\n\n".join(lines)
 
 # ------------------------------------------------------------
-# AGENTE PRINCIPAL
+# AGENTE PRINCIPAL CON MEJORAS
 # ------------------------------------------------------------
 def run_agent(phone, user_message):
     if not phone or not user_message:
@@ -1618,224 +1743,287 @@ def run_agent(phone, user_message):
 
     start_time = time.time()
     save_message(phone, user_message, "user")
+    lower = user_message.strip().lower()
 
-    if len(user_message.split()) <= 8:   # frases cortas
-        intent = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user",
-                       "content": f"Clasifica en una palabra: saludo, código, producto, desconocido.\nTexto: {user_message}"}],
-            max_tokens=3, temperature=0
-        ).choices[0].message.content.strip().lower()
+    # 1) DETECCIÓN DE INTENCIÓN LLM
+    intent_data = detect_intent_llm(user_message)
+    intent = intent_data.get("intent", "desconocido")
+    query_for_search = intent_data.get("query") or user_message
 
-        if "saludo" in intent:
-            reply = "¡Hola! Soy Fran de TERCOM. ¿Qué repuesto estás buscando?"
+    logger.info(f"Intent detectado: {intent}, Query: {query_for_search}")
+
+    # 2) MANEJO DE SALUDOS (sin búsqueda innecesaria)
+    if intent == "saludo" or lower in {"hola", "buen dia", "buen día", "que tal", "buenas", "hola fran"}:
+        reply = "¡Hola! Soy Fran de TERCOM 👋 ¿Qué repuesto necesitás? Decime marca/modelo y te ayudo."
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "saludo", 0)
+        log_performance(phone, "saludo", time.time() - start_time, 0)
+        clear_conversation_state(phone)
+        return reply
+
+    # 3) RUTAS RÁPIDAS DE CARRITO (sin catálogo)
+    if intent == "ver_carrito":
+        items = cart_get(phone)
+        if not items:
+            reply = "Tu carrito está vacío."
+        else:
+            total, discount = cart_totals(phone)
+            lines = ["🛒 TU CARRITO:\n"]
+            for code, q, name, price in items:
+                subtotal = (price * q).quantize(Decimal("0.01"))
+                lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
+            lines.append(f"\n💰 TOTAL: {format_price(total)}")
+            reply = "\n".join(lines)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "ver_carrito", 0)
+        log_performance(phone, "ver_carrito", time.time() - start_time, 0)
+        return reply
+
+    if intent == "vaciar_carrito":
+        cart_clear(phone)
+        reply = "Listo, vacié tu carrito. 🗑️"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "vaciar_carrito", 0)
+        log_performance(phone, "vaciar_carrito", time.time() - start_time, 0)
+        clear_conversation_state(phone)
+        return reply
+
+    # 4) AGREGAR AL CARRITO (con manejo de referencias implícitas)
+    if intent == "agregar_carrito":
+        last = get_last_search(phone)
+        
+        # Detectar referencias implícitas
+        selected_products = parse_implicit_reference(user_message, last.get("products", []) if last else [])
+        
+        if selected_products:
+            # Usuario hizo referencia específica
+            catalog, _ = get_catalog_and_index()
+            added_count = 0
+            total_added = Decimal("0")
+            
+            for p in selected_products:
+                ok, norm = validate_tercom_code(p.get("code", ""))
+                if not ok:
+                    continue
+                prod = next((x for x in catalog if x["code"] == norm), None)
+                if not prod:
+                    continue
+                price_ars = to_decimal_money(prod["price_ars"])
+                price_usd = to_decimal_money(prod["price_usd"])
+                cart_add(phone, norm, int(p.get("qty", 1)), prod["name"], price_ars, price_usd)
+                added_count += 1
+                total_added += price_ars * int(p.get("qty", 1))
+            
+            reply = f"✅ Listo! Agregué {added_count} ítems al carrito por {format_price(total_added)}.\n\n¿Querés ver el carrito o seguir buscando?" if added_count else "No pude agregar los productos al carrito."
+        elif not last or not last.get("products"):
+            reply = "No tengo productos recientes para agregar. ¿Buscá algo primero?"
+        else:
+            # Agregar todo si no hay referencia específica
+            catalog, _ = get_catalog_and_index()
+            added_count = 0
+            total_added = Decimal("0")
+            for p in last["products"][:200]:
+                ok, norm = validate_tercom_code(p.get("code", ""))
+                if not ok:
+                    continue
+                prod = next((x for x in catalog if x["code"] == norm), None)
+                if not prod:
+                    continue
+                price_ars = to_decimal_money(prod["price_ars"])
+                price_usd = to_decimal_money(prod["price_usd"])
+                cart_add(phone, norm, int(p.get("qty", 1)), prod["name"], price_ars, price_usd)
+                added_count += 1
+                total_added += price_ars * int(p.get("qty", 1))
+            reply = f"✅ Listo! Agregué {added_count} ítems al carrito por {format_price(total_added)}.\n\n¿Pasame tus datos para el presupuesto: nombre, dirección y teléfono?" if added_count else "No pude agregar los productos al carrito."
+        
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "agregar_carrito", 0)
+        log_performance(phone, "agregar_carrito", time.time() - start_time, 0)
+        set_conversation_state(phone, "confirming_cart")
+        return reply
+
+    # 5) CANCELAR/DESHACER
+    if intent == "cancelar":
+        state = get_conversation_state(phone)
+        if state["state"] == "confirming_cart":
+            last = get_last_search(phone)
+            if last:
+                reply = "Dale, cancelo el agregado al carrito. ¿Querés que te busque otra cosa?"
+                clear_conversation_state(phone)
+            else:
+                reply = "No hay nada para cancelar. ¿En qué te puedo ayudar?"
+        else:
+            reply = "Dale, arrancamos de cero. ¿Qué necesitás?"
+            clear_conversation_state(phone)
+        
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "cancelar", 0)
+        log_performance(phone, "cancelar", time.time() - start_time, 0)
+        return reply
+
+    # 6) PEDIDO POR CÓDIGO DIRECTO
+    if intent == "pedido_codigo":
+        m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
+        if m:
+            code = m.group(0)
+            catalog, _ = get_catalog_and_index()
+            found = [p for p in catalog if p["code"] == code]
+            if found:
+                p = found[0]
+                reply = f"✅ {p['name']} (Cod: {code}) – {format_price(p['price_ars'])}.\n\n¿Cuántas unidades querés?"
+                set_conversation_state(phone, "confirming_quantity", {"product": p})
+            else:
+                reply = f"El código {code} no figura en mi lista. ¿Tenés otro?"
+        else:
+            reply = "Pasame el código completo así: 1234/56789-012"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "pedido_codigo", 1)
+        log_performance(phone, "pedido_codigo", time.time() - start_time, 1)
+        return reply
+
+    # 7) BÚSQUEDA / PREGUNTA TÉCNICA
+    products = []
+    if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
+        # Verificar si es lista masiva primero
+        is_bulk, item_count = is_bulk_list_request(user_message)
+        
+        if is_bulk:
+            log_interaction(phone, user_message, "bulk_quote", item_count)
+
+            if item_count < INSTANT_THRESHOLD:
+                result = process_bulk_sync(phone, user_message)
+                if result.get("success") and result.get("results"):
+                    products_for_save = [
+                        {
+                            "code": r["code"],
+                            "name": r["found"],
+                            "price_ars": r["price_unit"],
+                            "price_usd": float(Decimal(str(r["price_unit"])) / get_exchange_rate()),
+                            "qty": int(r["quantity"])
+                        }
+                        for r in result["results"]
+                    ]
+                    save_last_search(phone, products_for_save, "Lista")
+                    save_to_search_history(phone, products_for_save, "Lista")
+
+                found = result.get("found_count", 0)
+                not_found = result.get("not_found_count", 0)
+                total = result.get("total_quoted", 0)
+
+                lines = ["✅ Listo! Acá está tu cotización:\n"]
+                lines.append(f"📦 {found} productos encontrados")
+                if not_found > 0:
+                    lines.append(f"❌ {not_found} sin stock")
+                lines.append(f"\n💰 TOTAL: {format_price(Decimal(str(total)))}")
+                lines.append("\n¿Los agregamos? Decime: *dale*")
+
+                final = "\n".join(lines)
+            else:
+                if item_count < ASYNC_QUICK:
+                    wait_msg = f"Dale! Son {item_count} productos, te preparo la cotización y vuelvo con vos en un minuto ⏱️"
+                elif item_count < ASYNC_MEDIUM:
+                    wait_msg = f"Uh, lista grande! Son {item_count} productos\nDame 2-3 minutos que te armo todo y te aviso 🔄"
+                else:
+                    wait_msg = f"Tremenda lista che! {item_count} productos\nMe va a llevar unos 4-5 minutos\nSeguí navegando tranqui, te aviso 📋"
+
+                job_id = create_bulk_job(phone, user_message, item_count)
+
+                if job_id:
+                    final = wait_msg
+                else:
+                    final = "Uy, tuve un problema. ¿Me mandás la lista de nuevo?"
+
+            elapsed = time.time() - start_time
+            log_performance(phone, intent, elapsed, item_count)
+
+            save_message(phone, final, "assistant")
+            set_conversation_state(phone, "processing_bulk")
+            return final
+        
+        # Búsqueda normal
+        products = hybrid_search(query_for_search, limit=MAX_SEARCH_RESULTS)
+        total = len(products)
+        log_interaction(phone, user_message, intent, total)
+
+        if total:
+            save_last_search(phone, [
+                {
+                    "code": p["code"],
+                    "name": p["name"],
+                    "price_ars": p["price_ars"],
+                    "price_usd": p["price_usd"],
+                    "qty": 1
+                }
+                for p in products[:200]
+            ], query_for_search)
+            save_to_search_history(phone, [
+                {
+                    "code": p["code"],
+                    "name": p["name"],
+                    "price_ars": p["price_ars"],
+                    "price_usd": p["price_usd"],
+                    "qty": 1
+                }
+                for p in products[:200]
+            ], query_for_search)
+
+        # Sin resultados
+        if total == 0:
+            reply = (
+                "❌ No encontré ese repuesto en el catálogo.\n\n"
+                "¿Pasame marca, modelo y año de la moto y te busco lo más parecido?"
+            )
+            elapsed = time.time() - start_time
+            log_performance(phone, intent, elapsed, 0)
             save_message(phone, reply, "assistant")
             return reply
-        if "código" in intent:
-            m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
-            if m:
-                code = m.group(0)
-                catalog, _ = get_catalog_and_index()
-                found = [p for p in catalog if p["code"] == code]
-                if found:
-                    p = found[0]
-                    return f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
-                else:
-                    return f"El código {code} no figura en mi lista. ¿Tenés otro?"
-            else:
-                return "No veo el código completo. Pasámelo así: 1234/56789-012"
-                
 
-    intent = "unknown"
-    is_bulk, item_count = is_bulk_list_request(user_message)
+        # Muchos resultados -> chunking
+        if total > MAX_PRODUCTS_FOR_LLM:
+            header = (
+                f"✅ Encontré *{total} productos* para: {user_message}\n\n"
+                "Te los mando en partes así WhatsApp no los corta"
+            )
+            chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, total, PRODUCTS_PER_CHUNK)]
+            full_text = [header]
+            for idx, ch in enumerate(chunks, 1):
+                full_text.append(f"\n━━━ Bloque {idx}/{len(chunks)} ({len(ch)} items) ━━━")
+                full_text.append(format_search_results(ch))
+            final = "\n".join(full_text)
 
-    if is_bulk:
-        intent = "bulk_quote"
-    elif is_simple_command(user_message):
-        intent = "command"
-    elif any(kw in user_message.lower() for kw in ["precio", "cuanto", "tenes", "busco"]):
-        intent = "search"
-    elif any(kw in user_message.lower() for kw in ["agregar", "carrito", "pedido"]):
-        intent = "cart"
-    else:
-        intent = "chat"
+            elapsed = time.time() - start_time
+            log_performance(phone, intent, elapsed, total)
 
-    if is_bulk:
-        log_interaction(phone, user_message, "bulk_quote", item_count)
+            save_message(phone, f"[listado largo {total}]", "assistant")
+            set_conversation_state(phone, "exploring", {"last_query": user_message})
+            return final
 
-        if item_count < INSTANT_THRESHOLD:
-            result = process_bulk_sync(phone, user_message)
-            if result.get("success") and result.get("results"):
-                products_for_save = [
-                    {
-                        "code": r["code"],
-                        "name": r["found"],
-                        "price_ars": r["price_unit"],
-                        "price_usd": float(Decimal(str(r["price_unit"])) / get_exchange_rate()),
-                        "qty": int(r["quantity"])
-                    }
-                    for r in result["results"]
-                ]
-                save_last_search(phone, products_for_save, "Lista")
-                save_to_search_history(phone, products_for_save, "Lista")
+        # Pregunta técnica -> respuesta especializada
+        if intent == "pregunta_tecnica":
+            reply = build_technical_answer(user_message, products[:10])
+            save_message(phone, reply, "assistant")
+            log_performance(phone, intent, time.time() - start_time, len(products))
+            set_conversation_state(phone, "exploring", {"last_query": user_message})
+            return reply
 
-            found = result.get("found_count", 0)
-            not_found = result.get("not_found_count", 0)
-            total = result.get("total_quoted", 0)
+        # Búsqueda normal con LLM empático
+        reply = generate_smart_ai_reply(phone, user_message, products[:10])
+        save_message(phone, reply, "assistant")
+        log_performance(phone, intent, time.time() - start_time, len(products))
+        set_conversation_state(phone, "exploring", {"last_query": user_message})
+        return reply
 
-            lines = ["Listo! Acá está tu cotización:\n"]
-            lines.append(f"{found} productos encontrados")
-            if not_found > 0:
-                lines.append(f"{not_found} sin stock")
-            lines.append(f"\nTOTAL: {format_price(Decimal(str(total)))}")
-            lines.append("\n¿Los agregamos? Decime: dale")
-
-            final = "\n".join(lines)
-        else:
-            if item_count < ASYNC_QUICK:
-                wait_msg = f"Dale! Son {item_count} productos, te preparo la cotización y vuelvo con vos en un minuto"
-            elif item_count < ASYNC_MEDIUM:
-                wait_msg = f"Uh, lista grande! Son {item_count} productos\nDame 2-3 minutos que te armo todo y te aviso"
-            else:
-                wait_msg = f"Tremenda lista che! {item_count} productos\nMe va a llevar unos 4-5 minutos\nSeguí navegando tranqui, te aviso"
-
-            job_id = create_bulk_job(phone, user_message, item_count)
-
-            if job_id:
-                final = wait_msg
-            else:
-                final = "Uy, tuve un problema. ¿Me mandás la lista de nuevo?"
-
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, item_count)
-
-        save_message(phone, final, "assistant")
-        return final
-
-    if is_simple_command(user_message):
-        log_interaction(phone, user_message, "command", 0)
-        lower = user_message.lower().strip()
-
-        if any(trig in lower for trig in ["dale", "ok", "si", "agrega", "agregalos"]):
-            last = get_last_search(phone)
-            if not last or not last.get("products"):
-                final = "No tengo productos recientes para agregar. ¿Buscá algo primero?"
-            else:
-                catalog, _ = get_catalog_and_index()
-                added_count = 0
-                total_added = Decimal("0")
-
-                for p in last["products"]:
-                    code = p.get("code", "")
-                    qty = int(p.get("qty", 1))
-                    ok, norm = validate_tercom_code(code)
-                    if ok:
-                        prod = next((x for x in catalog if x["code"] == norm), None)
-                        if prod:
-                            price_ars = to_decimal_money(prod["price_ars"])
-                            price_usd = to_decimal_money(prod["price_usd"])
-                            cart_add(phone, norm, qty, prod["name"], price_ars, price_usd)
-                            added_count += 1
-                            total_added += price_ars * qty
-
-                if added_count > 0:
-                    final = f"Listo! Agregué {added_count} ítems al carrito por {format_price(total_added)}.\n\n¿Pasame tus datos para el presupuesto: nombre, dirección y teléfono?"
-                else:
-                    final = "No pude agregar los productos al carrito."
-
-        elif "carrito" in lower and ("ver" in lower or "mostrar" in lower or lower == "carrito"):
-            items = cart_get(phone)
-            if not items:
-                final = "Tu carrito está vacío."
-            else:
-                total, discount = cart_totals(phone)
-                lines = ["TU CARRITO:\n"]
-                for code, q, name, price in items:
-                    subtotal = (price * q).quantize(Decimal("0.01"))
-                    lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
-                lines.append(f"\nTOTAL: {format_price(total)}")
-                final = "\n".join(lines)
-
-        elif "vaciar" in lower or "limpiar" in lower or "borrar" in lower:
-            cart_clear(phone)
-            final = "Listo! Vacíe tu carrito."
-
-        else:
-            final = "Hola! Soy Fran de Tercom. ¿Qué estás buscando?"
-
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, 0)
-
-        save_message(phone, final, "assistant")
-        return final
-
-    catalog_products = hybrid_search(user_message, limit=MAX_SEARCH_RESULTS)
-    total = len(catalog_products)
-
-    log_interaction(phone, user_message, intent, total)
-
-    if catalog_products:
-        save_last_search(phone, [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "price_ars": p["price_ars"],
-                "price_usd": p["price_usd"],
-                "qty": 1
-            }
-            for p in catalog_products[:200]
-        ], user_message)
-        save_to_search_history(phone, [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "price_ars": p["price_ars"],
-                "price_usd": p["price_usd"],
-                "qty": 1
-            }
-            for p in catalog_products[:200]
-        ], user_message)
-
-    if total == 0:
-        final = (
-            "No encontré ese repuesto en el catálogo.\n\n"
-            "¿Pasame marca, modelo y año de la moto y te busco lo más parecido?"
-        )
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, 0)
-        save_message(phone, final, "assistant")
-        return final
-
-    if total > MAX_PRODUCTS_FOR_LLM:
-        header = (
-            f"Encontré *{total} productos* para: {user_message}\n\n"
-            "Te los mando en partes así WhatsApp no los corta"
-        )
-        chunks = [catalog_products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, total, PRODUCTS_PER_CHUNK)]
-        full_text = [header]
-        for idx, ch in enumerate(chunks, 1):
-            full_text.append(f"\n━━━ Bloque {idx}/{len(chunks)} ({len(ch)} items) ━━━")
-            full_text.append(format_search_results(ch))
-        final = "\n".join(full_text)
-
-        elapsed = time.time() - start_time
-        log_performance(phone, intent, elapsed, total)
-
-        save_message(phone, f"[listado largo {total}]", "assistant")
-        return final
-
-    final = generate_smart_ai_reply(phone, user_message, catalog_products)
-
-    elapsed = time.time() - start_time
-    log_performance(phone, intent, elapsed, total)
-
-    save_message(phone, final, "assistant")
-    return final
+    # 8) Fallback charla/otros
+    reply = "Dale, contame qué repuesto necesitás (marca, modelo, año) y te paso opciones. 🏍️"
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, "chat", 0)
+    log_performance(phone, "chat", time.time() - start_time, 0)
+    return reply
 
 # ------------------------------------------------------------
 # API REST
 # ------------------------------------------------------------
-@app.route("/api/cart/", methods=["GET"])
+@app.route("/api/cart/<phone>", methods=["GET"])
 def api_get_cart(phone):
     try:
         items = cart_get(phone)
@@ -1884,7 +2072,7 @@ def api_quote():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-@app.route("/api/orders/", methods=["GET"])
+@app.route("/api/orders/<phone>", methods=["GET"])
 def api_get_orders(phone):
     try:
         with get_db_connection() as conn:
@@ -2044,8 +2232,8 @@ def health():
 
     return jsonify({
         "ok": True,
-        "service": "fran38",
-        "version": "3.8.1",
+        "service": "fran382",
+        "version": "3.8.2",
         "model": MODEL_NAME,
         "catalog_size": len(catalog) if catalog else 0,
         "faiss_ready": index is not None,
@@ -2055,14 +2243,14 @@ def health():
 
 @app.route("/", methods=["GET"])
 def root():
-    return Response("Fran 3.8.1 - Bot Mayorista Inteligente (PROD-READY)", status=200, mimetype="text/plain")
+    return Response("Fran 3.8.2 - Bot Mayorista Inteligente (CONVERSACIONAL)", status=200, mimetype="text/plain")
 
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.8.1 (PROD-READY) en puerto {port}")
+    logger.info(f"Iniciando Fran 3.8.2 (CONVERSACIONAL) en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
     catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
