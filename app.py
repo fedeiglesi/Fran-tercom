@@ -1620,6 +1620,33 @@ def run_agent(phone, user_message):
     start_time = time.time()
     save_message(phone, user_message, "user")
 
+    if len(user_message.split()) <= 8:   # frases cortas
+        intent = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user",
+                       "content": f"Clasifica en una palabra: saludo, código, producto, desconocido.\nTexto: {user_message}"}],
+            max_tokens=3, temperature=0
+        ).choices[0].message.content.strip().lower()
+
+        if "saludo" in intent:
+            reply = "¡Hola! Soy Fran de TERCOM. ¿Qué repuesto estás buscando?"
+            save_message(phone, reply, "assistant")
+            return reply
+        if "código" in intent:
+            m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
+            if m:
+                code = m.group(0)
+                catalog, _ = get_catalog_and_index()
+                found = [p for p in catalog if p["code"] == code]
+                if found:
+                    p = found[0]
+                    return f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
+                else:
+                    return f"El código {code} no figura en mi lista. ¿Tenés otro?"
+            else:
+                return "No veo el código completo. Pasámelo así: 1234/56789-012"
+                
+
     intent = "unknown"
     is_bulk, item_count = is_bulk_list_request(user_message)
 
