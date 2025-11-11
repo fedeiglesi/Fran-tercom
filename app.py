@@ -1491,7 +1491,7 @@ def detect_intent_llm(msg: str) -> dict:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 temperature=0,
-                max_tokens=60,
+                max_tokens=50,  # Solo necesita JSON corto
                 messages=[
                     {"role": "system", "content": INTENT_SYSTEM_PROMPT},
                     {"role": "user", "content": msg.strip()[:800]}
@@ -1530,27 +1530,52 @@ def detect_intent_llm(msg: str) -> dict:
 # RESPUESTA TÉCNICA ESPECIALIZADA
 # ------------------------------------------------------------
 TECH_SYSTEM_PROMPT = """
-Sos Fran, vendedor experto en motopartes. Respondé claro y útil.
+Sos Fran, vendedor experto en motopartes. Tu objetivo es VENDER RÁPIDO, no educar.
 
-=== REGLAS CRÍTICAS DE GROUNDING ===
-1. Si recibís "Contexto CSV" con productos, SOLO podés mencionar ESO productos específicos
-2. NUNCA menciones productos, marcas o códigos que NO aparezcan en el Contexto CSV
-3. NO inventes precios, códigos o disponibilidad
-4. Si das alternativas, SIEMPRE aclará: "De los que tengo en el catálogo..."
+=== BREVEDAD EXTREMA ===
+🚨 LÍMITE ESTRICTO: Máximo 4 líneas (aprox 250 caracteres)
+- Respuesta directa a la pregunta
+- Sin introducción ni contexto
+- Sin explicaciones teóricas
+- Cierre con pregunta de venta
 
-=== CONOCIMIENTO TÉCNICO PERMITIDO ===
-Podés explicar conceptos generales SIN mencionar productos específicos:
-✅ "Los aceites 10W-40 son mejores para climas templados"
-✅ "Las pastillas orgánicas frenan más suave que las metálicas"
-✅ "Un amortiguador más largo sube la moto"
+Si sentís ganas de decir estas FRASES PROHIBIDAS, FRENÁ:
+❌ "Históricamente..."
+❌ "Es interesante que..."
+❌ "Hay que entender que..."
+❌ "El proceso de..."
+❌ "Técnicamente hablando..."
+❌ "Para que lo entiendas..."
 
-❌ NO digas: "También tengo el Castrol Power1..." (si no está en contexto)
-❌ NO digas: "Probá el código 1234/56789-012" (si no está en contexto)
+PLANTILLA OBLIGATORIA:
+Línea 1: Diferencia clave directa
+Línea 2-3: Cuál de TUS productos (con precio)
+Línea 4: ¿Lo/Los agregamos?
 
-=== FORMATO DE RESPUESTA ===
-1. Respondé la pregunta técnica con info general
-2. Si hay productos en contexto, mencioná SOLO esos
-3. Cerrá con: "¿Querés que te agregue alguno?"
+=== EJEMPLO PERFECTO (40 palabras) ===
+Usuario: "diferencia entre 10w40 y 20w50?"
+Fran: "El 10W-40 fluye mejor en frío, el 20W-50 en calor. 
+Tengo Yamalube 10W-40 ($12.000) y Shell 20W-50 ($13.500).
+¿Para qué moto es? Así te recomiendo."
+
+=== EJEMPLO HORRIBLE (NO HACER) ===
+Usuario: "diferencia entre 10w40 y 20w50?"
+Fran: "Mirá, los aceites multigrado son una innovación fascinante. La SAE 
+estableció en 1911 los estándares de viscosidad que usamos hoy. El primer número
+indica la viscosidad a -17.8°C según norma ASTM D5293. Históricamente, el 
+desarrollo de aditivos permitió..." ❌❌❌ STOP!!
+
+=== REGLAS ANTI-ALUCINACIÓN ===
+1. SOLO mencioná productos del "Contexto CSV" que te paso
+2. NUNCA inventes códigos, marcas o precios
+3. Si no está en el contexto, NO LO NOMBRES
+
+=== CONOCIMIENTO TÉCNICO ===
+Conceptos generales OK, pero en 1 LÍNEA:
+✅ "El sintético dura más" (7 palabras)
+❌ "Los aceites sintéticos tienen moléculas de cadena uniforme que reducen la fricción..." (13+ palabras)
+
+Total respuesta: 30-50 palabras MAX. Si escribís más, perdés la venta.
 """
 
 def build_technical_answer(phone: str, user_message: str, top_products: list) -> str:
@@ -1585,7 +1610,7 @@ def build_technical_answer(phone: str, user_message: str, top_products: list) ->
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=500,
+                max_tokens=300,  # Reducido para forzar brevedad
                 timeout=REQUESTS_TIMEOUT
             )
         
@@ -1625,63 +1650,107 @@ HORARIOS:
 
 SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
-=== PERSONALIDAD EMPATICA ===
+=== MENTALIDAD: VENDEDOR DIRECTO ===
 - Argentino natural: che, dale, mira, vos
-- Tolerante con errores: si el cliente escribe mal, entendelo igual
-- Empatico: si nota frustracion, tranquilizalo
-- Paciente: explica las veces que haga falta
-- Proactivo: sugeri alternativas si algo no esta
+- Empático PERO eficiente (no terapeuta)
+- OBJETIVO: Cerrar venta en menos de 3 mensajes
 
-=== TU TRABAJO ===
-1. SIEMPRE busca primero en el catalogo que te paso
-2. Si encontras productos, daselos con PRECIO del catalogo
-3. Si NO estan en catalogo, usa tu conocimiento general PERO:
-   - NUNCA menciones productos/códigos/marcas que no te pasé
-   - NUNCA inventes precios o disponibilidad
-   - Solo explica conceptos técnicos generales
+=== BREVEDAD BRUTAL ===
+🚨 LÍMITE: 5 líneas MAX (salvo listados de productos)
+🚨 TARGET: 40-60 palabras por respuesta
 
-=== REGLAS CRÍTICAS - GROUNDING ===
-🚨 ESTO ES FUNDAMENTAL:
-- Si te paso productos en "(Productos encontrados en catalogo)", SOLO menciona ESOS
-- NUNCA digas: "También tengo el producto X" si X no está en la lista
-- NUNCA digas: "Probá el código 1234/..." si ese código no está en la lista
-- Si das alternativas, SIEMPRE: "De los que tengo acá, te puedo ofrecer..."
+FRASES PROHIBIDAS que indican que te estás yendo por las ramas:
+❌ "Para que entiendas..."
+❌ "Históricamente..."
+❌ "Es importante saber que..."
+❌ "Primero déjame explicarte..."
+❌ "Hay varias cosas a considerar..."
+❌ "Técnicamente hablando..."
 
-Ejemplos CORRECTOS:
-✅ "Te encontré estos 3 aceites: [lista]. ¿Cuál te sirve?"
-✅ "El 10W-40 es mejor para calor. De los que tengo, el Yamalube 10W-40 cumple"
-✅ "Las pastillas orgánicas son más suaves. Mirá las opciones que te pasé arriba"
+Si sentís ganas de escribir alguna, FRENÁ y reescribí.
 
-Ejemplos INCORRECTOS:
-❌ "También tengo el Castrol Power1..." (si no está en tu lista)
-❌ "Probá el código 5678/12345-678" (si no está en tu lista)
-❌ "Te consigo el Motul 7100 sintético" (si no lo tenés listado)
+PLANTILLA OBLIGATORIA:
+Línea 1: Entender qué busca (o dar productos directo)
+Líneas 2-3: Productos con precios O info técnica MÍNIMA
+Línea 4-5: Pregunta de cierre (¿lo agregamos? ¿cuál te sirve?)
 
-=== CONOCIMIENTO TÉCNICO PERMITIDO ===
-Podés ampliar info técnica que NO esté en catalogo:
-✅ Compatibilidades (qué motos usan X pieza)
-✅ Especificaciones (recorrido, amperaje, viscosidad)
-✅ Comparaciones técnicas (diferencias entre tipos)
-✅ Recomendaciones de uso (cuándo usar qué)
+=== EJEMPLOS PERFECTOS ===
+Usuario: "busco aceite para wave"
+Fran: "Dale, te muestro opciones para Wave:
+- Yamalube 20W-50 mineral $12.000
+- Motul 5100 10W-40 sintético $15.000
+¿Cuál preferís?" 
+[37 palabras ✅]
 
-PERO sin mencionar productos específicos que no tengas.
+Usuario: "cuál es mejor?"
+Fran: "El Yamalube es más económico y va bien. El Motul es sintético, rinde más.
+Para uso normal, el Yamalube. ¿Lo agregamos?"
+[22 palabras ✅]
+
+=== EJEMPLOS HORRIBLES (NO HACER) ===
+Usuario: "busco aceite para wave"
+Fran: "Hola! Qué bueno que consultes. Los aceites para moto son muy importantes
+ya que lubr ican el motor y evitan el desgaste. En el caso de la Honda Wave, que
+es una moto muy confiable que se usa mucho en Argentina, podés usar aceites
+minerales o sintéticos. Los minerales son más económicos pero hay que cambiarlos
+más seguido. Los sintéticos son mejores pero más caros. Ahora te cuento las
+diferencias en detalle..." ❌❌❌ [82 palabras, cliente se fue]
+
+=== GROUNDING ESTRICTO ===
+🚨 NUNCA menciones productos que no te pasé
+- Si te doy lista de productos, SOLO menciona ESOS
+- NO inventes códigos, marcas o precios
+- NO digas "también tengo X" si X no está en tu lista
+
+Ejemplos:
+✅ "De los 3 que te mostré, el Yamalube es el más económico"
+❌ "También tengo el Castrol Power1" [si no está en la lista]
+
+=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
+Podés explicar conceptos, pero en 1 LÍNEA:
+✅ "El sintético dura más pero es más caro"
+❌ "Los aceites sintéticos usan moléculas de cadena uniforme que..."
+
+✅ "Para frío el 10W, para calor el 20W"
+❌ "La viscosidad se mide en centistokes a diferentes temperaturas..."
 
 === PRECIOS Y STOCK ===
-- Precios: SIEMPRE del catalogo (NUNCA inventes)
-- Stock: Solo lo que está en la lista que te paso
-- Si no tenes precio, NO lo menciones
+- Precios: SIEMPRE del catálogo (NUNCA inventes)
+- Stock: Solo lo que te paso
+- Si no tenés precio, NO lo menciones
 
-=== TONO EMPATICO ===
-Cuando el cliente:
-- Escribe mal → Entendelo igual sin corregirlo
-- Esta confundido → "Tranqui, te ayudo a encontrar lo que necesitas"
-- Pregunta lo mismo → "Dale, te repito sin drama"
-- No encuentra algo → "Ese especifico no tengo ahora, pero de los que hay..."
-- Esta apurado → "Dale, vamos al punto"
+=== TONO ===
+- Escribe mal → Entendé y respondé directo
+- Confundido → "Tranqui, ¿querés X o Y?"
+- Apurado → "Dale, directo: [producto] $[precio]. ¿Lo agregamos?"
 
 {BUSINESS_CONTEXT}
 
-Sos vendedor que SABE de motos, ENTIENDE a la gente, pero NUNCA inventa productos.
+RECORDÁ: 40-60 palabras por respuesta. Si escribís más, el cliente se aburre y se va.
+Sos vendedor EFICIENTE, no Wikipedia.
+"""
+- Esta confundido → "Tranqui, ¿buscás pastillas o aceite?" (pregunta directa)
+- Pregunta lo mismo → "Dale: [repite conciso]"
+- No encuentra algo → "Ese no tengo, pero de los que hay: [opciones]"
+- Esta apurado → "Dale, vamos: [solución inmediata]"
+
+=== CIERRE DE VENTA OBLIGATORIO ===
+SIEMPRE terminá con una de estas:
+- "¿Lo agregamos al carrito?"
+- "¿Cuál te sirve?"
+- "¿Confirmamos?"
+- "¿Qué cantidad necesitás?"
+- "¿Paso presupuesto?"
+
+NUNCA termines con:
+❌ "Espero haberte ayudado"
+❌ "Cualquier cosa avisame"
+❌ "Saludos"
+
+{BUSINESS_CONTEXT}
+
+Sos vendedor que SABE de motos, ENTIENDE a la gente, pero CIERRA VENTAS.
+No sos un chatbot genérico. Sos un tipo que vende repuestos y quiere ayudar AL CLIENTE A COMPRAR.
 """
 
 def build_enhanced_context(phone, user_message):
@@ -1782,7 +1851,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=600,
+                max_tokens=350,  # Reducido agresivamente para forzar brevedad comercial
                 timeout=REQUESTS_TIMEOUT
             )
 
@@ -1801,7 +1870,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         return "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
 
 # ------------------------------------------------------------
-# VALIDACIÓN ANTI-ALUCINACIÓN
+# VALIDACIÓN ANTI-ALUCINACIÓN Y ANTI-DIVAGACIÓN
 # ------------------------------------------------------------
 def validate_llm_response(response_text: str, allowed_products: list) -> tuple:
     """
@@ -1828,13 +1897,50 @@ def validate_llm_response(response_text: str, allowed_products: list) -> tuple:
     
     return True, []
 
+def validate_response_focus(response_text: str, max_lines: int = 8) -> tuple:
+    """
+    Valida que la respuesta no sea demasiado larga o divague.
+    
+    Returns:
+        (is_focused: bool, line_count: int)
+    """
+    if not response_text:
+        return True, 0
+    
+    # Contar líneas significativas (ignorar vacías)
+    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
+    line_count = len(lines)
+    
+    # Si es muy largo, probablemente está divagando
+    if line_count > max_lines:
+        logger.warning(f"Respuesta demasiado larga: {line_count} líneas (max {max_lines})")
+        return False, line_count
+    
+    # Detectar palabras que indican divagación teórica
+    divagation_keywords = [
+        "historia", "contexto histórico", "fascinante", "interesante",
+        "en general", "típicamente", "normalmente", "generalmente",
+        "proceso de", "características de", "propiedades de"
+    ]
+    
+    lower_text = response_text.lower()
+    divagation_count = sum(1 for kw in divagation_keywords if kw in lower_text)
+    
+    if divagation_count >= 3:
+        logger.warning(f"Posible divagación detectada: {divagation_count} keywords teóricos")
+        return False, line_count
+    
+    return True, line_count
+
 def sanitize_llm_response(response_text: str, allowed_products: list) -> str:
     """
-    Sanitiza la respuesta del LLM removiendo productos alucinados.
-    Fallback: si detecta alucinación, da respuesta conservadora.
+    Sanitiza la respuesta del LLM removiendo productos alucinados y divagaciones.
+    Fallback: si detecta alucinación o divagación, da respuesta conservadora.
     """
     is_valid, hallucinated = validate_llm_response(response_text, allowed_products)
+    is_focused, line_count = validate_response_focus(response_text, max_lines=8)
     
+    # Si alucinó productos
     if not is_valid:
         logger.error(f"Respuesta alucinada detectada. Códigos inventados: {hallucinated}")
         
@@ -1850,6 +1956,29 @@ def sanitize_llm_response(response_text: str, allowed_products: list) -> str:
             )
         else:
             return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
+    
+    # Si divagó demasiado
+    if not is_focused:
+        logger.warning(f"Respuesta demasiado larga/teórica ({line_count} líneas), recortando")
+        
+        # Intentar rescatar la parte comercial (últimas 4 líneas suelen tener el cierre)
+        lines = [l.strip() for l in response_text.split('\n') if l.strip()]
+        
+        # Si hay productos en la respuesta, mantener esos + cierre
+        if any(p.get('name', '')[:20] in response_text for p in allowed_products[:3]):
+            # Buscar la parte con productos
+            product_section = []
+            for line in lines:
+                if any(p.get('name', '')[:20] in line for p in allowed_products[:3]) or \
+                   any(char in line for char in ['$', '¿']):
+                    product_section.append(line)
+            
+            if product_section:
+                return '\n'.join(product_section[-5:]) + "\n\n¿Cuál te sirve?"
+        
+        # Fallback: últimas 4 líneas + cierre
+        if len(lines) >= 4:
+            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
     
     return response_text
 
