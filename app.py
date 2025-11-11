@@ -1,29 +1,20 @@
 # =========================================================
-# Fran 3.9.1 – Bot Mayorista Inteligente (PROD-READY FIX)
+# Fran 3.9.2 – Bot Mayorista Inteligente (WORKER FIX + 9 MEJORAS)
 # =========================================================
 # Fixes incluidos:
-# – CSV: strip() después de OR, control idx None
-# – Embeddings: nunca devuelve vector cero
-# – create_order: vacía carrito luego de crear orden
-# – Chunks WhatsApp: 1200 chars, aborta si falla
-# – Worker: try/except global + 2 workers
-# – Rate-limit: backoff 2^retry * random(1,2), max 5
-# – Sanitizador: fallback lista real si alucina
-# – Flechas → reemplazadas por comentarios
+# – Worker: try/except global + respawn automático
+# – openai_sem = Semaphore(5)
+# – cart_add devuelve bool
+# – DB: cerrar conexión antes de reintentar
+# – Lock en embeddings cache
+# – Índice en expires_at
+# – max_tokens dinámico
+# – Limpieza de trabajos antiguos
+# – Rate limiting en API REST
+# – Validación de carrito antes de confirmar
 # =========================================================
 
-import os
-import json
-import csv
-import io
-import sqlite3
-import logging
-import re
-import unicodedata
-import time
-import threading
-import pickle
-import random
+import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
 from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import lru_cache
@@ -66,7 +57,7 @@ MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
-).strip()          # strip DESPUES de la OR
+).strip()
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -81,7 +72,6 @@ DB_PATH = os.environ.get("DB_PATH", "tercom.db")
 FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
 FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 
-# Cache versionado
 _safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
@@ -97,7 +87,7 @@ MAX_ITEMS = 200
 BULK_TIMEOUT = 300
 MAX_BULK_ITEMS = 200
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.1"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.2"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -118,8 +108,8 @@ cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
 
-# Rate-limit global OpenAI
-openai_sem = Semaphore(1)
+# ✅ 1. Aumentar paralelismo
+openai_sem = Semaphore(5)
 
 exchange_cache = {"rate": None, "timestamp": None}
 EXCHANGE_CACHE_TTL = 3600
@@ -133,6 +123,9 @@ DEDUP_WINDOW = 5
 
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
+
+# ✅ 4. Lock para embeddings
+_embeddings_cache_lock = Lock()
 
 # ------------------------------------------------------------
 # UTILS
@@ -224,16 +217,17 @@ def get_db_connection():
             conn.commit()
             return
         except sqlite3.OperationalError as e:
+            if conn:
+                conn.close()
+                conn = None
             if "locked" in str(e) and attempt < 2:
                 time.sleep(0.25 * (attempt + 1))
                 continue
-            if conn:
-                conn.rollback()
             logger.error(f"DB error: {e}")
             raise
         except Exception as e:
             if conn:
-                conn.rollback()
+                conn.close()
             logger.error(f"DB error: {e}")
             raise
         finally:
@@ -332,7 +326,6 @@ def init_db():
             )
         """)
 
-        # Tabla de acciones pendientes
         c.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 phone TEXT PRIMARY KEY,
@@ -343,16 +336,27 @@ def init_db():
                 expires_at TEXT
             )
         """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
 
-init_db()
+# ✅ 7. Limpieza de trabajos antiguos
+def cleanup_old_jobs():
+    try:
+        with get_db_connection() as conn:
+            cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+            conn.execute("DELETE FROM bulk_jobs WHERE created_at < ? AND status='processing'", (cutoff,))
+            logger.info("Limpieza de trabajos antiguos completada")
+    except Exception as e:
+        logger.error(f"Error en cleanup_old_jobs: {e}")
 
-# ------------------------------------------------------------
-# PENDING ACTIONS
-# ------------------------------------------------------------
+# ✅ 9. Hash del carrito
 def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
     if not phone:
         return
     try:
+        items = cart_get(phone)
+        cart_snapshot = json.dumps(sorted([(i[0], i[1]) for i in items]))
+        action_data["cart_hash"] = hashlib.md5(cart_snapshot.encode()).hexdigest()
+
         expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
         with get_db_connection() as conn:
             conn.execute(
@@ -691,12 +695,11 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
     if not phone:
         return None
     try:
-        # Validar que el total coincida con el carrito real
         real_total, _ = cart_totals(phone)
         if abs(Decimal(total_ars) - real_total) > Decimal("0.01"):
             raise ValueError("Total manipulado")
 
-        order_id = f"ORD-{int(time.time()*10)}"  # más resolución
+        order_id = f"ORD-{int(time.time()*10)}"
         with get_db_connection() as conn:
             conn.execute(
                 """INSERT INTO orders
@@ -704,7 +707,6 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (order_id, phone, customer_name, customer_address, json.dumps(items), total_ars, "confirmed", datetime.now().isoformat())
             )
-            # >>> VACIAR CARRITO <<<
             conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
         return order_id
     except Exception as e:
@@ -848,73 +850,73 @@ def load_faiss_index():
         return None, None
 
 def generate_embeddings_with_cache(texts):
-    cache = {}
-    if os.path.exists(EMBEDDINGS_CACHE_PATH):
-        try:
-            with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
-                cache = pickle.load(f)
-                logger.info(f"Cache de embeddings cargado: {len(cache)} textos")
-        except Exception as e:
-            logger.warning(f"Error cargando cache de embeddings: {e}")
+    with _embeddings_cache_lock:
+        cache = {}
+        if os.path.exists(EMBEDDINGS_CACHE_PATH):
+            try:
+                with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
+                    cache = pickle.load(f)
+                    logger.info(f"Cache de embeddings cargado: {len(cache)} textos")
+            except Exception as e:
+                logger.warning(f"Error cargando cache de embeddings: {e}")
 
-    texts_to_embed = []
-    text_indices = []
+        texts_to_embed = []
+        text_indices = []
 
-    for idx, text in enumerate(texts):
-        if text not in cache:
-            texts_to_embed.append(text)
-            text_indices.append(idx)
+        for idx, text in enumerate(texts):
+            if text not in cache:
+                texts_to_embed.append(text)
+                text_indices.append(idx)
 
-    if texts_to_embed:
-        logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
-        vectors = []
-        batch = 512
-        max_retries = 5  # aumentado
+        if texts_to_embed:
+            logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
+            vectors = []
+            batch = 512
+            max_retries = 5
 
-        for i in range(0, len(texts_to_embed), batch):
-            chunk = texts_to_embed[i:i + batch]
+            for i in range(0, len(texts_to_embed), batch):
+                chunk = texts_to_embed[i:i + batch]
 
-            for retry in range(max_retries):
-                try:
-                    with openai_sem:
-                        resp = client.embeddings.create(
-                            input=chunk,
-                            model="text-embedding-3-small",
-                            timeout=REQUESTS_TIMEOUT
-                        )
-                    chunk_vectors = [d.embedding for d in resp.data]
-                    vectors.extend(chunk_vectors)
+                for retry in range(max_retries):
+                    try:
+                        with openai_sem:
+                            resp = client.embeddings.create(
+                                input=chunk,
+                                model="text-embedding-3-small",
+                                timeout=REQUESTS_TIMEOUT
+                            )
+                        chunk_vectors = [d.embedding for d in resp.data]
+                        vectors.extend(chunk_vectors)
 
-                    for text, vec in zip(chunk, chunk_vectors):
-                        cache[text] = vec
+                        for text, vec in zip(chunk, chunk_vectors):
+                            cache[text] = vec
 
-                    break
-                except RateLimitError as e:
-                    if retry < max_retries - 1:
-                        wait_time = (2 ** retry) * random.uniform(1, 2)
-                        logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s...")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"RateLimitError persistente: {e}")
-                        raise
+                        break
+                    except RateLimitError as e:
+                        if retry < max_retries - 1:
+                            wait_time = (2 ** retry) * random.uniform(1, 2)
+                            logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s...")
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"RateLimitError persistente: {e}")
+                            raise
 
-        try:
-            with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
-                pickle.dump(cache, f)
-            logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
-        except Exception as e:
-            logger.warning(f"Error guardando cache de embeddings: {e}")
+            try:
+                with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
+                    pickle.dump(cache, f)
+                logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
+            except Exception as e:
+                logger.warning(f"Error guardando cache de embeddings: {e}")
 
-    final_vectors = []
-    for text in texts:
-        if text in cache and cache[text]:
-            final_vectors.append(cache[text])
-        else:
-            logger.error(f"Texto sin embedding: {text[:50]}")
-            # Nunca devolver vector cero
-            final_vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
+        final_vectors = []
+        for text in texts:
+            if text in cache and cache[text]:
+                final_vectors.append(cache[text])
+            else:
+                logger.error(f"Texto sin embedding: {text[:50]}")
+                final_vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
 
-    return final_vectors
+        return final_vectors
 
 def _build_faiss_index_from_catalog(catalog):
     try:
@@ -972,144 +974,21 @@ _ = get_catalog_and_index()
 logger.info("Catalogo enriquecido e indice FAISS listos.")
 
 # ------------------------------------------------------------
-# BÚSQUEDA
-# ------------------------------------------------------------
-SEARCH_ALIASES = {
-    "yama": "yamaha",
-    "zan": "zanella",
-    "hond": "honda",
-    "suzu": "suzuki",
-    "baj": "bajaj",
-    "rouser": "bajaj rouser",
-    "gil": "gilera",
-    "corv": "corven",
-    "motom": "motomel",
-    "guerr": "guerrero",
-    "twister": "honda twister",
-    "cbx": "honda cbx",
-    "wave": "honda wave",
-}
-
-def normalize_search_query(query):
-    if not query:
-        return ""
-    q = strip_accents(query.lower())
-    for alias, repl in SEARCH_ALIASES.items():
-        q = q.replace(alias, repl)
-    q = re.sub(r"[^a-z0-9\s]", " ", q)
-    return " ".join(q.split())
-
-def fuzzy_search(query, limit=200):
-    catalog, _ = get_catalog_and_index()
-    if not catalog or not query:
-        return []
-    try:
-        names = [p["search_text"] for p in catalog]
-        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
-        results = []
-        for _, score, idx in matches:
-            if score >= 60 and idx < len(catalog):
-                results.append((catalog[idx], score))
-        return results
-    except Exception as e:
-        logger.error(f"Error en fuzzy_search: {e}")
-        return []
-
-def semantic_search(query, top_k=400, max_retries=3):
-    catalog, index = get_catalog_and_index()
-    if not catalog or index is None or not query:
-        return []
-    try:
-        for retry in range(max_retries):
-            try:
-                with openai_sem:
-                    resp = client.embeddings.create(
-                        input=[query],
-                        model="text-embedding-3-small",
-                        timeout=REQUESTS_TIMEOUT
-                    )
-                emb = np.array([resp.data[0].embedding]).astype("float32")
-                break
-            except RateLimitError as e:
-                if retry < max_retries - 1:
-                    wait_time = (2 ** retry) * random.uniform(1, 2)
-                    logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time:.2f}s...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"RateLimitError persistente: {e}")
-                    return []
-
-        D, I = index.search(emb, top_k)
-        results = []
-        for dist, idx in zip(D[0], I[0]):
-            if 0 <= idx < len(catalog):
-                score = 1.0 / (1.0 + float(dist))
-                results.append((catalog[idx], score))
-        return results
-    except Exception as e:
-        logger.error(f"Error en busqueda semantica: {e}")
-        return []
-
-# Cache híbrida con TTL
-hybrid_cache = TTLCache(maxsize=2048, ttl=600)
-
-def hybrid_search_impl(query, limit=120):
-    if not query:
-        return []
-    try:
-        fuzzy_results = fuzzy_search(query, limit=200)
-        semantic_results = semantic_search(query, top_k=400)
-
-        combined = {}
-        for prod, score in fuzzy_results:
-            key = prod["code"]
-            combined[key] = {"prod": prod, "fuzzy": score / 100.0, "sem": 0.0}
-
-        for prod, score in semantic_results:
-            key = prod["code"]
-            if key not in combined:
-                combined[key] = {"prod": prod, "fuzzy": 0.0, "sem": score}
-            else:
-                combined[key]["sem"] = max(combined[key]["sem"], score)
-
-        final = []
-        for v in combined.values():
-            combined_score = 0.6 * v["sem"] + 0.4 * v["fuzzy"]
-            final.append((v["prod"], combined_score))
-
-        final.sort(key=lambda x: x[1], reverse=True)
-        return [p for p, _ in final[:limit]]
-    except Exception as e:
-        logger.error(f"Error en hybrid_search: {e}")
-        return []
-
-def hybrid_search(query, limit=120):
-    if not query:
-        return []
-    query_normalized = normalize_search_query(query)
-    if query_normalized in hybrid_cache:
-        return hybrid_cache[query_normalized]
-    res = hybrid_search_impl(query_normalized, limit)
-    hybrid_cache[query_normalized] = res
-    return res
-
-# ------------------------------------------------------------
 # CARRITO – VALIDA EXISTENCIA
 # ------------------------------------------------------------
 def cart_add(phone, code, qty, name, price_ars, price_usd):
     if not phone or not code:
-        return
+        return False
     try:
         qty = max(1, min(int(qty or 1), 1000))
         price_ars = price_ars.quantize(Decimal("0.01"))
         price_usd = price_usd.quantize(Decimal("0.01"))
 
-        # Validar que el producto exista
         catalog, _ = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
         if not prod:
             logger.warning(f"Producto {code} no existe en catalogo")
-            return
+            return False
 
         with cart_lock:
             with get_db_connection() as conn:
@@ -1130,8 +1009,10 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         (phone, code, qty, name, str(price_ars), str(price_usd), now)
                     )
+        return True
     except Exception as e:
         logger.error(f"Error en cart_add: {e}")
+        return False
 
 def cart_get(phone, max_age_hours=24):
     if not phone:
@@ -1373,6 +1254,7 @@ def process_bulk_async(job):
         except:
             pass
 
+# ✅ WORKER CON RESPAWN AUTOMÁTICO
 def bulk_worker():
     while True:
         try:
@@ -1383,7 +1265,7 @@ def bulk_worker():
             logger.exception("Worker dead, respawning…")
             time.sleep(5)
 
-# Lanzamos 2 workers
+# ✅ Lanzar 2 workers con respawn
 for _ in range(2):
     threading.Thread(target=bulk_worker, daemon=True).start()
 
@@ -1418,7 +1300,7 @@ TOTAL: {format_price(Decimal(str(total)))}
 # ------------------------------------------------------------
 # MULTI-MENSAJE
 # ------------------------------------------------------------
-def send_long_message(phone, text, chunk_size=1200):  # 1200 seguro
+def send_long_message(phone, text, chunk_size=1200):
     if not twilio_rest_client:
         logger.error("Twilio client no disponible")
         return False
@@ -1445,11 +1327,11 @@ def send_long_message(phone, text, chunk_size=1200):  # 1200 seguro
                 logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
 
                 if idx < len(parts) - 1:
-                    time.sleep(0.8)  # más aire
+                    time.sleep(0.8)
 
             except Exception as e:
                 logger.error(f"Error enviando chunk {idx + 1}: {e}")
-                raise  # Abortar todo
+                raise
 
         logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
         return True
@@ -1483,7 +1365,6 @@ Devolvé SIEMPRE JSON de una línea.
 """
 
 def detect_intent_llm(msg):
-    """Detecta la intención usando LLM con respuesta JSON estructurada"""
     try:
         with openai_sem:
             resp = client.chat.completions.create(
@@ -1497,8 +1378,6 @@ def detect_intent_llm(msg):
                 timeout=REQUESTS_TIMEOUT
             )
         raw = (resp.choices[0].message.content or "").strip()
-
-        # Fallback por si el modelo agrega texto: extraer primer objeto JSON
         start = raw.find("{")
         end = raw.rfind("}")
         if start != -1 and end != -1:
@@ -1511,7 +1390,6 @@ def detect_intent_llm(msg):
         intent = str(data.get("intent", "desconocido")).strip()
         query = str(data.get("query", "")).strip()
         
-        # Validar que el intent sea uno de los permitidos
         valid_intents = {
             "saludo", "busqueda_catalogo", "pregunta_tecnica", "pedido_codigo",
             "agregar_carrito", "ver_carrito", "vaciar_carrito", "confirmar", "cancelar", "desconocido"
@@ -1570,9 +1448,7 @@ Sos vendedor EFICIENTE, no Wikipedia.
 """
 
 def build_technical_answer(phone, user_message, top_products):
-    """Genera respuesta técnica usando LLM con contexto mínimo del catálogo"""
     try:
-        # Empaquetar hasta 3 productos como contexto compacto
         context_lines = []
         for p in (top_products or [])[:3]:
             context_lines.append(
@@ -1581,16 +1457,13 @@ def build_technical_answer(phone, user_message, top_products):
             )
         ctx = "Contexto CSV:\n" + "\n".join(context_lines) if context_lines else "Contexto CSV: (sin coincidencias exactas)"
 
-        # Obtener historial conversacional
         history = get_history_since(phone, days=1, limit=10)
         msgs = [{"role": "system", "content": TECH_SYSTEM_PROMPT}]
         
-        # Agregar historial reciente
         for h in history[-10:]:
             role = "assistant" if h["role"] == "assistant" else "user"
             msgs.append({"role": role, "content": h["content"]})
         
-        # Agregar contexto y pregunta actual
         msgs.append({
             "role": "user",
             "content": f"{ctx}\n\nPregunta del cliente: {user_message[:800]}"
@@ -1601,7 +1474,7 @@ def build_technical_answer(phone, user_message, top_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=300,  # Reducido para forzar brevedad
+                max_tokens=500 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 350,
                 timeout=REQUESTS_TIMEOUT
             )
         
@@ -1610,7 +1483,6 @@ def build_technical_answer(phone, user_message, top_products):
         if not txt or len(txt) < 10:
             return "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
         
-        # VALIDACIÓN ANTI-ALUCINACIÓN
         txt = sanitize_llm_response(txt, top_products)
         
         return txt
@@ -1622,18 +1494,15 @@ def build_technical_answer(phone, user_message, top_products):
 # VALIDACIÓN ANTI-ALUCINACIÓN Y ANTI-DIVAGACIÓN
 # ------------------------------------------------------------
 def sanitize_llm_response(response_text, allowed_products):
-    """Sanitiza la respuesta del LLM removiendo productos alucinados y divagaciones."""
     if not response_text:
         return "No pude generar una respuesta. ¿Me repetís?"
 
-    # Validar códigos mencionados
     allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
     mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
     hallucinated = mentioned_codes - allowed_codes
 
     if hallucinated:
         logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
-        # Fallback: listar solo los productos reales
         if allowed_products:
             product_list = "\n".join([
                 f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
@@ -1646,11 +1515,9 @@ def sanitize_llm_response(response_text, allowed_products):
         else:
             return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
 
-    # Validar longitud
     lines = [l.strip() for l in response_text.split('\n') if l.strip()]
     if len(lines) > 8:
         logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
-        # Recortar últimas 4 líneas + cierre
         if len(lines) >= 4:
             return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
         else:
@@ -1770,7 +1637,6 @@ def build_enhanced_context(phone, user_message):
                 context_parts.append(f", {customer['address']}")
             context_parts.append("]")
 
-        # Incluir pending action en el contexto
         if pending:
             action_type = pending.get("action_type", "")
             context_text = pending.get("context", "")
@@ -1834,7 +1700,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=350,  # Reducido agresivamente para forzar brevedad comercial
+                max_tokens=500 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 350,
                 timeout=REQUESTS_TIMEOUT
             )
 
@@ -1843,7 +1709,6 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         if not txt or len(txt) < 10:
             return "Uy, tuve un problema. ¿Me repetis?"
 
-        # VALIDACIÓN ANTI-ALUCINACIÓN
         txt = sanitize_llm_response(txt, catalog_products)
 
         return txt
@@ -1890,39 +1755,33 @@ def format_search_results(products):
 # AGENTE PRINCIPAL CON MEJORAS COGNITIVAS
 # ------------------------------------------------------------
 def run_agent(phone, user_message):
-    """
-    Agente mejorado con:
-    - Intent detection por LLM
-    - Manejo de pending actions
-    - Rutas optimizadas (no buscar catálogo innecesariamente)
-    - Respuestas técnicas especializadas
-    """
     if not phone or not user_message:
         return "Error: mensaje vacio"
 
     start_time = time.time()
     save_message(phone, user_message, "user")
 
-    # 1) DETECTAR INTENCIÓN CON LLM
     intent_data = detect_intent_llm(user_message)
     intent = intent_data.get("intent", "desconocido")
     query_for_search = intent_data.get("query") or user_message
 
     logger.info(f"Intent detectado: {intent}, query: {query_for_search[:50]}")
 
-    # 2) VERIFICAR SI HAY PENDING ACTION
     pending = get_pending_action(phone)
 
-    # 3) MANEJO DE CONFIRMACIONES/CANCELACIONES
     if intent == "confirmar":
         if not pending:
             reply = "No tengo ninguna acción pendiente para confirmar. ¿Qué necesitás?"
         else:
-            # Ejecutar la acción pendiente
             action_type = pending["action_type"]
             action_data = pending["action_data"]
             
             if action_type == "add_to_cart":
+                current_items = cart_get(phone)
+                current_cart_hash = hashlib.md5(json.dumps(sorted([(i[0], i[1]) for i in current_items])).encode()).hexdigest()
+                if pending["action_data"].get("cart_hash") != current_cart_hash:
+                    return "El carrito cambió. ¿Confirmás con los productos actuales?"
+
                 catalog, _ = get_catalog_and_index()
                 products = action_data.get("products", [])
                 added_count = 0
@@ -1937,9 +1796,9 @@ def run_agent(phone, user_message):
                         if prod:
                             price_ars = to_decimal_money(prod["price_ars"])
                             price_usd = to_decimal_money(prod["price_usd"])
-                            cart_add(phone, norm, qty, prod["name"], price_ars, price_usd)
-                            added_count += 1
-                            total_added += price_ars * qty
+                            if cart_add(phone, norm, qty, prod["name"], price_ars, price_usd):
+                                added_count += 1
+                                total_added += price_ars * qty
                 
                 clear_pending_action(phone)
                 reply = f"Perfecto! Agregué {added_count} ítems al carrito por {format_price(total_added)}.\n\n¿Pasame tus datos para el presupuesto: nombre, dirección y teléfono?"
@@ -1964,7 +1823,6 @@ def run_agent(phone, user_message):
         log_performance(phone, "cancelar", time.time()-start_time, 0)
         return reply
 
-    # 4) SALUDO (sin búsqueda en catálogo)
     if intent == "saludo":
         reply = "¡Hola! Soy Fran de TERCOM 👋 ¿Qué repuesto necesitás? Decime marca/modelo y te ayudo."
         save_message(phone, reply, "assistant")
@@ -1972,7 +1830,6 @@ def run_agent(phone, user_message):
         log_performance(phone, "saludo", time.time()-start_time, 0)
         return reply
 
-    # 5) COMANDOS DE CARRITO (sin búsqueda en catálogo)
     if intent == "ver_carrito":
         items = cart_get(phone)
         if not items:
@@ -2003,23 +1860,14 @@ def run_agent(phone, user_message):
         if not last or not last.get("products"):
             reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
         else:
-            # En vez de agregar directamente, guardar como pending action
             products = last["products"][:200]
-            
-            # Calcular total estimado
-            total_estimate = sum(
-                to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
-                for p in products
-            )
-            
-            # Guardar pending action
+            total_estimate = sum(to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1)) for p in products)
             save_pending_action(
                 phone,
                 action_type="add_to_cart",
                 action_data={"products": products},
                 context=f"{len(products)} productos por {format_price(total_estimate)}"
             )
-            
             reply = (
                 f"Dale! Te agrego {len(products)} productos por {format_price(total_estimate)} aprox.\n\n"
                 "¿Confirmás? (decime 'si' o 'dale' para confirmar, 'no' para cancelar)"
@@ -2030,7 +1878,6 @@ def run_agent(phone, user_message):
         log_performance(phone, "agregar_carrito", time.time()-start_time, 0)
         return reply
 
-    # 6) PEDIDO POR CÓDIGO DIRECTO
     if intent == "pedido_codigo":
         m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
         if m:
@@ -2049,7 +1896,6 @@ def run_agent(phone, user_message):
         log_performance(phone, "pedido_codigo", time.time()-start_time, 1)
         return reply
 
-    # 7) DETECTAR SI ES LISTA MASIVA
     is_bulk, item_count = is_bulk_list_request(user_message)
 
     if is_bulk:
@@ -2104,7 +1950,6 @@ def run_agent(phone, user_message):
         save_message(phone, final, "assistant")
         return final
 
-    # 8) BÚSQUEDA EN CATÁLOGO O PREGUNTA TÉCNICA
     products = []
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
         products = hybrid_search(query_for_search, limit=MAX_SEARCH_RESULTS)
@@ -2133,7 +1978,6 @@ def run_agent(phone, user_message):
                 for p in products[:200]
             ], query_for_search)
 
-        # 8.a) Sin resultados
         if total == 0:
             reply = (
                 "No encontré ese repuesto en el catálogo.\n\n"
@@ -2143,7 +1987,6 @@ def run_agent(phone, user_message):
             log_performance(phone, intent, time.time()-start_time, 0)
             return reply
 
-        # 8.b) Demasiados resultados → chunking sin LLM
         if total > MAX_PRODUCTS_FOR_LLM:
             header = (
                 f"Encontré *{total} productos* para: {user_message}\n\n"
@@ -2162,20 +2005,17 @@ def run_agent(phone, user_message):
             save_message(phone, f"[listado largo {total}]", "assistant")
             return final
 
-        # 8.c) PREGUNTA TÉCNICA → respuesta especializada
         if intent == "pregunta_tecnica":
             reply = build_technical_answer(phone, user_message, products[:10])
             save_message(phone, reply, "assistant")
             log_performance(phone, intent, time.time()-start_time, len(products))
             return reply
 
-        # 8.d) BÚSQUEDA NORMAL → respuesta empática con productos
         reply = generate_smart_ai_reply(phone, user_message, products[:10])
         save_message(phone, reply, "assistant")
         log_performance(phone, intent, time.time()-start_time, len(products))
         return reply
 
-    # 9) FALLBACK
     reply = "Dale, contame qué repuesto necesitás (marca, modelo, año) y te paso opciones."
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, "chat", 0)
@@ -2188,6 +2028,8 @@ def run_agent(phone, user_message):
 @app.route("/api/cart/<phone>", methods=["GET"])
 def api_get_cart(phone):
     try:
+        if not rate_limit_check(phone):
+            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
         items = cart_get(phone)
         total, discount = cart_totals(phone)
         return jsonify({
@@ -2208,6 +2050,9 @@ def api_quote():
     try:
         data = request.get_json()
         query = data.get("query", "")
+        phone = data.get("phone") or request.remote_addr
+        if not rate_limit_check(phone):
+            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
         limit = data.get("limit", 10)
 
         if not query:
@@ -2237,6 +2082,8 @@ def api_quote():
 @app.route("/api/orders/<phone>", methods=["GET"])
 def api_get_orders(phone):
     try:
+        if not rate_limit_check(phone):
+            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
         with get_db_connection() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -2395,7 +2242,7 @@ def health():
     return jsonify({
         "ok": True,
         "service": "fran39",
-        "version": "3.9.1",
+        "version": "3.9.2",
         "model": MODEL_NAME,
         "catalog_size": len(catalog) if catalog else 0,
         "faiss_ready": index is not None,
@@ -2405,14 +2252,15 @@ def health():
 
 @app.route("/", methods=["GET"])
 def root():
-    return Response("Fran 3.9.1 - Bot Mayorista Inteligente (PROD-READY FIX)", status=200, mimetype="text/plain")
+    return Response("Fran 3.9.2 - Bot Mayorista Inteligente (WORKER FIX + 9 MEJORAS)", status=200, mimetype="text/plain")
 
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
 if __name__ == "__main__":
+    cleanup_old_jobs()
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.9.1 (PROD-READY FIX) en puerto {port}")
+    logger.info(f"Iniciando Fran 3.9.2 (WORKER FIX + 9 MEJORAS) en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
     catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
