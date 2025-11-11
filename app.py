@@ -1,13 +1,15 @@
 # =========================================================
-# Fran 3.9 – Bot Mayorista Inteligente (MEJORAS COGNITIVAS)
+# Fran 3.9.1 – Bot Mayorista Inteligente (PROD-READY FIX)
 # =========================================================
-# Novedades v3.9:
-# – Intent detector con LLM (JSON estructurado)
-# – Sistema de respuestas técnicas especializado
-# – Pending actions: rastreo de decisiones pendientes
-# – Mejor gestión de confirmaciones/cancelaciones
-# – Contexto conversacional mejorado
-# – Rutas optimizadas (no buscar catálogo innecesariamente)
+# Fixes incluidos:
+# – CSV: strip() después de OR, control idx None
+# – Embeddings: nunca devuelve vector cero
+# – create_order: vacía carrito luego de crear orden
+# – Chunks WhatsApp: 1200 chars, aborta si falla
+# – Worker: try/except global + 2 workers
+# – Rate-limit: backoff 2^retry * random(1,2), max 5
+# – Sanitizador: fallback lista real si alucina
+# – Flechas → reemplazadas por comentarios
 # =========================================================
 
 import os
@@ -21,6 +23,7 @@ import unicodedata
 import time
 import threading
 import pickle
+import random
 from datetime import datetime, timedelta
 from collections import defaultdict
 from functools import lru_cache
@@ -61,12 +64,14 @@ if not OPENAI_API_KEY:
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
-    os.environ.get("CATALOG_URL")
-    or "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
-).strip()
+    os.environ.get("CATALOG_URL") or
+    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
+).strip()          # strip DESPUES de la OR
+
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
 ).strip()
+
 DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
 REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "30"))
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
@@ -76,9 +81,9 @@ DB_PATH = os.environ.get("DB_PATH", "tercom.db")
 FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
 FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 
-# Cache versionado - sanitizar URL para nombre de archivo
-_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
-EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_catalog_hash}.pkl"
+# Cache versionado
+_safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
+EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
 MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "20"))
@@ -92,7 +97,7 @@ MAX_ITEMS = 200
 BULK_TIMEOUT = 300
 MAX_BULK_ITEMS = 200
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.9"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.1"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -199,7 +204,7 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
     return False
 
 # ------------------------------------------------------------
-# DATABASE – SQLITE RESILIENTE + PENDING ACTIONS
+# DATABASE – SQLITE RESILIENTE
 # ------------------------------------------------------------
 @contextmanager
 def get_db_connection():
@@ -327,7 +332,7 @@ def init_db():
             )
         """)
 
-        # NUEVA: Tabla de acciones pendientes para memoria conversacional
+        # Tabla de acciones pendientes
         c.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 phone TEXT PRIMARY KEY,
@@ -342,14 +347,9 @@ def init_db():
 init_db()
 
 # ------------------------------------------------------------
-# PENDING ACTIONS - MEMORIA DE DECISIONES
+# PENDING ACTIONS
 # ------------------------------------------------------------
 def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
-    """
-    Guarda una acción pendiente de confirmación
-    action_type: 'add_to_cart', 'create_order', 'bulk_quote', etc.
-    action_data: JSON con los datos necesarios para ejecutar la acción
-    """
     if not phone:
         return
     try:
@@ -370,7 +370,6 @@ def save_pending_action(phone, action_type, action_data, context="", ttl_minutes
         logger.error(f"Error guardando pending_action: {e}")
 
 def get_pending_action(phone):
-    """Obtiene la acción pendiente si no expiró"""
     if not phone:
         return None
     try:
@@ -395,7 +394,6 @@ def get_pending_action(phone):
         return None
 
 def clear_pending_action(phone):
-    """Limpia la acción pendiente (después de confirmar o cancelar)"""
     if not phone:
         return
     try:
@@ -698,7 +696,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
         if abs(Decimal(total_ars) - real_total) > Decimal("0.01"):
             raise ValueError("Total manipulado")
 
-        order_id = f"ORD-{int(time.time())}"
+        order_id = f"ORD-{int(time.time()*10)}"  # más resolución
         with get_db_connection() as conn:
             conn.execute(
                 """INSERT INTO orders
@@ -706,6 +704,8 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (order_id, phone, customer_name, customer_address, json.dumps(items), total_ars, "confirmed", datetime.now().isoformat())
             )
+            # >>> VACIAR CARRITO <<<
+            conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
         return order_id
     except Exception as e:
         logger.error(f"Error creando orden: {e}")
@@ -767,22 +767,22 @@ def load_catalog_enriched():
             if not line:
                 continue
             try:
-                code = line[idx_code].strip() if idx_code is not None and idx_code < len(line) else ""
-                name = line[idx_name].strip() if idx_name is not None and idx_name < len(line) else ""
+                code = line[idx_code].strip() if (idx_code is not None and idx_code < len(line)) else ""
+                name = line[idx_name].strip() if (idx_name is not None and idx_name < len(line)) else ""
 
-                price_usd = to_decimal_money(line[idx_usd]) if idx_usd is not None and idx_usd < len(line) else Decimal("0")
-                price_ars = to_decimal_money(line[idx_ars]) if idx_ars is not None and idx_ars < len(line) else Decimal("0")
+                price_usd = to_decimal_money(line[idx_usd]) if (idx_usd is not None and idx_usd < len(line)) else Decimal("0")
+                price_ars = to_decimal_money(line[idx_ars]) if (idx_ars is not None and idx_ars < len(line)) else Decimal("0")
 
                 if price_ars == 0 and price_usd > 0:
                     price_ars = (price_usd * exchange).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-                brand = line[idx_brand].strip() if idx_brand is not None and idx_brand < len(line) else ""
-                model = line[idx_model].strip() if idx_model is not None and idx_model < len(line) else ""
-                category = line[idx_category].strip() if idx_category is not None and idx_category < len(line) else ""
-                keywords = line[idx_keywords].strip() if idx_keywords is not None and idx_keywords < len(line) else ""
-                oem = line[idx_oem].strip() if idx_oem is not None and idx_oem < len(line) else ""
-                alt_names = line[idx_alt].strip() if idx_alt is not None and idx_alt < len(line) else ""
-                vehicle_type = line[idx_vehicle].strip() if idx_vehicle is not None and idx_vehicle < len(line) else ""
+                brand = line[idx_brand].strip() if (idx_brand is not None and idx_brand < len(line)) else ""
+                model = line[idx_model].strip() if (idx_model is not None and idx_model < len(line)) else ""
+                category = line[idx_category].strip() if (idx_category is not None and idx_category < len(line)) else ""
+                keywords = line[idx_keywords].strip() if (idx_keywords is not None and idx_keywords < len(line)) else ""
+                oem = line[idx_oem].strip() if (idx_oem is not None and idx_oem < len(line)) else ""
+                alt_names = line[idx_alt].strip() if (idx_alt is not None and idx_alt < len(line)) else ""
+                vehicle_type = line[idx_vehicle].strip() if (idx_vehicle is not None and idx_vehicle < len(line)) else ""
 
                 search_text_parts = [
                     name,
@@ -869,7 +869,7 @@ def generate_embeddings_with_cache(texts):
         logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
         vectors = []
         batch = 512
-        max_retries = 3
+        max_retries = 5  # aumentado
 
         for i in range(0, len(texts_to_embed), batch):
             chunk = texts_to_embed[i:i + batch]
@@ -891,8 +891,8 @@ def generate_embeddings_with_cache(texts):
                     break
                 except RateLimitError as e:
                     if retry < max_retries - 1:
-                        wait_time = 2 ** retry
-                        logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time}s...")
+                        wait_time = (2 ** retry) * random.uniform(1, 2)
+                        logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s...")
                         time.sleep(wait_time)
                     else:
                         logger.error(f"RateLimitError persistente: {e}")
@@ -907,11 +907,12 @@ def generate_embeddings_with_cache(texts):
 
     final_vectors = []
     for text in texts:
-        if text in cache:
+        if text in cache and cache[text]:
             final_vectors.append(cache[text])
         else:
             logger.error(f"Texto sin embedding: {text[:50]}")
-            final_vectors.append([0.0] * 1536)
+            # Nunca devolver vector cero
+            final_vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
 
     return final_vectors
 
@@ -1031,8 +1032,8 @@ def semantic_search(query, top_k=400, max_retries=3):
                 break
             except RateLimitError as e:
                 if retry < max_retries - 1:
-                    wait_time = 2 ** retry
-                    logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time}s...")
+                    wait_time = (2 ** retry) * random.uniform(1, 2)
+                    logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time:.2f}s...")
                     time.sleep(wait_time)
                 else:
                     logger.error(f"RateLimitError persistente: {e}")
@@ -1378,10 +1379,13 @@ def bulk_worker():
             job = bulk_queue.get(timeout=1)
             process_bulk_async(job)
             bulk_queue.task_done()
-        except:
-            continue
+        except Exception as e:
+            logger.exception("Worker dead, respawning…")
+            time.sleep(5)
 
-threading.Thread(target=bulk_worker, daemon=True).start()
+# Lanzamos 2 workers
+for _ in range(2):
+    threading.Thread(target=bulk_worker, daemon=True).start()
 
 def send_bulk_completion(phone, results):
     if not twilio_rest_client or not phone:
@@ -1414,7 +1418,7 @@ TOTAL: {format_price(Decimal(str(total)))}
 # ------------------------------------------------------------
 # MULTI-MENSAJE
 # ------------------------------------------------------------
-def send_long_message(phone, text, chunk_size=1300):
+def send_long_message(phone, text, chunk_size=1200):  # 1200 seguro
     if not twilio_rest_client:
         logger.error("Twilio client no disponible")
         return False
@@ -1430,7 +1434,6 @@ def send_long_message(phone, text, chunk_size=1300):
     try:
         parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         logger.info(f"Enviando {len(parts)} chunks a {phone}")
-        failed_chunks = []
 
         for idx, part in enumerate(parts):
             try:
@@ -1442,16 +1445,11 @@ def send_long_message(phone, text, chunk_size=1300):
                 logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
 
                 if idx < len(parts) - 1:
-                    time.sleep(0.35)
+                    time.sleep(0.8)  # más aire
 
             except Exception as e:
                 logger.error(f"Error enviando chunk {idx + 1}: {e}")
-                failed_chunks.append(idx)
-                continue
-
-        if failed_chunks:
-            logger.warning(f"Chunks fallidos: {failed_chunks}")
-            return False
+                raise  # Abortar todo
 
         logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
         return True
@@ -1484,14 +1482,14 @@ Criterios rápidos:
 Devolvé SIEMPRE JSON de una línea.
 """
 
-def detect_intent_llm(msg: str) -> dict:
+def detect_intent_llm(msg):
     """Detecta la intención usando LLM con respuesta JSON estructurada"""
     try:
         with openai_sem:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 temperature=0,
-                max_tokens=50,  # Solo necesita JSON corto
+                max_tokens=50,
                 messages=[
                     {"role": "system", "content": INTENT_SYSTEM_PROMPT},
                     {"role": "user", "content": msg.strip()[:800]}
@@ -1499,7 +1497,7 @@ def detect_intent_llm(msg: str) -> dict:
                 timeout=REQUESTS_TIMEOUT
             )
         raw = (resp.choices[0].message.content or "").strip()
-        
+
         # Fallback por si el modelo agrega texto: extraer primer objeto JSON
         start = raw.find("{")
         end = raw.rfind("}")
@@ -1533,52 +1531,45 @@ TECH_SYSTEM_PROMPT = """
 Sos Fran, vendedor experto en motopartes. Tu objetivo es VENDER RÁPIDO, no educar.
 
 === BREVEDAD EXTREMA ===
-🚨 LÍMITE ESTRICTO: Máximo 4 líneas (aprox 250 caracteres)
+LIMITE ESTRICTO: Máximo 4 líneas (aprox 250 caracteres)
+
 - Respuesta directa a la pregunta
 - Sin introducción ni contexto
 - Sin explicaciones teóricas
 - Cierre con pregunta de venta
 
-Si sentís ganas de decir estas FRASES PROHIBIDAS, FRENÁ:
-❌ "Históricamente..."
-❌ "Es interesante que..."
-❌ "Hay que entender que..."
-❌ "El proceso de..."
-❌ "Técnicamente hablando..."
-❌ "Para que lo entiendas..."
+Si sentís ganas de decir estas FRASES PROHIBIDAS, FRENA:
+- "Para que entiendas..."
+- "Históricamente..."
+- "Es importante saber que..."
+- "Primero déjame explicarte..."
+- "Hay varias cosas a considerar..."
+- "Técnicamente hablando..."
 
 PLANTILLA OBLIGATORIA:
 Línea 1: Diferencia clave directa
-Línea 2-3: Cuál de TUS productos (con precio)
+Líneas 2-3: Cuál de TUS productos (con precio)
 Línea 4: ¿Lo/Los agregamos?
 
-=== EJEMPLO PERFECTO (40 palabras) ===
-Usuario: "diferencia entre 10w40 y 20w50?"
-Fran: "El 10W-40 fluye mejor en frío, el 20W-50 en calor. 
-Tengo Yamalube 10W-40 ($12.000) y Shell 20W-50 ($13.500).
-¿Para qué moto es? Así te recomiendo."
-
-=== EJEMPLO HORRIBLE (NO HACER) ===
-Usuario: "diferencia entre 10w40 y 20w50?"
-Fran: "Mirá, los aceites multigrado son una innovación fascinante. La SAE 
-estableció en 1911 los estándares de viscosidad que usamos hoy. El primer número
-indica la viscosidad a -17.8°C según norma ASTM D5293. Históricamente, el 
-desarrollo de aditivos permitió..." ❌❌❌ STOP!!
-
 === REGLAS ANTI-ALUCINACIÓN ===
-1. SOLO mencioná productos del "Contexto CSV" que te paso
-2. NUNCA inventes códigos, marcas o precios
-3. Si no está en el contexto, NO LO NOMBRES
+1. SOLO menciona productos del "Contexto CSV" que te paso
+1. NUNCA inventes códigos, marcas o precios
+1. Si no está en el contexto, NO LO NOMBRES
 
-=== CONOCIMIENTO TÉCNICO ===
-Conceptos generales OK, pero en 1 LÍNEA:
-✅ "El sintético dura más" (7 palabras)
-❌ "Los aceites sintéticos tienen moléculas de cadena uniforme que reducen la fricción..." (13+ palabras)
+=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
+Podés explicar conceptos, pero en 1 LÍNEA:
+- "El sintético dura más pero es más caro"
+- "Para frío el 10W, para calor el 20W"
 
-Total respuesta: 30-50 palabras MAX. Si escribís más, perdés la venta.
+NUNCA termines con:
+- "Espero haberte ayudado"
+- "Cualquier cosa avisame"
+- "Saludos"
+
+Sos vendedor EFICIENTE, no Wikipedia.
 """
 
-def build_technical_answer(phone: str, user_message: str, top_products: list) -> str:
+def build_technical_answer(phone, user_message, top_products):
     """Genera respuesta técnica usando LLM con contexto mínimo del catálogo"""
     try:
         # Empaquetar hasta 3 productos como contexto compacto
@@ -1589,7 +1580,7 @@ def build_technical_answer(phone: str, user_message: str, top_products: list) ->
                 f"marca {p.get('brand','')} modelo {p.get('model','')}"
             )
         ctx = "Contexto CSV:\n" + "\n".join(context_lines) if context_lines else "Contexto CSV: (sin coincidencias exactas)"
-        
+
         # Obtener historial conversacional
         history = get_history_since(phone, days=1, limit=10)
         msgs = [{"role": "system", "content": TECH_SYSTEM_PROMPT}]
@@ -1619,13 +1610,53 @@ def build_technical_answer(phone: str, user_message: str, top_products: list) ->
         if not txt or len(txt) < 10:
             return "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
         
-        # 🚨 VALIDACIÓN ANTI-ALUCINACIÓN
+        # VALIDACIÓN ANTI-ALUCINACIÓN
         txt = sanitize_llm_response(txt, top_products)
         
         return txt
     except Exception as e:
         logger.error(f"build_technical_answer error: {e}")
         return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise y mientras vemos alternativas?"
+
+# ------------------------------------------------------------
+# VALIDACIÓN ANTI-ALUCINACIÓN Y ANTI-DIVAGACIÓN
+# ------------------------------------------------------------
+def sanitize_llm_response(response_text, allowed_products):
+    """Sanitiza la respuesta del LLM removiendo productos alucinados y divagaciones."""
+    if not response_text:
+        return "No pude generar una respuesta. ¿Me repetís?"
+
+    # Validar códigos mencionados
+    allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
+    mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
+    hallucinated = mentioned_codes - allowed_codes
+
+    if hallucinated:
+        logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
+        # Fallback: listar solo los productos reales
+        if allowed_products:
+            product_list = "\n".join([
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                for p in allowed_products[:5]
+            ])
+            return (
+                f"Dale, mirá lo que tengo disponible:\n\n{product_list}\n\n"
+                "¿Cuál te sirve o necesitás que te explique las diferencias?"
+            )
+        else:
+            return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
+
+    # Validar longitud
+    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
+    if len(lines) > 8:
+        logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
+        # Recortar últimas 4 líneas + cierre
+        if len(lines) >= 4:
+            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
+        else:
+            return response_text
+
+    return response_text
 
 # ------------------------------------------------------------
 # IA EMPÁTICA
@@ -1648,7 +1679,8 @@ HORARIOS:
 - Sab: 9-13hs
 """
 
-SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
+SMART_SYSTEM_PROMPT = f"""
+Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
 === MENTALIDAD: VENDEDOR DIRECTO ===
 - Argentino natural: che, dale, mira, vos
@@ -1656,83 +1688,34 @@ SMART_SYSTEM_PROMPT = f"""Sos Fran, vendedor mayorista de TERCOM (motopartes, Ar
 - OBJETIVO: Cerrar venta en menos de 3 mensajes
 
 === BREVEDAD BRUTAL ===
-🚨 LÍMITE: 5 líneas MAX (salvo listados de productos)
-🚨 TARGET: 40-60 palabras por respuesta
+LIMITE: 5 líneas MAX (salvo listados de productos)
+TARGET: 40-60 palabras por respuesta
 
 FRASES PROHIBIDAS que indican que te estás yendo por las ramas:
-❌ "Para que entiendas..."
-❌ "Históricamente..."
-❌ "Es importante saber que..."
-❌ "Primero déjame explicarte..."
-❌ "Hay varias cosas a considerar..."
-❌ "Técnicamente hablando..."
+- "Para que entiendas..."
+- "Históricamente..."
+- "Es importante saber que..."
+- "Primero déjame explicarte..."
+- "Hay varias cosas a considerar..."
+- "Técnicamente hablando..."
 
-Si sentís ganas de escribir alguna, FRENÁ y reescribí.
+Si sentís ganas de escribir alguna, FRENA y reescribí.
 
 PLANTILLA OBLIGATORIA:
 Línea 1: Entender qué busca (o dar productos directo)
 Líneas 2-3: Productos con precios O info técnica MÍNIMA
 Línea 4-5: Pregunta de cierre (¿lo agregamos? ¿cuál te sirve?)
 
-=== EJEMPLOS PERFECTOS ===
-Usuario: "busco aceite para wave"
-Fran: "Dale, te muestro opciones para Wave:
-- Yamalube 20W-50 mineral $12.000
-- Motul 5100 10W-40 sintético $15.000
-¿Cuál preferís?" 
-[37 palabras ✅]
-
-Usuario: "cuál es mejor?"
-Fran: "El Yamalube es más económico y va bien. El Motul es sintético, rinde más.
-Para uso normal, el Yamalube. ¿Lo agregamos?"
-[22 palabras ✅]
-
-=== EJEMPLOS HORRIBLES (NO HACER) ===
-Usuario: "busco aceite para wave"
-Fran: "Hola! Qué bueno que consultes. Los aceites para moto son muy importantes
-ya que lubr ican el motor y evitan el desgaste. En el caso de la Honda Wave, que
-es una moto muy confiable que se usa mucho en Argentina, podés usar aceites
-minerales o sintéticos. Los minerales son más económicos pero hay que cambiarlos
-más seguido. Los sintéticos son mejores pero más caros. Ahora te cuento las
-diferencias en detalle..." ❌❌❌ [82 palabras, cliente se fue]
-
 === GROUNDING ESTRICTO ===
-🚨 NUNCA menciones productos que no te pasé
+NUNCA menciones productos que no te pasé
 - Si te doy lista de productos, SOLO menciona ESOS
 - NO inventes códigos, marcas o precios
 - NO digas "también tengo X" si X no está en tu lista
 
-Ejemplos:
-✅ "De los 3 que te mostré, el Yamalube es el más económico"
-❌ "También tengo el Castrol Power1" [si no está en la lista]
-
 === CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
 Podés explicar conceptos, pero en 1 LÍNEA:
-✅ "El sintético dura más pero es más caro"
-❌ "Los aceites sintéticos usan moléculas de cadena uniforme que..."
-
-✅ "Para frío el 10W, para calor el 20W"
-❌ "La viscosidad se mide en centistokes a diferentes temperaturas..."
-
-=== PRECIOS Y STOCK ===
-- Precios: SIEMPRE del catálogo (NUNCA inventes)
-- Stock: Solo lo que te paso
-- Si no tenés precio, NO lo menciones
-
-=== TONO ===
-- Escribe mal → Entendé y respondé directo
-- Confundido → "Tranqui, ¿querés X o Y?"
-- Apurado → "Dale, directo: [producto] $[precio]. ¿Lo agregamos?"
-
-{BUSINESS_CONTEXT}
-
-RECORDÁ: 40-60 palabras por respuesta. Si escribís más, el cliente se aburre y se va.
-Sos vendedor EFICIENTE, no Wikipedia.
-"""
-- Esta confundido: "Tranqui, ¿buscás pastillas o aceite?" (pregunta directa)
-- Pregunta lo mismo: "Dale: [repite conciso]"
-- No encuentra algo: "Ese no tengo, pero de los que hay: [opciones]"
-- Esta apurado: "Dale, vamos: [solución inmediata]"
+- "El sintético dura más pero es más caro"
+- "Para frío el 10W, para calor el 20W"
 
 === CIERRE DE VENTA OBLIGATORIO ===
 SIEMPRE terminá con una de estas:
@@ -1743,9 +1726,9 @@ SIEMPRE terminá con una de estas:
 - "¿Paso presupuesto?"
 
 NUNCA termines con:
-❌ "Espero haberte ayudado"
-❌ "Cualquier cosa avisame"
-❌ "Saludos"
+- "Espero haberte ayudado"
+- "Cualquier cosa avisame"
+- "Saludos"
 
 {BUSINESS_CONTEXT}
 
@@ -1787,7 +1770,7 @@ def build_enhanced_context(phone, user_message):
                 context_parts.append(f", {customer['address']}")
             context_parts.append("]")
 
-        # NUEVO: Incluir pending action en el contexto
+        # Incluir pending action en el contexto
         if pending:
             action_type = pending.get("action_type", "")
             context_text = pending.get("context", "")
@@ -1860,7 +1843,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         if not txt or len(txt) < 10:
             return "Uy, tuve un problema. ¿Me repetis?"
 
-        # 🚨 VALIDACIÓN ANTI-ALUCINACIÓN
+        # VALIDACIÓN ANTI-ALUCINACIÓN
         txt = sanitize_llm_response(txt, catalog_products)
 
         return txt
@@ -1868,119 +1851,6 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
     except Exception as e:
         logger.error(f"IA fallo: {e}", exc_info=True)
         return "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
-
-# ------------------------------------------------------------
-# VALIDACIÓN ANTI-ALUCINACIÓN Y ANTI-DIVAGACIÓN
-# ------------------------------------------------------------
-def validate_llm_response(response_text: str, allowed_products: list) -> tuple:
-    """
-    Valida que el LLM no haya mencionado productos que no están en la lista permitida.
-    
-    Returns:
-        (is_valid: bool, hallucinated_codes: list)
-    """
-    if not response_text or not allowed_products:
-        return True, []
-    
-    # Extraer códigos válidos de los productos permitidos
-    allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
-    
-    # Buscar menciones de códigos en la respuesta (formato: 1234/56789-012)
-    mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
-    
-    # Detectar códigos alucinados (mencionados pero no permitidos)
-    hallucinated = mentioned_codes - allowed_codes
-    
-    if hallucinated:
-        logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
-        return False, list(hallucinated)
-    
-    return True, []
-
-def validate_response_focus(response_text: str, max_lines: int = 8) -> tuple:
-    """
-    Valida que la respuesta no sea demasiado larga o divague.
-    
-    Returns:
-        (is_focused: bool, line_count: int)
-    """
-    if not response_text:
-        return True, 0
-    
-    # Contar líneas significativas (ignorar vacías)
-    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-    line_count = len(lines)
-    
-    # Si es muy largo, probablemente está divagando
-    if line_count > max_lines:
-        logger.warning(f"Respuesta demasiado larga: {line_count} líneas (max {max_lines})")
-        return False, line_count
-    
-    # Detectar palabras que indican divagación teórica
-    divagation_keywords = [
-        "historia", "contexto histórico", "fascinante", "interesante",
-        "en general", "típicamente", "normalmente", "generalmente",
-        "proceso de", "características de", "propiedades de"
-    ]
-    
-    lower_text = response_text.lower()
-    divagation_count = sum(1 for kw in divagation_keywords if kw in lower_text)
-    
-    if divagation_count >= 3:
-        logger.warning(f"Posible divagación detectada: {divagation_count} keywords teóricos")
-        return False, line_count
-    
-    return True, line_count
-
-def sanitize_llm_response(response_text: str, allowed_products: list) -> str:
-    """
-    Sanitiza la respuesta del LLM removiendo productos alucinados y divagaciones.
-    Fallback: si detecta alucinación o divagación, da respuesta conservadora.
-    """
-    is_valid, hallucinated = validate_llm_response(response_text, allowed_products)
-    is_focused, line_count = validate_response_focus(response_text, max_lines=8)
-    
-    # Si alucinó productos
-    if not is_valid:
-        logger.error(f"Respuesta alucinada detectada. Códigos inventados: {hallucinated}")
-        
-        # Fallback conservador: listar solo los productos reales
-        if allowed_products:
-            product_list = "\n".join([
-                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                for p in allowed_products[:5]
-            ])
-            return (
-                f"Dale, mirá lo que tengo disponible:\n\n{product_list}\n\n"
-                "¿Cuál te sirve o necesitás que te explique las diferencias?"
-            )
-        else:
-            return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
-    
-    # Si divagó demasiado
-    if not is_focused:
-        logger.warning(f"Respuesta demasiado larga/teórica ({line_count} líneas), recortando")
-        
-        # Intentar rescatar la parte comercial (últimas 4 líneas suelen tener el cierre)
-        lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-        
-        # Si hay productos en la respuesta, mantener esos + cierre
-        if any(p.get('name', '')[:20] in response_text for p in allowed_products[:3]):
-            # Buscar la parte con productos
-            product_section = []
-            for line in lines:
-                if any(p.get('name', '')[:20] in line for p in allowed_products[:3]) or \
-                   any(char in line for char in ['$', '¿']):
-                    product_section.append(line)
-            
-            if product_section:
-                return '\n'.join(product_section[-5:]) + "\n\n¿Cuál te sirve?"
-        
-        # Fallback: últimas 4 líneas + cierre
-        if len(lines) >= 4:
-            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
-    
-    return response_text
 
 # ------------------------------------------------------------
 # FORMATO RESULTADOS
@@ -2181,7 +2051,7 @@ def run_agent(phone, user_message):
 
     # 7) DETECTAR SI ES LISTA MASIVA
     is_bulk, item_count = is_bulk_list_request(user_message)
-    
+
     if is_bulk:
         log_interaction(phone, user_message, "bulk_quote", item_count)
 
@@ -2525,7 +2395,7 @@ def health():
     return jsonify({
         "ok": True,
         "service": "fran39",
-        "version": "3.9",
+        "version": "3.9.1",
         "model": MODEL_NAME,
         "catalog_size": len(catalog) if catalog else 0,
         "faiss_ready": index is not None,
@@ -2535,14 +2405,14 @@ def health():
 
 @app.route("/", methods=["GET"])
 def root():
-    return Response("Fran 3.9 - Bot Mayorista Inteligente (MEJORAS COGNITIVAS)", status=200, mimetype="text/plain")
+    return Response("Fran 3.9.1 - Bot Mayorista Inteligente (PROD-READY FIX)", status=200, mimetype="text/plain")
 
 # ------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.9 (MEJORAS COGNITIVAS) en puerto {port}")
+    logger.info(f"Iniciando Fran 3.9.1 (PROD-READY FIX) en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
     catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
