@@ -82,10 +82,10 @@ FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 # Cache versionado
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{CATALOG_URL[-40:-4]}.pkl"
 
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "500"))
-MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "50"))
+MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
+MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "20"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
-PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "80"))
+PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "40"))
 
 INSTANT_THRESHOLD = 20
 ASYNC_QUICK = 50
