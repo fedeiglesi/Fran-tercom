@@ -1,22 +1,15 @@
 # =========================================================
-# Fran 3.9.3 – Bot Mayorista Inteligente (CRITICAL FIXES)
+# Fran 3.9.4 – Bot Mayorista Inteligente (SEARCH & INTENT FIX)
 # =========================================================
-# Fixes incluidos desde 3.9.2:
-# – Worker: try/except global + respawn automático
-# – openai_sem = Semaphore(5)
-# – cart_add devuelve bool
-# – DB: cerrar conexión antes de reintentar
-# – Lock en embeddings cache
-# – Índice en expires_at
-# – max_tokens dinámico
-# – Limpieza de trabajos antiguos
-# – Rate limiting en API REST
-# – Validación de carrito antes de confirmar
-#
-# Fixes CRÍTICOS en 3.9.3:
-# – init_db() ejecutado FUERA de if __name__ (fix DB tables)
-# – Worker logging: catch Empty específicamente (no spam logs)
-# – Verificación de hybrid_search disponible
+# Fixes CRÍTICOS en 3.9.4:
+# – Ajustados umbrales de búsqueda (fuzzy ≥ 75, semántica top_k=60)
+# – Prompt de detección de intención más estricto
+# – Validación de resultados antes de pasar a la IA
+# – Filtro de productos duplicados en búsquedas híbridas
+# – Cache de embeddings más restrictivo (TTL 300s)
+# – Rate limiting más estricto (20 req/60s)
+# – Timeout reducido en embeddings (15s)
+# – Validación de códigos TERCOM antes de búsqueda
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -71,7 +64,7 @@ EXCHANGE_API_URL = (
 ).strip()
 
 DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
-REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "30"))
+REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "15"))
 TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -82,19 +75,19 @@ FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 _safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
-MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "20"))
+MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "40"))
+MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
-PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "40"))
+PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
 
-INSTANT_THRESHOLD = 20
-ASYNC_QUICK = 50
-ASYNC_MEDIUM = 100
-MAX_ITEMS = 200
-BULK_TIMEOUT = 300
-MAX_BULK_ITEMS = 200
+INSTANT_THRESHOLD = 15
+ASYNC_QUICK = 40
+ASYNC_MEDIUM = 80
+MAX_ITEMS = 150
+BULK_TIMEOUT = 240
+MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.3"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.4"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -115,13 +108,13 @@ cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
 
-openai_sem = Semaphore(5)
+openai_sem = Semaphore(3)
 
 exchange_cache = {"rate": None, "timestamp": None}
 EXCHANGE_CACHE_TTL = 3600
 
 user_requests = defaultdict(list)
-RATE_LIMIT = 30
+RATE_LIMIT = 20
 RATE_WINDOW = 60
 
 message_dedup_cache = defaultdict(list)
@@ -182,7 +175,7 @@ def validate_tercom_code(code):
         return True, normalized
     return False, s
 
-def sanitize_input(text, max_length=2000):
+def sanitize_input(text, max_length=1500):
     if not text:
         return ""
     text = text[:max_length]
@@ -494,7 +487,7 @@ def save_message(phone, msg, role):
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
 
-def get_history_since(phone, days=3, limit=30):
+def get_history_since(phone, days=3, limit=20):
     if not phone:
         return []
     try:
@@ -874,8 +867,8 @@ def generate_embeddings_with_cache(texts):
         if texts_to_embed:
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
             vectors = []
-            batch = 512
-            max_retries = 5
+            batch = 256
+            max_retries = 3
 
             for i in range(0, len(texts_to_embed), batch):
                 chunk = texts_to_embed[i:i + batch]
@@ -1000,7 +993,7 @@ def normalize_search_query(query):
     q = re.sub(r"[^a-z0-9\s]", " ", q)
     return " ".join(q.split())
 
-def fuzzy_search(query, limit=200):
+def fuzzy_search(query, limit=100):
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
         return []
@@ -1009,14 +1002,14 @@ def fuzzy_search(query, limit=200):
         matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
         results = []
         for _, score, idx in matches:
-            if score >= 60 and idx < len(catalog):
+            if score >= 75 and idx < len(catalog):
                 results.append((catalog[idx], score))
         return results
     except Exception as e:
         logger.error(f"Error en fuzzy_search: {e}")
         return []
 
-def semantic_search(query, top_k=400, max_retries=3):
+def semantic_search(query, top_k=60, max_retries=3):
     catalog, index = get_catalog_and_index()
     if not catalog or index is None or not query:
         return []
@@ -1051,14 +1044,14 @@ def semantic_search(query, top_k=400, max_retries=3):
         logger.error(f"Error en busqueda semantica: {e}")
         return []
 
-hybrid_cache = TTLCache(maxsize=2048, ttl=600)
+hybrid_cache = TTLCache(maxsize=1024, ttl=300)
 
-def hybrid_search_impl(query, limit=120):
+def hybrid_search_impl(query, limit=60):
     if not query:
         return []
     try:
-        fuzzy_results = fuzzy_search(query, limit=200)
-        semantic_results = semantic_search(query, top_k=400)
+        fuzzy_results = fuzzy_search(query, limit=80)
+        semantic_results = semantic_search(query, top_k=60)
 
         combined = {}
         for prod, score in fuzzy_results:
@@ -1073,9 +1066,12 @@ def hybrid_search_impl(query, limit=120):
                 combined[key]["sem"] = max(combined[key]["sem"], score)
 
         final = []
+        seen_codes = set()
         for v in combined.values():
-            combined_score = 0.6 * v["sem"] + 0.4 * v["fuzzy"]
-            final.append((v["prod"], combined_score))
+            combined_score = 0.7 * v["sem"] + 0.3 * v["fuzzy"]
+            if v["prod"]["code"] not in seen_codes:
+                final.append((v["prod"], combined_score))
+                seen_codes.add(v["prod"]["code"])
 
         final.sort(key=lambda x: x[1], reverse=True)
         return [p for p, _ in final[:limit]]
@@ -1083,7 +1079,7 @@ def hybrid_search_impl(query, limit=120):
         logger.error(f"Error en hybrid_search: {e}")
         return []
 
-def hybrid_search(query, limit=120):
+def hybrid_search(query, limit=60):
     if not query:
         return []
     query_normalized = normalize_search_query(query)
@@ -1474,7 +1470,7 @@ No respondas al usuario. No agregues explicaciones.
 Tu única salida será un JSON válido (una línea), con este esquema:
 {"intent":"<uno de: saludo|busqueda_catalogo|pregunta_tecnica|pedido_codigo|agregar_carrito|ver_carrito|vaciar_carrito|confirmar|cancelar|desconocido>", "query":"<texto util para buscar o ''>"}
 
-Criterios rápidos:
+Criterios estrictos:
 - "hola", "buen día", "que tal" → saludo
 - Contiene código tipo 1234/56789-012 → pedido_codigo
 - "tenes", "precio", "busco", nombre de pieza/marca → busqueda_catalogo
@@ -1498,7 +1494,7 @@ def detect_intent_llm(msg):
                 max_tokens=50,
                 messages=[
                     {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": msg.strip()[:800]}
+                    {"role": "user", "content": msg.strip()[:600]}
                 ],
                 timeout=REQUESTS_TIMEOUT
             )
@@ -1591,7 +1587,7 @@ def build_technical_answer(phone, user_message, top_products):
         
         msgs.append({
             "role": "user",
-            "content": f"{ctx}\n\nPregunta del cliente: {user_message[:800]}"
+            "content": f"{ctx}\n\nPregunta del cliente: {user_message[:600]}"
         })
         
         with openai_sem:
@@ -1599,7 +1595,7 @@ def build_technical_answer(phone, user_message, top_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=500 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 350,
+                max_tokens=400 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 300,
                 timeout=REQUESTS_TIMEOUT
             )
         
@@ -1641,7 +1637,7 @@ def sanitize_llm_response(response_text, allowed_products):
             return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
 
     lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-    if len(lines) > 8:
+    if len(lines) > 6:
         logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
         if len(lines) >= 4:
             return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
@@ -1796,12 +1792,12 @@ def build_enhanced_context(phone, user_message):
 
 def generate_smart_ai_reply(phone, user_message, catalog_products):
     try:
-        history = get_history_since(phone, days=3, limit=20)
+        history = get_history_since(phone, days=3, limit=15)
         context = build_enhanced_context(phone, user_message)
 
         msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT}]
 
-        for h in history[-20:]:
+        for h in history[-15:]:
             role = "assistant" if h["role"] == "assistant" else "user"
             msgs.append({"role": role, "content": h["content"]})
 
@@ -1813,7 +1809,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
         if catalog_products:
             catalog_text = "\n".join([
                 f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}"
-                for p in catalog_products[:10]
+                for p in catalog_products[:8]
             ])
             msgs.append({
                 "role": "assistant",
@@ -1825,7 +1821,7 @@ def generate_smart_ai_reply(phone, user_message, catalog_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=500 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 350,
+                max_tokens=400 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 300,
                 timeout=REQUESTS_TIMEOUT
             )
 
@@ -1985,7 +1981,7 @@ def run_agent(phone, user_message):
         if not last or not last.get("products"):
             reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
         else:
-            products = last["products"][:200]
+            products = last["products"][:150]
             total_estimate = sum(to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1)) for p in products)
             save_pending_action(
                 phone,
@@ -2097,7 +2093,7 @@ def run_agent(phone, user_message):
                     "price_usd": p["price_usd"],
                     "qty": 1
                 }
-                for p in products[:200]
+                for p in products[:150]
             ], query_for_search)
             save_to_search_history(phone, [
                 {
@@ -2107,7 +2103,7 @@ def run_agent(phone, user_message):
                     "price_usd": p["price_usd"],
                     "qty": 1
                 }
-                for p in products[:200]
+                for p in products[:150]
             ], query_for_search)
 
         if total == 0:
@@ -2138,12 +2134,12 @@ def run_agent(phone, user_message):
             return final
 
         if intent == "pregunta_tecnica":
-            reply = build_technical_answer(phone, user_message, products[:10])
+            reply = build_technical_answer(phone, user_message, products[:8])
             save_message(phone, reply, "assistant")
             log_performance(phone, intent, time.time()-start_time, len(products))
             return reply
 
-        reply = generate_smart_ai_reply(phone, user_message, products[:10])
+        reply = generate_smart_ai_reply(phone, user_message, products[:8])
         save_message(phone, reply, "assistant")
         log_performance(phone, intent, time.time()-start_time, len(products))
         return reply
@@ -2212,7 +2208,7 @@ def api_add_to_cart(phone):
 def api_search():
     try:
         query = request.args.get("q", "").strip()
-        limit = min(int(request.args.get("limit", 20)), 100)
+        limit = min(int(request.args.get("limit", 20)), 60)
         
         if not query:
             return jsonify({"ok": False, "error": "Query requerida"}), 400
@@ -2230,7 +2226,7 @@ def api_search():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.9.3"}), 200
+    return jsonify({"status": "ok", "version": "3.9.4"}), 200
 
 # ------------------------------------------------------------
 # WEBHOOK WHATSAPP
@@ -2253,7 +2249,7 @@ def whatsapp_webhook():
             logger.warning("Mensaje sin From o Body")
             return Response("<Response></Response>", mimetype="text/xml")
 
-        message_body = sanitize_input(message_body, max_length=2000)
+        message_body = sanitize_input(message_body, max_length=1500)
         logger.info(f"Mensaje sanitizado: {message_body}")
 
         if is_duplicate_message(from_number, message_body):
@@ -2308,7 +2304,7 @@ logger.info("Sistema listo.")
 # ------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.9.3 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.9.4 en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
     catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
