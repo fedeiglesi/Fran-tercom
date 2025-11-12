@@ -2168,3 +2168,149 @@ def api_get_cart(phone):
         total, discount = cart_totals(phone)
         return jsonify({
             "ok": True,
+            "items": [{"code": c, "qty": q, "name": n, "price": float(p)} for c, q, n, p in items],
+            "total": float(total),
+            "discount": float(discount)
+        })
+    except Exception as e:
+        logger.error(f"Error en api_get_cart: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/cart/<phone>/add", methods=["POST"])
+def api_add_to_cart(phone):
+    try:
+        if not rate_limit_check(phone):
+            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
+        
+        data = request.get_json()
+        code = data.get("code")
+        qty = int(data.get("qty", 1))
+        
+        if not code:
+            return jsonify({"ok": False, "error": "Codigo requerido"}), 400
+        
+        catalog, _ = get_catalog_and_index()
+        prod = next((p for p in catalog if p["code"] == code), None)
+        
+        if not prod:
+            return jsonify({"ok": False, "error": "Producto no encontrado"}), 404
+        
+        price_ars = to_decimal_money(prod["price_ars"])
+        price_usd = to_decimal_money(prod["price_usd"])
+        
+        success = cart_add(phone, code, qty, prod["name"], price_ars, price_usd)
+        
+        if success:
+            return jsonify({"ok": True, "message": "Agregado al carrito"})
+        else:
+            return jsonify({"ok": False, "error": "No se pudo agregar"}), 500
+    except Exception as e:
+        logger.error(f"Error en api_add_to_cart: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/api/search", methods=["GET"])
+def api_search():
+    try:
+        query = request.args.get("q", "").strip()
+        limit = min(int(request.args.get("limit", 20)), 100)
+        
+        if not query:
+            return jsonify({"ok": False, "error": "Query requerida"}), 400
+        
+        products = hybrid_search(query, limit=limit)
+        
+        return jsonify({
+            "ok": True,
+            "count": len(products),
+            "products": products[:limit]
+        })
+    except Exception as e:
+        logger.error(f"Error en api_search: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "version": "3.9.3"}), 200
+
+# ------------------------------------------------------------
+# WEBHOOK WHATSAPP
+# ------------------------------------------------------------
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_webhook():
+    try:
+        logger.info("=" * 50)
+        logger.info("WEBHOOK RECIBIDO")
+        logger.info(f"From: {request.form.get('From', 'N/A')}")
+        logger.info(f"Body: {request.form.get('Body', 'N/A')}")
+        logger.info(f"MessageSid: {request.form.get('MessageSid', 'N/A')}")
+        logger.info(f"Body length: {len(request.form.get('Body', ''))}")
+        logger.info("=" * 50)
+
+        from_number = request.form.get("From", "")
+        message_body = request.form.get("Body", "").strip()
+
+        if not from_number or not message_body:
+            logger.warning("Mensaje sin From o Body")
+            return Response("<Response></Response>", mimetype="text/xml")
+
+        message_body = sanitize_input(message_body, max_length=2000)
+        logger.info(f"Mensaje sanitizado: {message_body}")
+
+        if is_duplicate_message(from_number, message_body):
+            logger.info(f"Mensaje duplicado ignorado de {from_number}")
+            return Response("<Response></Response>", mimetype="text/xml")
+
+        logger.info(f"Procesando mensaje de {from_number}: {message_body}")
+
+        if not rate_limit_check(from_number):
+            resp = MessagingResponse()
+            resp.message("Demasiados mensajes, esperá un minuto.")
+            return Response(str(resp), mimetype="text/xml")
+
+        reply = run_agent(from_number, message_body)
+
+        logger.info(f"Respuesta generada: {len(reply)} caracteres")
+        logger.info(f"Preview: {reply[:100]}...")
+        logger.info(f"Longitud de respuesta: {len(reply)} caracteres")
+
+        if len(reply) <= WHATSAPP_MSG_LIMIT:
+            logger.info("Mensaje corto, usando TwiML")
+            resp = MessagingResponse()
+            resp.message(reply)
+            logger.info(f"Respuesta TwiML generada: {reply[:100]}...")
+            return Response(str(resp), mimetype="text/xml")
+        else:
+            logger.info("Mensaje largo, enviando por Twilio REST")
+            send_long_message(from_number, reply)
+            return Response("<Response></Response>", mimetype="text/xml")
+
+    except Exception as e:
+        logger.exception(f"Error critico en webhook: {e}")
+        try:
+            resp = MessagingResponse()
+            resp.message("Uy, tuve un problema tecnico. Proba de nuevo en un ratito.")
+            return Response(str(resp), mimetype="text/xml")
+        except:
+            return Response("<Response></Response>", mimetype="text/xml")
+
+# ------------------------------------------------------------
+# INICIALIZACIÓN - CRÍTICO: EJECUTAR ANTES DE GUNICORN FORK
+# ------------------------------------------------------------
+init_db()
+cleanup_old_jobs()
+
+logger.info("Precargando catalogo...")
+_ = get_catalog_and_index()
+logger.info("Sistema listo.")
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Iniciando Fran 3.9.3 en puerto {port}")
+    logger.info(f"Modelo LLM: {MODEL_NAME}")
+    catalog, _ = get_catalog_and_index()
+    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
+    logger.info(f"TC inicial: {get_exchange_rate()}")
+    app.run(host="0.0.0.0", port=port, debug=False)
