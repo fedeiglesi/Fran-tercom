@@ -2059,23 +2059,25 @@ def run_agent(phone, user_message):
         log_performance(phone, "agregar_carrito", time.time()-start_time, products_count)
         return reply
         
-        if intent == "pedido_codigo":
-        m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
-        if m:
-            code = m.group(0)
-            catalog, _ = get_catalog_and_index()
-            found = [p for p in catalog if p["code"] == code]
-            if found:
-                p = found[0]
-                reply = f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
-            else:
-                reply = f"El código {code} no figura en mi lista. ¿Tenés otro o buscamos por nombre?"
+     if intent == "pedido_codigo":
+    m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
+    if m:
+        code = m.group(0)
+        catalog, _ = get_catalog_and_index()
+        found = [p for p in catalog if p["code"] == code]
+        if found:
+            p = found[0]
+            reply = f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
         else:
-            reply = "Pasame el código completo así: 1234/56789-012"
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "pedido_codigo", 1)
-        log_performance(phone, "pedido_codigo", time.time()-start_time, 1)
-        return reply
+            reply = f"El código {code} no figura en mi lista. ¿Tenés otro o buscamos por nombre?"
+    else:
+        reply = "Pasame el código completo así: 1234/56789-012"
+
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, "pedido_codigo", 1)
+    log_performance(phone, "pedido_codigo", time.time()-start_time, 1)
+    return reply
+   
 
     # === BÚSQUEDA Y LISTAS (con filtros mejorados) ===
     is_bulk, item_count = is_bulk_list_request(user_message)
