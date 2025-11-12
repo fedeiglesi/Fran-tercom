@@ -2032,7 +2032,7 @@ def run_agent(phone, user_message):
         last = get_last_search(phone)
         products_count = 0
 
-        if not last or not last.get("products"):
+    if not last or not last.get("products"):
             reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
         else:
             products = last["products"][:150]
