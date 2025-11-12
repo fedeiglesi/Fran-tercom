@@ -2028,20 +2028,22 @@ def run_agent(phone, user_message):
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
 
-        if intent == "agregar_carrito":
-        last = get_last_search(phone)
-        products_count = 0
+    if intent == "agregar_carrito":
+    last = get_last_search(phone)
+    products_count = 0
 
     if not last or not last.get("products"):
-            reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
-        else:
-            products = last["products"][:150]
-            products_count = len(products)
-            total_estimate = sum(
-                to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
-                for p in products
-            )
-            save_pending_action(
+        reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
+    else:
+        products = last["products"][:150]
+        products_count = len(products)
+        total_estimate = sum(
+            to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
+            for p in products
+        )
+
+        
+        save_pending_action(
                 phone,
                 action_type="add_to_cart",
                 action_data={"products": products},
