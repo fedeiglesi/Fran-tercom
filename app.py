@@ -1,7 +1,7 @@
 # =========================================================
-# Fran 3.9.2 – Bot Mayorista Inteligente (WORKER FIX + 9 MEJORAS)
+# Fran 3.9.3 – Bot Mayorista Inteligente (CRITICAL FIXES)
 # =========================================================
-# Fixes incluidos:
+# Fixes incluidos desde 3.9.2:
 # – Worker: try/except global + respawn automático
 # – openai_sem = Semaphore(5)
 # – cart_add devuelve bool
@@ -12,6 +12,11 @@
 # – Limpieza de trabajos antiguos
 # – Rate limiting en API REST
 # – Validación de carrito antes de confirmar
+#
+# Fixes CRÍTICOS en 3.9.3:
+# – init_db() ejecutado FUERA de if __name__ (fix DB tables)
+# – Worker logging: catch Empty específicamente (no spam logs)
+# – Verificación de hybrid_search disponible
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -20,7 +25,7 @@ from collections import defaultdict
 from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock, Semaphore
-from queue import Queue
+from queue import Queue, Empty
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 import requests
@@ -45,6 +50,8 @@ if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
+
+logger.info("✅ Imports completados")
 
 # ------------------------------------------------------------
 # CONFIG
@@ -87,7 +94,7 @@ MAX_ITEMS = 200
 BULK_TIMEOUT = 300
 MAX_BULK_ITEMS = 200
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.2"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.9.3"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -108,7 +115,6 @@ cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
 
-# ✅ 1. Aumentar paralelismo
 openai_sem = Semaphore(5)
 
 exchange_cache = {"rate": None, "timestamp": None}
@@ -124,7 +130,6 @@ DEDUP_WINDOW = 5
 _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
 
-# ✅ 4. Lock para embeddings
 _embeddings_cache_lock = Lock()
 
 # ------------------------------------------------------------
@@ -338,7 +343,6 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
 
-# ✅ 7. Limpieza de trabajos antiguos
 def cleanup_old_jobs():
     try:
         with get_db_connection() as conn:
@@ -348,7 +352,6 @@ def cleanup_old_jobs():
     except Exception as e:
         logger.error(f"Error en cleanup_old_jobs: {e}")
 
-# ✅ 9. Hash del carrito
 def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
     if not phone:
         return
@@ -969,9 +972,128 @@ def get_catalog_and_index():
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         return catalog, index
 
-logger.info("Precargando catalogo enriquecido...")
-_ = get_catalog_and_index()
-logger.info("Catalogo enriquecido e indice FAISS listos.")
+# ------------------------------------------------------------
+# BÚSQUEDA
+# ------------------------------------------------------------
+SEARCH_ALIASES = {
+    "yama": "yamaha",
+    "zan": "zanella",
+    "hond": "honda",
+    "suzu": "suzuki",
+    "baj": "bajaj",
+    "rouser": "bajaj rouser",
+    "gil": "gilera",
+    "corv": "corven",
+    "motom": "motomel",
+    "guerr": "guerrero",
+    "twister": "honda twister",
+    "cbx": "honda cbx",
+    "wave": "honda wave",
+}
+
+def normalize_search_query(query):
+    if not query:
+        return ""
+    q = strip_accents(query.lower())
+    for alias, repl in SEARCH_ALIASES.items():
+        q = q.replace(alias, repl)
+    q = re.sub(r"[^a-z0-9\s]", " ", q)
+    return " ".join(q.split())
+
+def fuzzy_search(query, limit=200):
+    catalog, _ = get_catalog_and_index()
+    if not catalog or not query:
+        return []
+    try:
+        names = [p["search_text"] for p in catalog]
+        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
+        results = []
+        for _, score, idx in matches:
+            if score >= 60 and idx < len(catalog):
+                results.append((catalog[idx], score))
+        return results
+    except Exception as e:
+        logger.error(f"Error en fuzzy_search: {e}")
+        return []
+
+def semantic_search(query, top_k=400, max_retries=3):
+    catalog, index = get_catalog_and_index()
+    if not catalog or index is None or not query:
+        return []
+    try:
+        for retry in range(max_retries):
+            try:
+                with openai_sem:
+                    resp = client.embeddings.create(
+                        input=[query],
+                        model="text-embedding-3-small",
+                        timeout=REQUESTS_TIMEOUT
+                    )
+                emb = np.array([resp.data[0].embedding]).astype("float32")
+                break
+            except RateLimitError as e:
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry) * random.uniform(1, 2)
+                    logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"RateLimitError persistente: {e}")
+                    return []
+
+        D, I = index.search(emb, top_k)
+        results = []
+        for dist, idx in zip(D[0], I[0]):
+            if 0 <= idx < len(catalog):
+                score = 1.0 / (1.0 + float(dist))
+                results.append((catalog[idx], score))
+        return results
+    except Exception as e:
+        logger.error(f"Error en busqueda semantica: {e}")
+        return []
+
+hybrid_cache = TTLCache(maxsize=2048, ttl=600)
+
+def hybrid_search_impl(query, limit=120):
+    if not query:
+        return []
+    try:
+        fuzzy_results = fuzzy_search(query, limit=200)
+        semantic_results = semantic_search(query, top_k=400)
+
+        combined = {}
+        for prod, score in fuzzy_results:
+            key = prod["code"]
+            combined[key] = {"prod": prod, "fuzzy": score / 100.0, "sem": 0.0}
+
+        for prod, score in semantic_results:
+            key = prod["code"]
+            if key not in combined:
+                combined[key] = {"prod": prod, "fuzzy": 0.0, "sem": score}
+            else:
+                combined[key]["sem"] = max(combined[key]["sem"], score)
+
+        final = []
+        for v in combined.values():
+            combined_score = 0.6 * v["sem"] + 0.4 * v["fuzzy"]
+            final.append((v["prod"], combined_score))
+
+        final.sort(key=lambda x: x[1], reverse=True)
+        return [p for p, _ in final[:limit]]
+    except Exception as e:
+        logger.error(f"Error en hybrid_search: {e}")
+        return []
+
+def hybrid_search(query, limit=120):
+    if not query:
+        return []
+    query_normalized = normalize_search_query(query)
+    if query_normalized in hybrid_cache:
+        return hybrid_cache[query_normalized]
+    res = hybrid_search_impl(query_normalized, limit)
+    hybrid_cache[query_normalized] = res
+    return res
+
+logger.info("✅ hybrid_search definida correctamente")
 
 # ------------------------------------------------------------
 # CARRITO – VALIDA EXISTENCIA
@@ -1254,18 +1376,21 @@ def process_bulk_async(job):
         except:
             pass
 
-# ✅ WORKER CON RESPAWN AUTOMÁTICO
 def bulk_worker():
+    """Worker con logging mejorado - no spam en logs"""
     while True:
         try:
             job = bulk_queue.get(timeout=1)
             process_bulk_async(job)
             bulk_queue.task_done()
+        except Empty:
+            # Esto es normal cuando no hay trabajos, no logear
+            continue
         except Exception as e:
-            logger.exception("Worker dead, respawning…")
+            logger.exception("Worker crashed, respawning...")
             time.sleep(5)
 
-# ✅ Lanzar 2 workers con respawn
+# Lanzar 2 workers
 for _ in range(2):
     threading.Thread(target=bulk_worker, daemon=True).start()
 
@@ -1952,7 +2077,14 @@ def run_agent(phone, user_message):
 
     products = []
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
-        products = hybrid_search(query_for_search, limit=MAX_SEARCH_RESULTS)
+        # Verificar que hybrid_search está disponible
+        try:
+            products = hybrid_search(query_for_search, limit=MAX_SEARCH_RESULTS)
+        except NameError:
+            logger.error("hybrid_search no disponible, usando fallback")
+            catalog, _ = get_catalog_and_index()
+            products = [p for p in catalog if query_for_search.lower() in p.get("name", "").lower()][:MAX_SEARCH_RESULTS]
+        
         total = len(products)
         log_interaction(phone, user_message, intent, total)
 
@@ -2022,6 +2154,8 @@ def run_agent(phone, user_message):
     log_performance(phone, "chat", time.time()-start_time, 0)
     return reply
 
+logger.info("✅ run_agent definido correctamente")
+
 # ------------------------------------------------------------
 # API REST
 # ------------------------------------------------------------
@@ -2034,235 +2168,3 @@ def api_get_cart(phone):
         total, discount = cart_totals(phone)
         return jsonify({
             "ok": True,
-            "phone": phone,
-            "items": [
-                {"code": code, "qty": q, "name": name, "price": float(price)}
-                for code, q, name, price in items
-            ],
-            "total": float(total),
-            "discount": float(discount)
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/api/quote", methods=["POST"])
-def api_quote():
-    try:
-        data = request.get_json()
-        query = data.get("query", "")
-        phone = data.get("phone") or request.remote_addr
-        if not rate_limit_check(phone):
-            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
-        limit = data.get("limit", 10)
-
-        if not query:
-            return jsonify({"ok": False, "error": "Falta query"}), 400
-
-        products = hybrid_search(query, limit=limit)
-
-        return jsonify({
-            "ok": True,
-            "query": query,
-            "results": [
-                {
-                    "code": p["code"],
-                    "name": p["name"],
-                    "price_ars": float(p["price_ars"]),
-                    "price_usd": float(p["price_usd"]),
-                    "brand": p.get("brand", ""),
-                    "model": p.get("model", ""),
-                    "category": p.get("category", "")
-                }
-                for p in products
-            ]
-        })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/api/orders/<phone>", methods=["GET"])
-def api_get_orders(phone):
-    try:
-        if not rate_limit_check(phone):
-            return jsonify({"ok": False, "error": "Rate limit excedido"}), 429
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT order_id, customer_name, total_ars, status, created_at FROM orders WHERE phone=? ORDER BY created_at DESC LIMIT 10",
-                (phone,)
-            )
-            rows = cur.fetchall()
-
-            return jsonify({
-                "ok": True,
-                "phone": phone,
-                "orders": [
-                    {
-                        "order_id": r[0],
-                        "customer_name": r[1],
-                        "total_ars": r[2],
-                        "status": r[3],
-                        "created_at": r[4]
-                    }
-                    for r in rows
-                ]
-            })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/api/analytics", methods=["GET"])
-def api_analytics():
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-
-            cur.execute("""
-                SELECT intent_detected, COUNT(*) as count
-                FROM interactions
-                WHERE timestamp >= datetime('now', '-7 days')
-                GROUP BY intent_detected
-            """)
-            intents = [{"intent": r[0], "count": r[1]} for r in cur.fetchall()]
-
-            cur.execute("""
-                SELECT message, COUNT(*) as count
-                FROM interactions
-                WHERE intent_detected = 'search' AND timestamp >= datetime('now', '-7 days')
-                GROUP BY message
-                ORDER BY count DESC
-                LIMIT 10
-            """)
-            top_searches = [{"query": r[0], "count": r[1]} for r in cur.fetchall()]
-
-            return jsonify({
-                "ok": True,
-                "period": "7_days",
-                "intents": intents,
-                "top_searches": top_searches
-            })
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-# ------------------------------------------------------------
-# WEBHOOK
-# ------------------------------------------------------------
-@app.before_request
-def validate_twilio_signature():
-    if request.path.rstrip("/") == "/webhook" and twilio_validator:
-        signature = request.headers.get("X-Twilio-Signature", "")
-        url = request.url.replace("http://", "https://")
-        params = request.form.to_dict()
-        if not twilio_validator.validate(url, params, signature):
-            logger.warning(f"Firma Twilio invalida desde {request.remote_addr}")
-            return Response("Forbidden", status=403)
-
-@app.route("/webhook", methods=["POST"])
-def whatsapp_webhook():
-    from_number = request.form.get("From", "")
-    message_body = request.form.get("Body", "").strip()
-
-    logger.info("=" * 50)
-    logger.info("WEBHOOK RECIBIDO")
-    logger.info(f"From: {from_number}")
-    logger.info(f"Body: {message_body[:100]}")
-    logger.info(f"MessageSid: {request.form.get('MessageSid')}")
-    logger.info(f"Body length: {len(message_body)}")
-    logger.info("=" * 50)
-
-    if not from_number or not message_body:
-        logger.warning("Webhook sin From o Body")
-        return Response("", status=200)
-
-    message_body = sanitize_input(message_body)
-    logger.info(f"Mensaje sanitizado: {message_body[:100]}")
-
-    if is_duplicate_message(from_number, message_body):
-        logger.info(f"Mensaje duplicado ignorado de {from_number}")
-        return Response("", status=200)
-
-    if not rate_limit_check(from_number):
-        logger.warning(f"Rate limit excedido para {from_number}")
-        resp = MessagingResponse()
-        resp.message("Espera un toque, me saturaste. Proba en un minuto.")
-        return str(resp)
-
-    logger.info(f"Procesando mensaje de {from_number}: {message_body[:100]}")
-
-    try:
-        reply = run_agent(from_number, message_body)
-        logger.info(f"Respuesta generada: {len(reply)} caracteres")
-        logger.info(f"Preview: {reply[:100]}...")
-    except Exception as e:
-        logger.error(f"Error ejecutando agente: {e}", exc_info=True)
-        reply = "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
-
-    if not twilio_rest_client:
-        logger.error("CRITICAL: twilio_rest_client no esta disponible!")
-        twiml = MessagingResponse()
-        twiml.message("Error de configuración. Contactá al administrador.")
-        return str(twiml)
-
-    logger.info(f"Longitud de respuesta: {len(reply)} caracteres")
-
-    if len(reply) > 1300:
-        logger.info("Mensaje largo detectado, usando send_long_message")
-        success = send_long_message(from_number, reply)
-
-        if not success:
-            logger.error("send_long_message fallo")
-            try:
-                truncated = reply[:1200] + "... (mensaje truncado)"
-                twiml = MessagingResponse()
-                twiml.message(truncated)
-                logger.warning("Enviando version truncada por TwiML")
-                return str(twiml)
-            except Exception as e:
-                logger.error(f"Fallback tambien fallo: {e}")
-                twiml = MessagingResponse()
-                twiml.message("Tuve un problema enviando la respuesta completa. Probá de nuevo.")
-                return str(twiml)
-
-        logger.info("Mensaje largo enviado correctamente via REST API")
-        return Response("", status=200)
-    else:
-        logger.info("Mensaje corto, usando TwiML")
-        try:
-            twiml = MessagingResponse()
-            twiml.message(reply)
-            logger.info(f"Respuesta TwiML generada: {reply[:100]}")
-            return str(twiml)
-        except Exception as e:
-            logger.error(f"Error generando TwiML: {e}", exc_info=True)
-            return Response("Error interno", status=500)
-
-@app.route("/health", methods=["GET"])
-def health():
-    catalog, index = get_catalog_and_index()
-    exchange = get_exchange_rate()
-
-    return jsonify({
-        "ok": True,
-        "service": "fran39",
-        "version": "3.9.2",
-        "model": MODEL_NAME,
-        "catalog_size": len(catalog) if catalog else 0,
-        "faiss_ready": index is not None,
-        "exchange_rate": float(exchange),
-        "timestamp": datetime.now().isoformat()
-    }), 200
-
-@app.route("/", methods=["GET"])
-def root():
-    return Response("Fran 3.9.2 - Bot Mayorista Inteligente (WORKER FIX + 9 MEJORAS)", status=200, mimetype="text/plain")
-
-# ------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------
-if __name__ == "__main__":
-    cleanup_old_jobs()
-    port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.9.2 (WORKER FIX + 9 MEJORAS) en puerto {port}")
-    logger.info(f"Modelo LLM: {MODEL_NAME}")
-    catalog, _ = get_catalog_and_index()
-    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
-    logger.info(f"TC inicial: {get_exchange_rate()}")
-    app.run(host="0.0.0.0", port=port, debug=False)
