@@ -1997,7 +1997,7 @@ def run_agent(phone, user_message):
         pass
 
     if intent == "saludo":
-        reply = "¡Hola! Soy Fran de TERCOM 👋 ¿Qué repuesto necesitás? Decime marca/modelo y te ayudo."
+        reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?."
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "saludo", 0)
         log_performance(phone, "saludo", time.time()-start_time, 0)
@@ -2028,30 +2028,36 @@ def run_agent(phone, user_message):
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
 
-    if intent == "agregar_carrito":
+        if intent == "agregar_carrito":
         last = get_last_search(phone)
+        products_count = 0
+
         if not last or not last.get("products"):
             reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
         else:
             products = last["products"][:150]
-            total_estimate = sum(to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1)) for p in products)
+            products_count = len(products)
+            total_estimate = sum(
+                to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
+                for p in products
+            )
             save_pending_action(
                 phone,
                 action_type="add_to_cart",
                 action_data={"products": products},
-                context=f"{len(products)} productos por {format_price(total_estimate)}"
+                context=f"{products_count} productos por {format_price(total_estimate)}"
             )
             reply = (
-                f"Dale! Te agrego {len(products)} productos por {format_price(total_estimate)} aprox.\n\n"
+                f"Dale! Te agrego {products_count} productos por {format_price(total_estimate)} aprox.\n\n"
                 "¿Confirmás? (decime 'si' o 'dale' para confirmar, 'no' para cancelar)"
             )
-        
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "agregar_carrito", len(products) if last else 0)
-        log_performance(phone, "agregar_carrito", time.time()-start_time, 0)
-        return reply
 
-    if intent == "pedido_codigo":
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "agregar_carrito", products_count)
+        log_performance(phone, "agregar_carrito", time.time()-start_time, products_count)
+        return reply
+        
+        if intent == "pedido_codigo":
         m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
         if m:
             code = m.group(0)
