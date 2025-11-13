@@ -1938,7 +1938,6 @@ def process_multiple_intents(phone, message_parts):
         # Contar productos mencionados para analytics
         if "productos" in reply or "encontrados" in reply:
             try:
-                import re
                 nums = re.findall(r'(\d+)\s*productos?', reply)
                 if nums:
                     total_products += int(nums[0])
@@ -1989,12 +1988,37 @@ def run_agent(phone, user_message):
 
     # === CONFIRMAR / CANCELAR / SALUDO / CARRITO (sin cambios) ===
     if intent == "confirmar":
-        # ... (código existente sin cambios)
-        pass
+        if pending and pending.get("action_type") == "add_to_cart":
+            products = pending.get("action_data", {}).get("products", [])
+            if products:
+                added = 0
+                for p in products:
+                    code = p.get("code")
+                    name = p.get("name")
+                    price_ars = to_decimal_money(p.get("price_ars", 0))
+                    price_usd = to_decimal_money(p.get("price_usd", 0))
+                    qty = int(p.get("qty", 1))
+                    if cart_add(phone, code, qty, name, price_ars, price_usd):
+                        added += 1
+                clear_pending_action(phone)
+                reply = f"Dale! Agregué {added} productos a tu carrito. ¿Querés ver el resumen?"
+            else:
+                reply = "No encontré productos para agregar."
+        else:
+            reply = "¿Confirmás qué? Buscá algo primero y te preparo el carrito."
+        
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "confirmar", 0)
+        log_performance(phone, "confirmar", time.time()-start_time, 0)
+        return reply
 
     if intent == "cancelar":
-        # ... (código existente sin cambios)
-        pass
+        clear_pending_action(phone)
+        reply = "Cancelado. ¿Qué más buscás?"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "cancelar", 0)
+        log_performance(phone, "cancelar", time.time()-start_time, 0)
+        return reply
 
     if intent == "saludo":
         reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?."
@@ -2029,21 +2053,20 @@ def run_agent(phone, user_message):
         return reply
 
     if intent == "agregar_carrito":
-    last = get_last_search(phone)
-    products_count = 0
+        last = get_last_search(phone)
+        products_count = 0
 
-    if not last or not last.get("products"):
-        reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
-    else:
-        products = last["products"][:150]
-        products_count = len(products)
-        total_estimate = sum(
-            to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
-            for p in products
-        )
+        if not last or not last.get("products"):
+            reply = "No tengo productos recientes para agregar. Buscá algo primero y te preparo el carrito."
+        else:
+            products = last["products"][:150]
+            products_count = len(products)
+            total_estimate = sum(
+                to_decimal_money(p.get("price_ars", 0)) * int(p.get("qty", 1))
+                for p in products
+            )
 
-        
-        save_pending_action(
+            save_pending_action(
                 phone,
                 action_type="add_to_cart",
                 action_data={"products": products},
@@ -2059,24 +2082,24 @@ def run_agent(phone, user_message):
         log_performance(phone, "agregar_carrito", time.time()-start_time, products_count)
         return reply
         
-     if intent == "pedido_codigo":
-    m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
-    if m:
-        code = m.group(0)
-        catalog, _ = get_catalog_and_index()
-        found = [p for p in catalog if p["code"] == code]
-        if found:
-            p = found[0]
-            reply = f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
+    if intent == "pedido_codigo":
+        m = re.search(r"\d{4}/\d{5}-\d{3}", user_message)
+        if m:
+            code = m.group(0)
+            catalog, _ = get_catalog_and_index()
+            found = [p for p in catalog if p["code"] == code]
+            if found:
+                p = found[0]
+                reply = f"{p['name']} (Cod: {code}) – {format_price(p['price_ars'])}. ¿Cuántas unidades querés?"
+            else:
+                reply = f"El código {code} no figura en mi lista. ¿Tenés otro o buscamos por nombre?"
         else:
-            reply = f"El código {code} no figura en mi lista. ¿Tenés otro o buscamos por nombre?"
-    else:
-        reply = "Pasame el código completo así: 1234/56789-012"
+            reply = "Pasame el código completo así: 1234/56789-012"
 
-    save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, "pedido_codigo", 1)
-    log_performance(phone, "pedido_codigo", time.time()-start_time, 1)
-    return reply
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "pedido_codigo", 1)
+        log_performance(phone, "pedido_codigo", time.time()-start_time, 1)
+        return reply
    
 
     # === BÚSQUEDA Y LISTAS (con filtros mejorados) ===
