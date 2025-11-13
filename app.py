@@ -48,11 +48,11 @@ if not OPENAI_API_KEY:
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
-    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv "
+    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
 ).strip()
 
 EXCHANGE_API_URL = (
-    os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial "
+    os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
 ).strip()
 
 DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
