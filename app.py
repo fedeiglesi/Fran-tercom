@@ -1,4 +1,3 @@
-```python
 # -*- coding: utf-8 -*-
 """
 FRAN 2.3 FULL — Railway Production Ready
@@ -60,8 +59,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("fran23")
 
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
 
 CATALOG_URL = (os.environ.get("CATALOG_URL",
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/LISTA_TERCOM_LIMPIA.csv") or "").strip()
@@ -78,7 +75,16 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = None  # Will be initialized when needed
+
+def get_openai_client():
+    """Lazy initialization of OpenAI client"""
+    global client
+    if client is None:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("Falta OPENAI_API_KEY")
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    return client
 
 # =================
 # BASE DE DATOS
@@ -324,7 +330,7 @@ def _build_faiss_index_from_catalog(catalog):
         batch = 512
         for i in range(0, len(texts), batch):
             chunk = texts[i:i+batch]
-            resp = client.embeddings.create(input=chunk, model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
+            resp = get_openai_client().embeddings.create(input=chunk, model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
             vectors.extend([d.embedding for d in resp.data])
 
         if not vectors:
@@ -370,7 +376,7 @@ def semantic_search(query, top_k=20):
     if not catalog or index is None or not query:
         return []
     try:
-        resp = client.embeddings.create(input=[query], model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
+        resp = get_openai_client().embeddings.create(input=[query], model="text-embedding-3-small", timeout=REQUESTS_TIMEOUT)
         emb = np.array([resp.data[0].embedding]).astype("float32")
         D, I = index.search(emb, top_k)
         results = []
@@ -858,7 +864,7 @@ Usá lenguaje argentino natural (vos, che, dale) pero NUNCA inventes informació
         try:
             logger.info(f"🔄 Iteración {iteration + 1}/{max_iterations}")
             
-            response = client.chat.completions.create(
+            response = get_openai_client().chat.completions.create(
                 model="gpt-4o",
                 messages=messages,
                 tools=TOOLS,
@@ -1008,4 +1014,3 @@ if __name__ == "__main__":
     logger.info("🚀 Iniciando FRAN 2.3 — Production Ready con Streaming Real")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-```
