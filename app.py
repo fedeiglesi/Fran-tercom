@@ -43,8 +43,6 @@ logger.info("✅ Imports completados")
 # CONFIG
 # ------------------------------------------------------------
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
@@ -96,7 +94,7 @@ twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO
 twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
@@ -979,6 +977,11 @@ def generate_embeddings_with_cache(texts):
                 text_indices.append(idx)
 
         if texts_to_embed:
+            if not client:
+                logger.warning("OpenAI client not initialized (missing API key). Cannot generate embeddings.")
+                # Return empty list to signal that embeddings cannot be generated
+                return []
+            
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
             vectors = []
             batch = 256
@@ -1118,7 +1121,7 @@ def fuzzy_search(query, limit=100):
 
 def semantic_search(query, top_k=60, max_retries=3):
     catalog, index = get_catalog_and_index()
-    if not catalog or index is None or not query:
+    if not catalog or index is None or not query or not client:
         return []
     try:
         for retry in range(max_retries):
@@ -1444,6 +1447,9 @@ Devolvé SIEMPRE JSON de una línea.
 """
 
 def detect_intent_llm(msg):
+    if not client:
+        logger.warning("OpenAI client not available. Returning default intent.")
+        return {"intent": "desconocido", "query": msg.strip()[:600]}
     try:
         with openai_sem:
             resp = client.chat.completions.create(
@@ -1565,6 +1571,16 @@ def build_execution_summary(ctx):
     return "\n".join(lines)
 
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context):
+    if not client:
+        logger.warning("OpenAI client not available. Cannot generate smart AI reply.")
+        if catalog_products:
+            # Return a simple formatted list of products
+            product_list = "\n".join([
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(Decimal(str(p['price_ars'])))}"
+                for p in catalog_products[:5]
+            ])
+            return f"Encontré estos productos:\n\n{product_list}\n\n¿Cuál te sirve?"
+        return "¿En qué te puedo ayudar?"
     try:
         history = get_history_since(phone, days=3, limit=15)
         user_context = ""
@@ -1668,6 +1684,9 @@ Sos vendedor EFICIENTE, no Wikipedia.
 """
 
 def build_technical_answer(phone, user_message, top_products):
+    if not client:
+        logger.warning("OpenAI client not available. Cannot build technical answer.")
+        return "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
     try:
         context_lines = []
         for p in (top_products or [])[:3]:
@@ -1872,6 +1891,16 @@ def build_enhanced_context(phone, user_message):
         return ""
 
 def generate_smart_ai_reply(phone, user_message, catalog_products):
+    if not client:
+        logger.warning("OpenAI client not available. Cannot generate smart AI reply.")
+        if catalog_products:
+            # Return a simple formatted list of products
+            product_list = "\n".join([
+                f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}"
+                for p in catalog_products[:5]
+            ])
+            return f"Encontré estos productos:\n\n{product_list}\n\n¿Cuál te sirve?"
+        return "¿En qué te puedo ayudar?"
     try:
         history = get_history_since(phone, days=3, limit=15)
         context = build_enhanced_context(phone, user_message)
