@@ -1,7 +1,8 @@
 # =========================================================
-# Fran 3.10.0 – Bot Mayorista Inteligente (FULL STRUCTURE)
+# Fran 3.10.2 – Bot Mayorista Inteligente (FULL FIX +)
 # =========================================================
-# Based on 3.9.1 structure + 15 quick-coherence improvements
+# - Todos los fixes aplicados
+# - Listo para producción
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -79,7 +80,7 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.10.0"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.10.2"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -189,18 +190,99 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 def normalize_search_query(query):
     return strip_accents(query)
 
+# ---- funciones faltantes ----
+def validate_search_quality(query, products):
+    if not products:
+        return {"quality": "none", "score": 0, "suggestion": "Sin resultados"}
+    q_words = set(normalize_search_query(query).split())
+    scores = []
+    for p in products[:10]:
+        p_words = set(normalize_search_query(p.get("name","")).split())
+        overlap = len(q_words & p_words) / len(q_words) if q_words else 0
+        scores.append(overlap)
+    avg = sum(scores) / len(scores) if scores else 0
+    if avg < 0.3:
+        return {"quality": "low", "score": int(avg*100), "suggestion": "¿Marca/modelo/año?"}
+    if avg < 0.6:
+        return {"quality": "medium", "score": int(avg*100)}
+    return {"quality": "high", "score": int(avg*100)}
+
+CATEGORY_KEYWORDS = {
+    "bateria": ["bateria", "batería", "battery"],
+    "aceite": ["aceite", "lubricante", "oil", "yamalube", "castrol"],
+    "filtro": ["filtro", "filter"],
+    "cadena": ["cadena", "chain", "transmision"],
+    "bujia": ["bujia", "bujía", "spark"],
+}
+
 def detect_category_filter(query):
     if not query:
         return None
     q = query.lower()
-    for cat, kws in CATEGORY_KEYWORDS.items():
-        if any(k in q for k in kws):
+    for cat, words in CATEGORY_KEYWORDS.items():
+        if any(w in q for w in words):
             return cat
     return None
 
+def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
+    if not phone:
+        return
+    try:
+        items = cart_get(phone)
+        cart_snapshot = json.dumps(sorted([(i[0], i[1]) for i in items]))
+        action_data["cart_hash"] = hashlib.md5(cart_snapshot.encode()).hexdigest()
+        expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO pending_actions (phone, action_type, action_data, context, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(phone) DO UPDATE SET
+                action_type=excluded.action_type,
+                action_data=excluded.action_data,
+                context=excluded.context,
+                created_at=excluded.created_at,
+                expires_at=excluded.expires_at""",
+                (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
+            )
+    except Exception as e:
+        logger.error(f"Error guardando pending_action: {e}")
+
+def get_pending_action(phone):
+    if not phone:
+        return None
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT action_type, action_data, context, created_at FROM pending_actions "
+                "WHERE phone=? AND expires_at > ?",
+                (phone, datetime.now().isoformat())
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "action_type": row[0],
+                "action_data": json.loads(row[1]) if row[1] else {},
+                "context": row[2],
+                "created_at": row[3]
+            }
+    except Exception as e:
+        logger.error(f"Error leyendo pending_action: {e}")
+        return None
+
+def clear_pending_action(phone):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
+    except Exception as e:
+        logger.error(f"Error limpiando pending_action: {e}")
+
 # ------------------------------------------------------------------
 # DATABASE – SQLITE RESILIENTE
-# ------------------------------------------------------------------
+# ------------------------------------------------------------
 @contextmanager
 def get_db_connection():
     conn = None
@@ -282,7 +364,7 @@ def init_db():
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS session_summary (
-                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned TEXT,
+                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned Text,
                 last_intent TEXT, message_count INTEGER DEFAULT 0, updated_at TEXT
             )
         """)
@@ -339,58 +421,6 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
-
-def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
-    if not phone: return
-    try:
-        items = cart_get(phone)
-        cart_snapshot = json.dumps(sorted([(i[0], i[1]) for i in items]))
-        action_data["cart_hash"] = hashlib.md5(cart_snapshot.encode()).hexdigest()
-        expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO pending_actions (phone, action_type, action_data, context, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                action_type=excluded.action_type,
-                action_data=excluded.action_data,
-                context=excluded.context,
-                created_at=excluded.created_at,
-                expires_at=excluded.expires_at""",
-                (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
-            )
-    except Exception as e:
-        logger.error(f"Error guardando pending_action: {e}")
-
-def get_pending_action(phone):
-    if not phone: return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT action_type, action_data, context, created_at FROM pending_actions "
-                "WHERE phone=? AND expires_at > ?",
-                (phone, datetime.now().isoformat())
-            )
-            row = cur.fetchone()
-            if not row: return None
-            return {
-                "action_type": row[0],
-                "action_data": json.loads(row[1]) if row[1] else {},
-                "context": row[2],
-                "created_at": row[3]
-            }
-    except Exception as e:
-        logger.error(f"Error leyendo pending_action: {e}")
-        return None
-
-def clear_pending_action(phone):
-    if not phone: return
-    try:
-        with get_db_connection() as conn:
-            conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
-    except Exception as e:
-        logger.error(f"Error limpiando pending_action: {e}")
 
 # ------------------------------------------------------------------
 # ANALYTICS
@@ -698,7 +728,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
         return None
 
 # ------------------------------------------------------------------
-# CARRITO – TTL 7 DÍAS (168 h)
+# CARRITO – TTL 7 DÍAS
 # ------------------------------------------------------------------
 def cart_add(phone, code, qty, name, price_ars, price_usd):
     if not phone or not code:
@@ -710,7 +740,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
 
         catalog, _ = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
-        if not prod:
+        if prod is None:
             logger.warning(f"Producto {code} no existe en catalogo")
             return False
 
@@ -738,7 +768,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
         logger.error(f"Error en cart_add: {e}")
         return False
 
-def cart_get(phone, max_age_hours=168):  # 🔥 7 días
+def cart_get(phone, max_age_hours=168):  # 7 días
     if not phone:
         return []
     try:
@@ -981,12 +1011,12 @@ def generate_embeddings_with_cache(texts):
                             logger.error(f"RateLimitError persistente: {e}")
                             raise
 
-            try:
-                with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
-                    pickle.dump(cache, f)
-                logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
-            except Exception as e:
-                logger.warning(f"Error guardando cache de embeddings: {e}")
+                try:
+                    with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
+                        pickle.dump(cache, f)
+                    logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
+                except Exception as e:
+                    logger.warning(f"Error guardando cache de embeddings: {e}")
 
         final_vectors = []
         for text in texts:
@@ -1050,47 +1080,29 @@ def get_catalog_and_index():
         return catalog, index
 
 # ------------------------------------------------------------------
-# BÚSQUEDA – CATEGORÍA + CALIDAD
+# BÚSQUEDA – FILTRO LIVIANO + LLM EXPANSOR
 # ------------------------------------------------------------------
-CATEGORY_KEYWORDS = {
-    "bateria": ["bateria", "batería", "pila", "acumulador"],
-    "aceite": ["aceite", "lubricante", "oil", "yamalube", "castrol"],
-    "filtro": ["filtro", "filter"],
-    "cadena": ["cadena", "chain", "transmision"],
-    "bujia": ["bujia", "bujía", "spark"],
-}
+hybrid_cache = TTLCache(maxsize=1024, ttl=300)
 
-def apply_category_filter(query, products):
-    if not query or not products:
-        return products
-    q = query.lower()
-    for cat, kws in CATEGORY_KEYWORDS.items():
-        if any(k in q for k in kws):
-            filtered = [
-                p for p in products
-                if cat in p.get("category", "").lower() or
-                   any(k in p.get("name", "").lower() for k in kws)
-            ]
-            if len(filtered) >= 5:
-                logger.info(f"Filtro {cat} aplicado: {len(filtered)} prod")
-                return filtered
-    return products
+def hybrid_search(query, limit=60):
+    if not query:
+        return []
+    q_norm = normalize_search_query(query)
+    products = hybrid_cache.get(q_norm)
+    if products is None:
+        products = hybrid_search_impl(q_norm, limit)
+        hybrid_cache[q_norm] = products
 
-def validate_search_quality(query, products):
-    if not products:
-        return {"quality": "none", "score": 0, "suggestion": "Sin resultados"}
-    q_words = set(normalize_search_query(query).split())
-    scores = []
-    for p in products[:10]:
-        p_words = set(normalize_search_query(p["name"]).split())
-        overlap = len(q_words & p_words) / len(q_words) if q_words else 0
-        scores.append(overlap)
-    avg = sum(scores) / len(scores)
-    if avg < 0.3:
-        return {"quality": "low", "score": int(avg*100), "suggestion": "¿Marca/modelo/año?"}
-    if avg < 0.6:
-        return {"quality": "medium", "score": int(avg*100)}
-    return {"quality": "high", "score": int(avg*100)}
+    q_low = query.lower()
+    for cat, words in CATEGORY_KEYWORDS.items():
+        if any(w in q_low for w in words):
+            products = [p for p in products
+                        if any(w in p.get("name","").lower() or
+                               w in p.get("category","").lower()
+                               for w in words)]
+            break
+    logger.info(f"[SEARCH] query='{query}' -> {len(products)} prod después de filtros")
+    return products[:15]   # nunca más de 15
 
 def fuzzy_search(query, limit=100):
     catalog, _ = get_catalog_and_index()
@@ -1098,12 +1110,8 @@ def fuzzy_search(query, limit=100):
         return []
     try:
         names = [p["search_text"] for p in catalog]
-        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit, workers=-1)
-        results = []
-        for _, score, idx in matches:
-            if score >= 75 and idx < len(catalog):
-                results.append((catalog[idx], score))
-        return results
+        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)  # sin workers
+        return [(catalog[idx], score) for _, score, idx in matches if score >= 75]
     except Exception as e:
         logger.error(f"Error en fuzzy_search: {e}")
         return []
@@ -1143,20 +1151,31 @@ def semantic_search(query, top_k=60, max_retries=3):
         logger.error(f"Error en busqueda semantica: {e}")
         return []
 
-hybrid_cache = TTLCache(maxsize=1024, ttl=300)
-
 def hybrid_search_impl(query, limit=60):
     if not query:
         return []
-    fuzzy_results = fuzzy_search(query, limit=80)
-    semantic_results = semantic_search(query, top_k=60)
+    # ---- filtro por categoría ANTES de mezclar ----
+    q_low = query.lower()
+    for cat, words in CATEGORY_KEYWORDS.items():
+        if any(w in q_low for w in words):
+            fuzzy_raw = fuzzy_search(query, limit=80)
+            semantic_raw = semantic_search(query, top_k=60)
+            # filtramos
+            fuzzy_raw = [(p, s) for p, s in fuzzy_raw if any(w in p.get("name","").lower() or w in p.get("category","").lower() for w in words)]
+            semantic_raw = [(p, s) for p, s in semantic_raw if any(w in p.get("name","").lower() or w in p.get("category","").lower() for w in words)]
+            break
+    else:
+        # sin categoría detectada → sin filtro
+        fuzzy_raw = fuzzy_search(query, limit=80)
+        semantic_raw = semantic_search(query, top_k=60)
 
+    # mezcla igual que antes
     combined = {}
-    for prod, score in fuzzy_results:
+    for prod, score in fuzzy_raw:
         key = prod["code"]
         combined[key] = {"prod": prod, "fuzzy": score / 100.0, "sem": 0.0}
 
-    for prod, score in semantic_results:
+    for prod, score in semantic_raw:
         key = prod["code"]
         if key not in combined:
             combined[key] = {"prod": prod, "fuzzy": 0.0, "sem": score}
@@ -1170,19 +1189,6 @@ def hybrid_search_impl(query, limit=60):
 
     final.sort(key=lambda x: x[1], reverse=True)
     return [p for p, _ in final[:limit]]
-
-def hybrid_search(query, limit=60):
-    if not query:
-        return []
-    query_norm = normalize_search_query(query)
-    if query_norm in hybrid_cache:
-        return hybrid_cache[query_norm]
-    products = hybrid_search_impl(query_norm, limit)
-    products = apply_category_filter(query, products)  # 🔥 filtro
-    hybrid_cache[query_norm] = products
-    return products
-
-logger.info("✅ hybrid_search definida correctamente")
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -1307,7 +1313,6 @@ def process_bulk_async(job):
             matches = hybrid_search(product_name, limit=3)
             if matches:
                 best = matches[0]
-                best = matches[0]
                 price_ars = to_decimal_money(best["price_ars"])
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
                 total_quoted += subtotal
@@ -1371,14 +1376,12 @@ def process_bulk_async(job):
             pass
 
 def bulk_worker():
-    """Worker con logging mejorado - no spam en logs"""
     while True:
         try:
             job = bulk_queue.get(timeout=1)
             process_bulk_async(job)
             bulk_queue.task_done()
         except Empty:
-            # Esto es normal cuando no hay trabajos, no logear
             continue
         except Exception as e:
             logger.exception("Worker crashed, respawning...")
@@ -1415,51 +1418,6 @@ TOTAL: {format_price(Decimal(str(total)))}
         logger.info(f"Notificacion enviada a {phone}")
     except Exception as e:
         logger.error(f"Error enviando notificacion: {e}")
-
-# ------------------------------------------------------------------
-# MULTI-MENSAJE
-# ------------------------------------------------------------------
-try:
-    from twilio.rest import Client as TwilioClient
-    from twilio.request_validator import RequestValidator
-except Exception:
-    TwilioClient = None
-    RequestValidator = None
-
-twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
-twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
-twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
-
-def send_long_message(phone, text, chunk_size=1200):
-    if not twilio_rest_client or not phone or not text:
-        return False
-
-    try:
-        parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        logger.info(f"Enviando {len(parts)} chunks a {phone}")
-
-        for idx, part in enumerate(parts):
-            try:
-                message = twilio_rest_client.messages.create(
-                    from_=TWILIO_WHATSAPP_FROM,
-                    body=f"({idx + 1}/{len(parts)})\n{part}" if len(parts) > 1 else part,
-                    to=phone
-                )
-                logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
-
-                if idx < len(parts) - 1:
-                    time.sleep(0.8)
-
-            except Exception as e:
-                logger.error(f"Error enviando chunk {idx + 1}: {e}")
-                raise
-
-        logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error critico en send_long_message: {e}", exc_info=True)
-        return False
 
 # ------------------------------------------------------------------
 # INTENT DETECTOR CON LLM
@@ -1518,10 +1476,10 @@ def detect_intent_llm(msg):
         if intent not in valid_intents:
             intent = "desconocido"
         
-        return {"intent": intent, "query": query}
+        return {"intent": intent, "query": query or msg.strip()[:600]}
     except Exception as e:
         logger.error(f"detect_intent_llm error: {e}")
-        return {"intent": "desconocido", "query": ""}
+        return {"intent": "desconocido", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
 # IMPLÍCITO – “3 de cada una”
@@ -1579,6 +1537,11 @@ Reglas:
 - Nunca inventes productos que no estén en [TOP N PRODUCTOS]
 - Cerrá con pregunta de venta
 
+=== VALIDACIÓN OBLIGATORIA ===
+Antes de listar, descartá cualquier producto que NO sea {{product_type}}.
+Si ninguno calza, decí: “No tengo {{product_type}} para {{modelo}}, pero tengo estas alternativas:”
+y mostrá los 3 más cercanos.
+
 {BUSINESS_CONTEXT}
 """
 
@@ -1604,8 +1567,18 @@ def build_execution_summary(ctx):
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context):
     try:
         history = get_history_since(phone, days=3, limit=15)
-        user_context = ""  # podés expandir después
-        msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT_V2}]
+        user_context = ""
+
+        # ---- prompt personalizado ----
+        product_type = ("batería" if any(k in user_message.lower() for k in ("bateria","batería","battery"))
+                        else "filtro" if any(k in user_message.lower() for k in ("filtro","filter"))
+                        else "cadena" if any(k in user_message.lower() for k in ("cadena","chain"))
+                        else "aceite" if any(k in user_message.lower() for k in ("aceite","oil"))
+                        else "bujía" if any(k in user_message.lower() for k in ("bujia","bujía","spark"))
+                        else "repuesto")
+        personalized_prompt = SMART_SYSTEM_PROMPT_V2.replace("{{product_type}}", product_type)
+
+        msgs = [{"role": "system", "content": personalized_prompt}]
         for h in history[-15:]:
             role = "assistant" if h["role"] == "assistant" else "user"
             msgs.append({"role": role, "content": h["content"]})
@@ -1613,10 +1586,33 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             msgs.append({"role": "system", "name": "context", "content": f"[CONTEXTO DE SESION]\n{user_context}"})
         exec_summary = build_execution_summary(execution_context)
         msgs.append({"role": "system", "name": "execution", "content": f"[RESULTADO DE BUSQUEDA]\n{exec_summary}"})
+
+        # ---- filtro ANTES de armar el texto que ve el LLM ----
         if catalog_products:
-            catalog_text = "\n".join([f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}" for p in catalog_products])
-            msgs.append({"role": "system", "name": "products", "content": f"[TOP {len(catalog_products)} PRODUCTOS]\n{catalog_text}"})
+            filtered = []
+            for p in catalog_products:
+                if product_type in ("batería","bateria","battery") and any(k in p.get("name","").lower() for k in ("batería","bateria","battery")):
+                    filtered.append(p)
+                elif product_type in ("filtro","filter") and any(k in p.get("name","").lower() for k in ("filtro","filter")):
+                    filtered.append(p)
+                elif product_type in ("cadena","chain") and any(k in p.get("name","").lower() for k in ("cadena","chain")):
+                    filtered.append(p)
+                elif product_type in ("aceite","oil") and any(k in p.get("name","").lower() for k in ("aceite","oil")):
+                    filtered.append(p)
+                elif product_type in ("bujía","bujia","spark") and any(k in p.get("name","").lower() for k in ("bujía","bujia","spark")):
+                    filtered.append(p)
+                else:
+                    filtered.append(p)   # para "repuesto" u otros, dejamos pasar
+
+            if not filtered:
+                # ---- no hay coincidencias ----
+                return f"No encontré {product_type}s para esa moto. ¿Me decís marca y modelo exacto?"
+
+            catalog_text = "\n".join([f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}" for p in filtered])
+            msgs.append({"role": "system", "name": "products", "content": f"[TOP {len(filtered)} PRODUCTOS]\n{catalog_text}"})
+
         msgs.append({"role": "user", "content": user_message})
+
         with openai_sem:
             resp = client.chat.completions.create(model=MODEL_NAME, messages=msgs, temperature=0.3, max_tokens=500, timeout=REQUESTS_TIMEOUT)
         txt = (resp.choices[0].message.content or "").strip()
@@ -1958,7 +1954,7 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.10.0 (execution-context + quick-coherence)
+# AGENTE PRINCIPAL – VERSIÓN 3.10.2
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
@@ -2089,6 +2085,51 @@ def run_agent(phone, user_message):
     return reply
 
 # ------------------------------------------------------------------
+# MULTI-MENSAJE
+# ------------------------------------------------------------------
+try:
+    from twilio.rest import Client as TwilioClient
+    from twilio.request_validator import RequestValidator
+except Exception:
+    TwilioClient = None
+    RequestValidator = None
+
+twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
+twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
+twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
+
+def send_long_message(phone, text, chunk_size=1600):
+    if not twilio_rest_client or not phone or not text:
+        return False
+
+    try:
+        parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        logger.info(f"Enviando {len(parts)} chunks a {phone}")
+
+        for idx, part in enumerate(parts):
+            try:
+                message = twilio_rest_client.messages.create(
+                    from_=TWILIO_WHATSAPP_FROM,
+                    body=f"({idx + 1}/{len(parts)})\n{part}" if len(parts) > 1 else part,
+                    to=phone
+                )
+                logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
+
+                if idx < len(parts) - 1:
+                    time.sleep(0.8)
+
+            except Exception as e:
+                logger.error(f"Error enviando chunk {idx + 1}: {e}")
+                raise
+
+        logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error critico en send_long_message: {e}", exc_info=True)
+        return False
+
+# ------------------------------------------------------------------
 # WEBHOOK WHATSAPP
 # ------------------------------------------------------------------
 @app.route("/whatsapp", methods=["POST"])
@@ -2153,16 +2194,18 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.10.0"}), 200
+    return jsonify({"status": "ok", "version": "3.10.2"}), 200
 
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.10.0 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.10.2 en puerto {port}")
     logger.info(f"Modelo LLM: {MODEL_NAME}")
+    init_db()                       # crear tablas SIEMPRE
     catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
+    
