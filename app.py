@@ -2196,7 +2196,20 @@ def whatsapp_webhook():
 def health():
     return jsonify({"status": "ok", "version": "3.10.2"}), 200
 
+
+# ------------------------------------------------------------------
+# ✅ Cargar índice y cache al arrancar (evita regenerar embeddings)
+catalog, index = load_faiss_index()
+if not (catalog and index):
+    catalog, index = get_catalog_and_index()
+else:
+    logger.info("✅ Índice FAISS encontrado en disco: %s productos", len(catalog))
+
+
+# ------------------------------------------------------------------
+# ✅ Fuerza creación de tablas al arrancar el contenedor
 init_db()
+
 
 # ------------------------------------------------------------------
 # MAIN
@@ -2204,10 +2217,6 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Iniciando Fran 3.10.2 en puerto {port}")
-    logger.info(f"Modelo LLM: {MODEL_NAME}")
-    init_db()                       # crear tablas SIEMPRE
-    catalog, _ = get_catalog_and_index()
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
-    
