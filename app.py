@@ -48,102 +48,11 @@ if not OPENAI_API_KEY:
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
-    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
+    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv "
 ).strip()
 
 EXCHANGE_API_URL = (
-    os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
-).strip()
-
-DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
-REQUESTS_TIMEOUT = int(os.environ.get("REQUESTS_TIMEOUT", "15"))
-TWILIO_WHATSAPP_FROM = os.environ.get("TWILIO_WHATSAPP_FROM", "")
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-DB_PATH = os.environ.get("DB_PATH", "tercom.db")
-FAISS_INDEX_PATH = os.environ.get("FAISS_INDEX_PATH", "catalog.faiss")
-FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
-
-_safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
-EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
-
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "40"))
-MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
-WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
-PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
-
-INSTANT_THRESHOLD = 15
-ASYNC_QUICK = 40
-ASYNC_MEDIUM = 80
-MAX_ITEMS = 150
-BULK_TIMEOUT = 240
-MAX_BULK_ITEMS = 150
-
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.10.0"}
-
-# ------------------------------------------------------------
-# TWILIO
-# ------------------------------------------------------------
-try:
-    from twilio.rest import Client as TwilioClient
-    from twilio.request_validator import RequestValidator
-except Exception:
-    TwilioClient = None
-    RequestValidator = None
-
-twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
-twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
-twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-cart_lock = Lock()
-exchange_lock = Lock()
-bulk_queue = Queue()
-
-openai_sem = Semaphore(3)
-
-exchange_cache = {"rate": None, "timestamp": None}
-EXCHANGE_CACHE_TTL = 3600
-
-user_requests = defaultdict(list)
-RATE_LIMIT = 20
-RATE_WINDOW = 60
-
-message_dedup_cache = defaultdict(list)
-DEDUP_WINDOW = 5
-
-_catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
-_catalog_lock = Lock()
-
-_embeddings_cache_lock = Lock()
-
-# ------------------------------------------------------------
-# LOGGER
-# ------------------------------------------------------------
-logger = logging.getLogger("fran310")
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
-
-logger.info("✅ Imports completados")
-
-# ------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------
-OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
-
-MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
-CATALOG_URL = (
-    os.environ.get("CATALOG_URL") or
-    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
-).strip()
-
-EXCHANGE_API_URL = (
-    os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
+    os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial "
 ).strip()
 
 DEFAULT_EXCHANGE = Decimal(os.environ.get("DEFAULT_EXCHANGE", "1600.0"))
@@ -276,6 +185,18 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
             return True
     message_dedup_cache[phone].append((message, now))
     return False
+
+def normalize_search_query(query):
+    return strip_accents(query)
+
+def detect_category_filter(query):
+    if not query:
+        return None
+    q = query.lower()
+    for cat, kws in CATEGORY_KEYWORDS.items():
+        if any(k in q for k in kws):
+            return cat
+    return None
 
 # ------------------------------------------------------------------
 # DATABASE – SQLITE RESILIENTE
@@ -465,510 +386,6 @@ def get_pending_action(phone):
 
 def clear_pending_action(phone):
     if not phone: return
-    try:
-        with get_db_connection() as conn:
-            conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
-    except Exception as e:
-        logger.error(f"Error limpiando pending_action: {e}")
-
-# ------------------------------------------------------------------
-# ANALYTICS
-# ------------------------------------------------------------------
-def log_interaction(phone, message, intent, products_count=0):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO interactions (phone, message, intent_detected, products_count, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (phone, message[:200], intent, products_count, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error logging interaction: {e}")
-
-def log_performance(phone, intent, duration, results_count):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO performance_metrics (phone, intent, duration_ms, results_count, timestamp) VALUES (?, ?, ?, ?, ?)",
-                (phone, intent, int(duration * 1000), results_count, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error logging metrics: {e}")
-
-# ------------------------------------------------------------------
-# TIPO DE CAMBIO
-# ------------------------------------------------------------------
-def get_exchange_rate():
-    with exchange_lock:
-        now = datetime.now().timestamp()
-
-        if exchange_cache["rate"] and exchange_cache["timestamp"]:
-            age = now - exchange_cache["timestamp"]
-            if age < EXCHANGE_CACHE_TTL:
-                return exchange_cache["rate"]
-
-        try:
-            res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
-            res.raise_for_status()
-            venta = res.json().get("venta", None)
-            rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
-            exchange_cache["rate"] = rate
-            exchange_cache["timestamp"] = now
-            return rate
-        except Exception as e:
-            logger.warning(f"Fallo tasa cambio: {e}")
-            if exchange_cache["rate"] is None:
-                exchange_cache["rate"] = DEFAULT_EXCHANGE
-            return exchange_cache["rate"]
-
-# ------------------------------------------------------------------
-# RATE LIMIT
-# ------------------------------------------------------------------
-def rate_limit_check(phone):
-    if not phone:
-        return True
-    try:
-        now = datetime.now().timestamp()
-        user_requests[phone] = [t for t in user_requests[phone] if now - t < RATE_WINDOW]
-        if len(user_requests[phone]) >= RATE_LIMIT:
-            return False
-        user_requests[phone].append(now)
-        return True
-    except Exception as e:
-        logger.error(f"Error en rate_limit_check: {e}")
-        return True
-
-# ------------------------------------------------------------------
-# PERSISTENCIA
-# ------------------------------------------------------------------
-def save_message(phone, msg, role):
-    if not phone or not msg:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO conversations VALUES (?, ?, ?, ?)",
-                (phone, msg, role, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error guardando mensaje: {e}")
-
-def get_history_since(phone, days=3, limit=20):
-    if not phone:
-        return []
-    try:
-        since = (datetime.now() - timedelta(days=days)).isoformat()
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT message, role, timestamp FROM conversations "
-                "WHERE phone = ? AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
-                (phone, since, limit)
-            )
-            rows = cur.fetchall()
-            return [{"role": r[1], "content": r[0], "timestamp": r[2]} for r in rows]
-    except Exception as e:
-        logger.error(f"Error leyendo historial: {e}")
-        return []
-
-def save_to_search_history(phone, products, query):
-    if not phone or not products:
-        return
-    try:
-        serializable = [
-            {
-                "code": p.get("code", ""),
-                "name": p.get("name", ""),
-                "price_ars": float(p.get("price_ars", 0)),
-                "price_usd": float(p.get("price_usd", 0)),
-                "qty": int(p.get("qty", 1))
-            }
-            for p in products
-        ]
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO search_history (phone, products_json, query, timestamp) VALUES (?, ?, ?, ?)",
-                (phone, json.dumps(serializable, ensure_ascii=False), query or "", datetime.now().isoformat())
-            )
-
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT id FROM search_history WHERE phone=? ORDER BY timestamp DESC LIMIT -1 OFFSET 5",
-                (phone,)
-            )
-            old_ids = [r[0] for r in cur.fetchall()]
-            if old_ids:
-                placeholders = ",".join("?" * len(old_ids))
-                conn.execute(f"DELETE FROM search_history WHERE id IN ({placeholders})", old_ids)
-    except Exception as e:
-        logger.error(f"Error guardando search_history: {e}")
-
-def get_search_history(phone, limit=5):
-    if not phone:
-        return []
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT products_json, query, timestamp FROM search_history "
-                "WHERE phone=? ORDER BY timestamp DESC LIMIT ?",
-                (phone, limit)
-            )
-            rows = cur.fetchall()
-            return [{"products": json.loads(r[0]), "query": r[1], "timestamp": r[2]} for r in rows]
-    except Exception as e:
-        logger.error(f"Error leyendo search_history: {e}")
-        return []
-
-def save_last_search(phone, products, query):
-    if not phone or not products:
-        return
-    meta = {
-        "products": products,
-        "query": query,
-        "timestamp": datetime.now().isoformat(),
-        "summary": f"{len(products)} productos",
-        "top_category": max(set(p.get("category", "") for p in products), key=lambda c: sum(1 for p in products if p.get("category") == c), default=""),
-        "total_value": sum(float(p.get("price_ars", 0)) for p in products)
-    }
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO last_search (phone, products_json, query, timestamp, metadata)
-                VALUES (?,?,?,?,?)
-                ON CONFLICT(phone) DO UPDATE SET
-                  products_json=excluded.products_json,
-                  query=excluded.query,
-                  timestamp=excluded.timestamp,
-                  metadata=excluded.metadata""",
-                (phone, json.dumps(meta["products"], ensure_ascii=False), query, meta["timestamp"], json.dumps(meta, ensure_ascii=False))
-            )
-    except Exception as e:
-        logger.error(f"save_last_search error: {e}")
-
-def get_last_search(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT products_json, query, metadata FROM last_search WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"products": json.loads(row[0]), "query": row[1], "metadata": json.loads(row[2]) if row[2] else {}}
-    except Exception as e:
-        logger.error(f"get_last_search error: {e}")
-        return None
-
-def update_session_summary(phone, products, brands, intent):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT message_count FROM session_summary WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            count = (row[0] if row else 0) + 1
-            conn.execute(
-                """INSERT INTO session_summary
-                (phone, products_mentioned, brands_mentioned, last_intent, message_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                products_mentioned=excluded.products_mentioned,
-                brands_mentioned=excluded.brands_mentioned,
-                last_intent=excluded.last_intent,
-                message_count=excluded.message_count,
-                updated_at=excluded.updated_at""",
-                (phone, json.dumps(products), json.dumps(brands), intent, count, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error actualizando session_summary: {e}")
-
-def get_session_summary(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT products_mentioned, brands_mentioned, last_intent, message_count "
-                "FROM session_summary WHERE phone=?",
-                (phone,)
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "products": json.loads(row[0]) if row[0] else [],
-                "brands": json.loads(row[1]) if row[1] else [],
-                "intent": row[2],
-                "count": row[3]
-            }
-    except Exception as e:
-        logger.error(f"Error leyendo session_summary: {e}")
-        return None
-
-def save_customer_data(phone, name=None, address=None, notes=None):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT name, address, notes FROM customer_data WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            now = datetime.now().isoformat()
-
-            if row:
-                new_name = name if name else row[0]
-                new_address = address if address else row[1]
-                new_notes = notes if notes else row[2]
-                conn.execute(
-                    "UPDATE customer_data SET name=?, address=?, notes=?, updated_at=? WHERE phone=?",
-                    (new_name, new_address, new_notes, now, phone)
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO customer_data (phone, name, address, notes, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (phone, name or "", address or "", notes or "", now, now)
-                )
-    except Exception as e:
-        logger.error(f"Error guardando customer_data: {e}")
-
-def get_customer_data(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT name, address, notes FROM customer_data WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"name": row[0], "address": row[1], "notes": row[2]}
-    except Exception as e:
-        logger.error(f"Error leyendo customer_data: {e}")
-        return None
-
-def create_order(phone, customer_name, customer_address, items, total_ars):
-    if not phone:
-        return None
-    try:
-        real_total, _ = cart_totals(phone)
-        if abs(Decimal(total_ars) - real_total) > Decimal("0.01"):
-            raise ValueError("Total manipulado")
-
-        order_id = f"ORD-{int(time.time()*10)}"
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO orders
-                (order_id, phone, customer_name, customer_address, items_json, total_ars, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (order_id, phone, customer_name, customer_address, json.dumps(items), total_ars, "confirmed", datetime.now().isoformat())
-            )
-            conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-        return order_id
-    except Exception as e:
-        logger.error(f"Error creando orden: {e}")
-        return None
-
-# ------------------------------------------------------------------
-# CARRITO – TTL 7 DÍAS (168 h)
-# ------------------------------------------------------------------
-@contextmanager
-def get_db_connection():
-    conn = None
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo crear dir DB: {e}")
-
-    for attempt in range(3):
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            yield conn
-            conn.commit()
-            return
-        except sqlite3.OperationalError as e:
-            if conn:
-                conn.close()
-                conn = None
-            if "locked" in str(e) and attempt < 2:
-                time.sleep(0.25 * (attempt + 1))
-                continue
-            logger.error(f"DB error: {e}")
-            raise
-        except Exception as e:
-            if conn:
-                conn.close()
-            logger.error(f"DB error: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
-
-def init_db():
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        try:
-            c.execute("PRAGMA journal_mode=WAL;")
-        except Exception as e:
-            logger.warning(f"No se pudo activar WAL: {e}")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone TEXT, message TEXT, role TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone_timestamp ON conversations(phone, timestamp DESC)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS carts (
-                phone TEXT, code TEXT, quantity INTEGER, name TEXT,
-                price_ars TEXT, price_usd TEXT, created_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS user_state (
-                phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT,
-                last_price_ars TEXT, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS search_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, products_json TEXT, query TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone_timestamp ON search_history(phone, timestamp DESC)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS last_search (
-                phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT, metadata TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS session_summary (
-                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned TEXT,
-                last_intent TEXT, message_count INTEGER DEFAULT 0, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS customer_data (
-                phone TEXT PRIMARY KEY, name TEXT, address TEXT, notes TEXT,
-                created_at TEXT, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
-                customer_address TEXT, items_json TEXT, total_ars TEXT,
-                status TEXT, created_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS bulk_jobs (
-                job_id TEXT PRIMARY KEY, phone TEXT, raw_list TEXT,
-                total_items INTEGER, processed_items INTEGER, found_items INTEGER,
-                results_json TEXT, status TEXT, created_at TEXT, completed_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS interactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, message TEXT, intent_detected TEXT,
-                products_count INTEGER, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone_timestamp ON interactions(phone, timestamp DESC)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, intent TEXT, duration_ms INTEGER,
-                results_count INTEGER, timestamp TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS pending_actions (
-                phone TEXT PRIMARY KEY,
-                action_type TEXT,
-                action_data TEXT,
-                context TEXT,
-                created_at TEXT,
-                expires_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
-
-def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
-    if not phone:
-        return
-    try:
-        items = cart_get(phone)
-        cart_snapshot = json.dumps(sorted([(i[0], i[1]) for i in items]))
-        action_data["cart_hash"] = hashlib.md5(cart_snapshot.encode()).hexdigest()
-
-        expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO pending_actions (phone, action_type, action_data, context, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                action_type=excluded.action_type,
-                action_data=excluded.action_data,
-                context=excluded.context,
-                created_at=excluded.created_at,
-                expires_at=excluded.expires_at""",
-                (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
-            )
-    except Exception as e:
-        logger.error(f"Error guardando pending_action: {e}")
-
-def get_pending_action(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT action_type, action_data, context, created_at FROM pending_actions "
-                "WHERE phone=? AND expires_at > ?",
-                (phone, datetime.now().isoformat())
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "action_type": row[0],
-                "action_data": json.loads(row[1]) if row[1] else {},
-                "context": row[2],
-                "created_at": row[3]
-            }
-    except Exception as e:
-        logger.error(f"Error leyendo pending_action: {e}")
-        return None
-
-def clear_pending_action(phone):
-    if not phone:
-        return
     try:
         with get_db_connection() as conn:
             conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
@@ -1768,102 +1185,6 @@ def hybrid_search(query, limit=60):
 logger.info("✅ hybrid_search definida correctamente")
 
 # ------------------------------------------------------------------
-# CARRITO – VALIDA EXISTENCIA
-# ------------------------------------------------------------------
-def cart_add(phone, code, qty, name, price_ars, price_usd):
-    if not phone or not code:
-        return False
-    try:
-        qty = max(1, min(int(qty or 1), 1000))
-        price_ars = price_ars.quantize(Decimal("0.01"))
-        price_usd = price_usd.quantize(Decimal("0.01"))
-
-        catalog, _ = get_catalog_and_index()
-        prod = next((p for p in catalog if p["code"] == code), None)
-        if not prod:
-            logger.warning(f"Producto {code} no existe en catalogo")
-            return False
-
-        with cart_lock:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=?", (phone, code))
-                row = cur.fetchone()
-                now = datetime.now().isoformat()
-
-                if row:
-                    new_qty = int(row[0]) + qty
-                    cur.execute(
-                        "UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?",
-                        (new_qty, now, phone, code)
-                    )
-                else:
-                    cur.execute(
-                        """INSERT INTO carts (phone, code, quantity, name, price_ars, price_usd, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (phone, code, qty, name, str(price_ars), str(price_usd), now)
-                    )
-        return True
-    except Exception as e:
-        logger.error(f"Error en cart_add: {e}")
-        return False
-
-def cart_get(phone, max_age_hours=168):  # 🔥 7 días
-    if not phone:
-        return []
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
-            cur.execute("DELETE FROM carts WHERE phone=? AND created_at < ?", (phone, cutoff))
-            cur.execute("SELECT code, quantity, name, price_ars FROM carts WHERE phone=?", (phone,))
-            rows = cur.fetchall()
-            out = []
-            for r in rows:
-                code, q, name, price_str = r[0], int(r[1]), r[2], r[3]
-                price_dec = to_decimal_money(price_str)
-                out.append((code, q, name, price_dec))
-            return out
-    except Exception as e:
-        logger.error(f"Error en cart_get: {e}")
-        return []
-
-def cart_update_qty(phone, code, qty):
-    if not phone or not code:
-        return
-    try:
-        qty = max(0, min(int(qty or 0), 999999))
-        with cart_lock:
-            with get_db_connection() as conn:
-                if qty == 0:
-                    conn.execute("DELETE FROM carts WHERE phone=? AND code=?", (phone, code))
-                else:
-                    now = datetime.now().isoformat()
-                    conn.execute(
-                        "UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?",
-                        (qty, now, phone, code)
-                    )
-    except Exception as e:
-        logger.error(f"Error en cart_update_qty: {e}")
-
-def cart_clear(phone):
-    if not phone:
-        return
-    try:
-        with cart_lock:
-            with get_db_connection() as conn:
-                conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-    except Exception as e:
-        logger.error(f"Error en cart_clear: {e}")
-
-def cart_totals(phone):
-    items = cart_get(phone)
-    total = sum(q * price for _, q, __, price in items)
-    discount = min(Decimal("0.05") * total, Decimal("500000")) if total > Decimal("10000000") else Decimal("0.00")
-    final = (total - discount).quantize(Decimal("0.01"))
-    return final, discount.quantize(Decimal("0.01"))
-
-# ------------------------------------------------------------------
 # LISTAS MASIVAS
 # ------------------------------------------------------------------
 def parse_bulk_list(text):
@@ -1985,6 +1306,7 @@ def process_bulk_async(job):
 
             matches = hybrid_search(product_name, limit=3)
             if matches:
+                best = matches[0]
                 best = matches[0]
                 price_ars = to_decimal_money(best["price_ars"])
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
@@ -2202,50 +1524,6 @@ def detect_intent_llm(msg):
         return {"intent": "desconocido", "query": ""}
 
 # ------------------------------------------------------------------
-# LAST SEARCH – CON METADATA
-# ------------------------------------------------------------------
-def save_last_search(phone, products, query):
-    if not phone or not products:
-        return
-    meta = {
-        "products": products,
-        "query": query,
-        "timestamp": datetime.now().isoformat(),
-        "summary": f"{len(products)} productos",
-        "top_category": max(set(p.get("category", "") for p in products), key=lambda c: sum(1 for p in products if p.get("category") == c), default=""),
-        "total_value": sum(float(p.get("price_ars", 0)) for p in products)
-    }
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO last_search (phone, products_json, query, timestamp, metadata)
-                VALUES (?,?,?,?,?)
-                ON CONFLICT(phone) DO UPDATE SET
-                  products_json=excluded.products_json,
-                  query=excluded.query,
-                  timestamp=excluded.timestamp,
-                  metadata=excluded.metadata""",
-                (phone, json.dumps(meta["products"], ensure_ascii=False), query, meta["timestamp"], json.dumps(meta, ensure_ascii=False))
-            )
-    except Exception as e:
-        logger.error(f"save_last_search error: {e}")
-
-def get_last_search(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT products_json, query, metadata FROM last_search WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"products": json.loads(row[0]), "query": row[1], "metadata": json.loads(row[2]) if row[2] else {}}
-    except Exception as e:
-        logger.error(f"get_last_search error: {e}")
-        return None
-
-# ------------------------------------------------------------------
 # IMPLÍCITO – “3 de cada una”
 # ------------------------------------------------------------------
 def detect_implicit_cart_action(message, phone):
@@ -2270,6 +1548,24 @@ def detect_implicit_cart_action(message, phone):
 # ------------------------------------------------------------------
 # LLM REPLY – EXECUTION CONTEXT
 # ------------------------------------------------------------------
+BUSINESS_CONTEXT = """
+TERCOM - Mayorista Motopartes Argentina
+
+ENVIOS:
+- CABA: 24-48hs
+- Interior: 3-5 dias
+- Gratis CABA >$100.000
+
+PAGOS:
+- Transferencia
+- Efectivo (retiro local)
+- Cheque (clientes habituales)
+
+HORARIOS:
+- Lun-Vie: 9-18hs
+- Sab: 9-13hs
+"""
+
 SMART_SYSTEM_PROMPT_V2 = f"""
 Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
@@ -2456,24 +1752,6 @@ def sanitize_llm_response(response_text, allowed_products):
 # ------------------------------------------------------------------
 # IA EMPÁTICA
 # ------------------------------------------------------------------
-BUSINESS_CONTEXT = """
-TERCOM - Mayorista Motopartes Argentina
-
-ENVIOS:
-- CABA: 24-48hs
-- Interior: 3-5 dias
-- Gratis CABA >$100.000
-
-PAGOS:
-- Transferencia
-- Efectivo (retiro local)
-- Cheque (clientes habituales)
-
-HORARIOS:
-- Lun-Vie: 9-18hs
-- Sab: 9-13hs
-"""
-
 SMART_SYSTEM_PROMPT = f"""
 Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
@@ -2811,85 +2089,6 @@ def run_agent(phone, user_message):
     return reply
 
 # ------------------------------------------------------------------
-# FORMATO RESULTADOS
-# ------------------------------------------------------------------
-CATEGORY_EMOJIS = {
-    "aceite": "🛢️",
-    "filtro": "🔧",
-    "bateria": "🔋",
-    "neumatico": "🛞",
-    "cadena": "⛓️",
-    "bujia": "⚡",
-    "pastilla": "🔴",
-    "amortiguador": "🔩",
-    "kit": "📦",
-}
-
-def format_search_results(products):
-    lines = []
-    for i, p in enumerate(products, 1):
-        emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in p.get("name", "").lower()), "📦")
-        price = format_price(p.get("price_ars", 0))
-        name = p.get("name", "").strip()
-        code = p.get("code", "")
-        brand = p.get("brand", "")
-        model = p.get("model", "")
-        extra = []
-        if brand:
-            extra.append(brand)
-        if model:
-            extra.append(model)
-        extra_txt = f" - {' / '.join(extra)}" if extra else ""
-
-        lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   {price}")
-    return "\n\n".join(lines)
-
-# ------------------------------------------------------------------
-# MULTI-MENSAJE
-# ------------------------------------------------------------------
-try:
-    from twilio.rest import Client as TwilioClient
-    from twilio.request_validator import RequestValidator
-except Exception:
-    TwilioClient = None
-    RequestValidator = None
-
-twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
-twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
-twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
-
-def send_long_message(phone, text, chunk_size=1200):
-    if not twilio_rest_client or not phone or not text:
-        return False
-
-    try:
-        parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        logger.info(f"Enviando {len(parts)} chunks a {phone}")
-
-        for idx, part in enumerate(parts):
-            try:
-                message = twilio_rest_client.messages.create(
-                    from_=TWILIO_WHATSAPP_FROM,
-                    body=f"({idx + 1}/{len(parts)})\n{part}" if len(parts) > 1 else part,
-                    to=phone
-                )
-                logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
-
-                if idx < len(parts) - 1:
-                    time.sleep(0.8)
-
-            except Exception as e:
-                logger.error(f"Error enviando chunk {idx + 1}: {e}")
-                raise
-
-        logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error critico en send_long_message: {e}", exc_info=True)
-        return False
-
-# ------------------------------------------------------------------
 # WEBHOOK WHATSAPP
 # ------------------------------------------------------------------
 @app.route("/whatsapp", methods=["POST"])
@@ -2912,7 +2111,7 @@ def whatsapp_webhook():
 
         logger.info(f"Mensaje sanitizado: {message_body}")
 
-        if is_duplicate_message(from_end, message_body):
+        if is_duplicate_message(from_number, message_body):
             logger.info(f"Mensaje duplicado ignorado de {from_number}")
             return Response("<Response></Response>", mimetype="text/xml")
 
