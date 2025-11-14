@@ -1,0 +1,18 @@
+{
+  "horarios": "Lunes a Viernes de 8:00 a 16:30 hs",
+  "direccion": "Av. Caseros 856, B1672 Villa Bernardo Monteagudo, Provincia de Buenos Aires",
+  "telefono": "011 4712-5151",
+  "cbu": "0000003100056178901234 (alias: TERCOM.PY)",
+  "descuento_umbral_ars": 10000000,
+  "descuento_porcentaje": 5,
+  "tc_blue_silencioso": true,
+  "proforma_prefijo": "FRA",
+  "envios": {
+    "texto": "24 horas a 1 semana – coordinar con administración al 011 4712-5151",
+    "zonas": [
+      {"nombre": "CABA", "tiempo": "24-48 hs", "coord": "administración"},
+      {"nombre": "Gran Bs As", "tiempo": "48-72 hs", "coord": "administración"},
+      {"nombre": "Interior", "tiempo": "3-7 días", "coord": "administración"}
+    ]
+  }
+}
