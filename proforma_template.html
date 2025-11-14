@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Proforma TERCOM</title>
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:40px;color:#333}
+    h1{font-size:24px;margin-bottom:0}h2{font-size:18px;margin-top:0}
+    table{width:100%;border-collapse:collapse;margin-top:20px}
+    th,td{border:1px solid #ccc;padding:8px;text-align:left}
+    th{background:#f5f5f5}.total{font-weight:bold;font-size:18px}
+    .info{background:#fafafa;padding:10px;margin-bottom:20px}
+  </style>
+</head>
+<body>
+  <h1>Proforma {{ prefijo }}-{{ numero }}</h1>
+  <div class="info">
+    <p><strong>Cliente:</strong> {{ cliente_nombre }}</p>
+    <p><strong>Dirección:</strong> {{ cliente_direccion }}</p>
+    <p><strong>Teléfono:</strong> {{ cliente_telefono }}</p>
+    <p><strong>Fecha:</strong> {{ fecha }}</p>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Código</th>
+        <th>Producto</th>
+        <th>Cantidad</th>
+        <th>Precio c/u (sin IVA)</th>
+        <th>Subtotal</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td>{{ item.code }}</td>
+        <td>{{ item.name }}</td>
+        <td>{{ item.qty }}</td>
+        <td>$ {{ item.price_unit }}</td>
+        <td>$ {{ item.subtotal }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="total">Total sin IVA: $ {{ total_sin_iva }}</p>
+  {% if descuento > 0 %}
+  <p class="total">Descuento 5 % > $10M: -$ {{ descuento }}</p>
+  <p class="total">Total con descuento: $ {{ total_final }}</p>
+  {% endif %}
+
+  <div class="info">
+    <p><strong>Formas de pago:</strong> Transferencia a CBU {{ cbu }} (alias {{ alias_cbu }})</p>
+    <p><strong>Horarios de atención:</strong> {{ horarios }}</p>
+    <p><strong>Dirección de retiro:</strong> {{ direccion }}</p>
+    <p><strong>Envíos:</strong> {{ envios_texto }} – coordinar al {{ telefono }}</p>
+  </div>
+</body>
+</html>
