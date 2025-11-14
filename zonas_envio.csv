@@ -1,0 +1,9 @@
+codigo_postal,inicio,fin,precio_ars,nombre_zona
+1000,1999,1500,CABA
+1600,1699,1800,Gran Bs As
+1700,1799,2000,Gran Bs As
+1900,1999,2200,Gran Bs As
+2000,2999,2500,Interior
+3000,3999,3000,Interior
+4000,4999,3500,Interior
+5000,9999,4000,Interior
