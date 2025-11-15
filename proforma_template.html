@@ -5,15 +5,20 @@
   <title>Proforma TERCOM</title>
   <style>
     body{font-family:Arial,Helvetica,sans-serif;margin:40px;color:#333}
-    h1{font-size:24px;margin-bottom:0}h2{font-size:18px;margin-top:0}
+    h1{font-size:24px;margin-bottom:0}
+    h2{font-size:18px;margin-top:0}
     table{width:100%;border-collapse:collapse;margin-top:20px}
     th,td{border:1px solid #ccc;padding:8px;text-align:left}
-    th{background:#f5f5f5}.total{font-weight:bold;font-size:18px}
+    th{background:#f5f5f5}
+    .total{font-weight:bold;font-size:18px;margin-top:10px}
     .info{background:#fafafa;padding:10px;margin-bottom:20px}
   </style>
 </head>
+
 <body>
+
   <h1>Proforma {{ prefijo }}-{{ numero }}</h1>
+
   <div class="info">
     <p><strong>Cliente:</strong> {{ cliente_nombre }}</p>
     <p><strong>Dirección:</strong> {{ cliente_direccion }}</p>
@@ -31,6 +36,7 @@
         <th>Subtotal</th>
       </tr>
     </thead>
+
     <tbody>
       {% for item in items %}
       <tr>
@@ -45,9 +51,12 @@
   </table>
 
   <p class="total">Total sin IVA: $ {{ total_sin_iva }}</p>
+
   {% if descuento > 0 %}
-  <p class="total">Descuento 5 % > $10M: -$ {{ descuento }}</p>
-  <p class="total">Total con descuento: $ {{ total_final }}</p>
+    <p class="total">
+      Descuento 5% por compras mayores a $10.000.000: -$ {{ descuento }}
+    </p>
+    <p class="total">Total con descuento: $ {{ total_final }}</p>
   {% endif %}
 
   <div class="info">
@@ -56,5 +65,6 @@
     <p><strong>Dirección de retiro:</strong> {{ direccion }}</p>
     <p><strong>Envíos:</strong> {{ envios_texto }} – coordinar al {{ telefono }}</p>
   </div>
+
 </body>
 </html>
