@@ -2,40 +2,47 @@ base_model: mistralai/Mistral-7B-Instruct-v0.3
 model_type: MistralForCausalLM
 tokenizer_type: LlamaTokenizer
 is_llama_derived_model: true
+
 load_in_8bit: false
 load_in_4bit: false
-strict: false
-push_dataset_to_hub:
+
 dataset:
   - path: data/fran_100k.jsonl
     type: jsonl
     conversation_template: mistral
+
 val_set_size: 0.01
 output_dir: ./mistral-fran-lora
+
 sequence_len: 2048
 sample_packing: true
 pad_to_sequence_len: true
-wandb_project:
-wandb_watch:
-wandb_name:
-wandb_log_model:
+
+wandb_project: null
+wandb_watch: null
+wandb_name: null
+wandb_log_model: false
+
 gradient_accumulation_steps: 4
 micro_batch_size: 2
 gradient_checkpointing: true
-early_stopping_patience:
-resume_from_checkpoint:
+
 logging_steps: 100
 save_steps: 500
 eval_steps: 500
+
 num_epochs: 1
 learning_rate: 2e-4
-train_on_inputs: false
-group_by_length: false
-bf16: auto
-fp16: false
-tf32: false
 warmup_steps: 100
 logging_first_step: true
+
+train_on_inputs: true
+group_by_length: false
+
+bf16: false
+fp16: true
+tf32: true
+
 lora:
   r: 64
   alpha: 128
