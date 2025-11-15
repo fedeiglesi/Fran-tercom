@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-01_generate_dataset.py  →  versión 2.0  (TERCOM real)
+01_generate_dataset.py  →  versión 2.1  (TERCOM real)
 - Lee CSV real (precios, códigos, stock)
 - Lee tercom_data.json  (horarios, CBU, descuentos, envíos)
 - Lee zonas_envio.csv   (tarifas por CP)
@@ -30,17 +30,27 @@ def load_catalog():
     df = pd.read_csv(CSV_PATH)
     out = []
     for _, row in df.iterrows():
-        price = int(row.get("price_ars", 0))
-        if price == 0:
+        price_raw = row.get("price_ars", 0)
+
+        # Manejo robusto de precio
+        try:
+            price = float(price_raw)
+        except (TypeError, ValueError):
             continue
-        price = int(price * random.uniform(0.97, 1.03))  # ±3 %
+
+        if pd.isna(price) or price <= 0:
+            continue
+
+        # Variación ±3 %
+        price = int(price * random.uniform(0.97, 1.03))
+
         out.append({
-            "name": row.get("name", ""),
-            "code": row.get("code", ""),
+            "name": row.get("name", "") or "",
+            "code": row.get("code", "") or "",
             "price": price,
-            "brand": row.get("brand", ""),
-            "model": row.get("model", ""),
-            "vehicle_type": row.get("vehicle_type", ""),
+            "brand": row.get("brand", "") or "",
+            "model": row.get("model", "") or "",
+            "vehicle_type": row.get("vehicle_type", "") or "",
         })
     return out
 
@@ -65,12 +75,14 @@ def convert_usd_to_ars(usd):
 
 def descuento_aplica(total):
     if total > TERCOM_DATA["descuento_umbral_ars"]:
-        return TERCOM_DATA["descuento_porcentaje"], int(total * TERCOM_DATA["descuento_porcentaje"] / 100)
+        porc = TERCOM_DATA["descuento_porcentaje"]
+        return porc, int(total * porc / 100)
     return 0, 0
 
 def tarifa_envio(cp):
     cp_int = int(cp)
     for z in ZONAS_ENVIO:
+        # Suponemos que inicio/fin son numéricos
         if z["inicio"] <= cp_int <= z["fin"]:
             return z["precio_ars"], z["nombre_zona"]
     return 3_000, "Interior"  # default
@@ -88,12 +100,12 @@ def numero_proforma():
         f.write(str(n))
     return f"{TERCOM_DATA['proforma_prefijo']}-{n}"
 
-def render_proforma_html(cliente, items, total_sin_iva, descuento, total_final):
+def render_proforma_html(cliente, items, total_sin_iva, descuento, total_final, numero_pf):
     env = jinja2.Environment(loader=jinja2.FileSystemLoader('.'))
     template = env.get_template('proforma_template.html')
     html_out = template.render(
         prefijo=TERCOM_DATA["proforma_prefijo"],
-        numero=numero_proforma(),
+        numero=numero_pf,
         cliente_nombre=cliente["nombre"],
         cliente_direccion=cliente["direccion"],
         cliente_telefono=cliente["telefono"],
@@ -159,6 +171,26 @@ def dialog_urgencia():
         ]
     }
 
+def dialog_cambio_producto():
+    p1 = random.choice(CATALOG)
+    p2 = random.choice(CATALOG)
+    while p2["code"] == p1["code"]:
+        p2 = random.choice(CATALOG)
+
+    qty = random.choice([5, 10, 20])
+    total1 = qty * p1["price"]
+    total2 = qty * p2["price"]
+    return {
+        "conversations": [
+            {"from": "human", "value": f"Dame {qty} de {p1['name']} (cod {p1['code']})"},
+            {"from": "gpt", "value": f"Listo, {qty}× {p1['name']} = ${total1:,}. ¿Confirmamos?"},
+            {"from": "human", "value": f"Pará, mejor cambiame por {p2['name']} (cod {p2['code']})"},
+            {"from": "gpt", "value": f"Perfecto, cambio a {qty}× {p2['name']} = ${total2:,}. ¿Te sirve así?"},
+            {"from": "human", "value": "Sí, dejalo así"},
+            {"from": "gpt", "value": "✅ Pedido actualizado con el producto nuevo."},
+        ]
+    }
+
 def dialog_consulta_tecnica():
     p = random.choice(CATALOG)
     medida = f"{random.randint(100, 200)} mm"
@@ -204,7 +236,11 @@ def dialog_sin_stock():
 def dialog_proforma_completa():
     p1 = random.choice(CATALOG)
     p2 = random.choice(CATALOG)
-    cliente = {"nombre": "Juan Pérez", "direccion": "Calle Falsa 123, CP 7600", "telefono": "011 5555-5555"}
+    cliente = {
+        "nombre": "Juan Pérez",
+        "direccion": "Calle Falsa 123, CP 7600",
+        "telefono": "011 5555-5555",
+    }
     qty1, qty2 = random.choice([5, 10]), random.choice([3, 7])
     sub1 = qty1 * p1["price"]
     sub2 = qty2 * p2["price"]
@@ -217,14 +253,16 @@ def dialog_proforma_completa():
         {"code": p2["code"], "name": p2["name"], "qty": qty2, "price_unit": p2["price"], "subtotal": sub2},
     ]
 
-    html = render_proforma_html(cliente, items, total_sin_iva, desc_ars, total_final)
+    # Generamos un solo número de proforma y lo usamos en ambos lados
+    numero_pf = numero_proforma()
+    html = render_proforma_html(cliente, items, total_sin_iva, desc_ars, total_final, numero_pf)
 
     return {
         "conversations": [
             {"from": "human", "value": f"Necesito una proforma con {qty1} de {p1['name']} y {qty2} de {p2['name']}"},
             {"from": "gpt", "value": f"Te preparo la proforma con los productos solicitados. Total sin IVA: ${total_sin_iva:,}. ¿Te va?"},
             {"from": "human", "value": "Sí, enviamela"},
-            {"from": "gpt", "value": f"✅ Proforma generada: {numero_proforma()}. Te la adjunto en PDF. Coordinás pago y envío al 011 4712-5151."},
+            {"from": "gpt", "value": f"✅ Proforma generada: {numero_pf}. Te la adjunto en PDF. Coordinás pago y envío al 011 4712-5151."},
         ],
         "extra": {"proforma_html": html}   # no se manda al modelo, solo log
     }
@@ -262,6 +300,7 @@ def main():
         if (i + 1) % 5_000 == 0:
             print(f"  {i + 1:,} generados")
 
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         for dialog in existing:
             f.write(json.dumps(dialog, ensure_ascii=False) + "\n")
