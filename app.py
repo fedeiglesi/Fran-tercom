@@ -50,8 +50,6 @@ if not OPENAI_API_KEY:
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
-    "CATALOG_URL = (
-    os.environ.get("CATALOG_URL") or
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.11/catalogo_limpio_final_v4.csv"
 ).strip()
 
@@ -866,13 +864,22 @@ def load_faiss_index():
 def generate_embeddings_with_cache(texts):
     with _embeddings_cache_lock:
         cache = {}
+        # ========== FIX 1: CACHE CORRUPTO RESILIENTE ==========
         if os.path.exists(EMBEDDINGS_CACHE_PATH):
             try:
                 with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
                     cache = pickle.load(f)
                     logger.info(f"Cache de embeddings cargado: {len(cache)} textos")
             except Exception as e:
-                logger.warning(f"Error cargando cache de embeddings: {e}")
+                logger.error(f"Cache corrupto, recreando desde cero: {e}")
+                cache = {}
+                # Borrar archivo corrupto
+                try:
+                    os.remove(EMBEDDINGS_CACHE_PATH)
+                    logger.info("Cache corrupto eliminado")
+                except Exception as e2:
+                    logger.warning(f"No se pudo borrar cache corrupto: {e2}")
+        # ========== FIN FIX 1 ==========
 
         texts_to_embed = []
         text_indices = []
@@ -908,8 +915,10 @@ def generate_embeddings_with_cache(texts):
                         break
                     except RateLimitError as e:
                         if retry < max_retries - 1:
-                            wait_time = (2 ** retry) * random.uniform(1, 2)
-                            logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s...")
+                            # ========== FIX 2: BACKOFF EXPONENCIAL MÁS AGRESIVO ==========
+                            wait_time = min((2 ** retry) * random.uniform(2, 5), 60)  # Tope de 60s
+                            logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s... (intento {retry+1}/{max_retries})")
+                            # ========== FIN FIX 2 ==========
                             time.sleep(wait_time)
                         else:
                             logger.error(f"RateLimitError persistente: {e}")
@@ -1405,7 +1414,7 @@ def detect_intent_llm(msg):
         return {"intent": "desconocido", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
-# IMPLÍCITO – “3 de cada una”
+# IMPLÍCITO – "3 de cada una"
 # ------------------------------------------------------------------
 def detect_implicit_cart_action(message, phone):
     patterns = {
@@ -1461,8 +1470,8 @@ Reglas:
 - Cerrá con pregunta de venta
 
 === VALIDACIÓN OBLIGATORIA ===
-Antes de listar, descartá cualquier producto que NO sea {{product_type}}.
-Si ninguno calza, decí: “No tengo {{product_type}} para {{modelo}}, pero tengo estas alternativas:”
+Antes de listar, descartá cualquier producto que NO sea {{{{product_type}}}}.
+Si ninguno calza, decí: "No tengo {{{{product_type}}}} para {{{{modelo}}}}, pero tengo estas alternativas:"
 y mostrá los 3 más cercanos.
 
 {BUSINESS_CONTEXT}
@@ -1650,6 +1659,7 @@ def sanitize_llm_response(response_text, allowed_products):
     if not response_text:
         return "No pude generar una respuesta. ¿Me repetís?"
 
+    # Validación de códigos (ya existe)
     allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
     mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
     hallucinated = mentioned_codes - allowed_codes
@@ -1668,6 +1678,45 @@ def sanitize_llm_response(response_text, allowed_products):
         else:
             return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
 
+    # ========== FIX 3: VALIDACIÓN DE NOMBRES ==========
+    # Extraer nombres mencionados entre comillas o en formatos específicos
+    mentioned_names = []
+    
+    # Nombres entre comillas
+    quoted_names = re.findall(r'"([^"]{3,})"', response_text)
+    mentioned_names.extend(quoted_names)
+    
+    # Nombres después de "tengo", "tenemos", "hay" (común en respuestas)
+    pattern_names = re.findall(r'(?:tengo|tenemos|hay|encontré)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-Z][a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{5,40})(?:\s+(?:para|de|en|cod|código)|\.|,|$)', response_text)
+    mentioned_names.extend(pattern_names)
+    
+    if mentioned_names and allowed_products:
+        allowed_names_normalized = {normalize_search_query(p.get("name", "")) for p in allowed_products if p.get("name")}
+        
+        hallucinated_names = []
+        for name in mentioned_names:
+            name_norm = normalize_search_query(name)
+            # Verificar si el nombre mencionado NO está en los productos permitidos
+            # Usamos similitud parcial (al menos 60% de coincidencia)
+            if not any(
+                fuzz.partial_ratio(name_norm, allowed_name) > 60 
+                for allowed_name in allowed_names_normalized
+            ):
+                hallucinated_names.append(name)
+        
+        if hallucinated_names:
+            logger.warning(f"LLM mencionó productos no permitidos: {hallucinated_names}")
+            product_list = "\n".join([
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                for p in allowed_products[:5]
+            ])
+            return (
+                f"Dale, te muestro lo que tengo disponible:\n\n{product_list}\n\n"
+                "¿Cuál te sirve?"
+            )
+    # ========== FIN VALIDACIÓN DE NOMBRES ==========
+
+    # Resto de la función (límite de líneas, etc.) sigue igual
     lines = [l.strip() for l in response_text.split('\n') if l.strip()]
     if len(lines) > 6:
         logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
@@ -1835,7 +1884,7 @@ def run_agent(phone, user_message):
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
 
-    # 4. Detectar “3 de cada una” implícito
+    # 4. Detectar "3 de cada una" implícito
     implicit = detect_implicit_cart_action(user_message, phone)
     if implicit:
         products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
@@ -1906,17 +1955,6 @@ def run_agent(phone, user_message):
 # ------------------------------------------------------------------
 # MULTI-MENSAJE
 # ------------------------------------------------------------------
-try:
-    from twilio.rest import Client as TwilioClient
-    from twilio.request_validator import RequestValidator
-except Exception:
-    TwilioClient = None
-    RequestValidator = None
-
-twilio_rest_available = bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient)
-twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twilio_rest_available else None
-twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
-
 def send_long_message(phone, text, chunk_size=1600):
     if not twilio_rest_client or not phone or not text:
         return False
@@ -2033,6 +2071,7 @@ init_db()
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info(f"Iniciando Fran 3.11.0 en puerto {port}")
