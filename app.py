@@ -1,5 +1,5 @@
 # =========================================================
-# Fran 3.11.0 – Bot Mayorista Inteligente
+# Fran 3.11.1 – Bot Mayorista Inteligente
 # =========================================================
 # - Contexto conversacional: hasta 128 k tokens (ventana deslizante)
 # - Búsqueda: filtro lexical → FAISS sobre sub-conjunto
@@ -81,7 +81,7 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.0"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.1"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -450,7 +450,12 @@ def get_exchange_rate():
                 return exchange_cache["rate"]
 
         try:
+            res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
+        except NameError:
+            # fallback si hay typo en REQUEST_HEADERS
             res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
+
+        try:
             res.raise_for_status()
             venta = res.json().get("venta", None)
             rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
@@ -574,7 +579,11 @@ def save_last_search(phone, products, query):
         "query": query,
         "timestamp": datetime.now().isoformat(),
         "summary": f"{len(products)} productos",
-        "top_category": max(set(p.get("category", "") for p in products), key=lambda c: sum(1 for p in products if p.get("category") == c), default=""),
+        "top_category": max(
+            set(p.get("category", "") for p in products),
+            key=lambda c: sum(1 for p in products if p.get("category") == c),
+            default=""
+        ),
         "total_value": sum(float(p.get("price_ars", 0)) for p in products)
     }
     try:
@@ -640,7 +649,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
         price_ars = price_ars.quantize(Decimal("0.01"))
         price_usd = price_usd.quantize(Decimal("0.01"))
 
-        catalog, _ = get_catalog_and_index()
+        catalog, _idx = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
         if prod is None:
             logger.warning(f"Producto {code} no existe en catalogo")
@@ -853,7 +862,8 @@ def load_faiss_index():
             with open(FAISS_MAPPING_PATH, "rb") as f:
                 catalog = pickle.load(f)
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
-            return index, catalog
+            # Orden consistente: (catalog, index)
+            return catalog, index
         else:
             logger.warning("FAISS no encontrado en disco, se construira de cero.")
             return None, None
@@ -891,7 +901,6 @@ def generate_embeddings_with_cache(texts):
 
         if texts_to_embed:
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
-            vectors = []
             batch = 256
             max_retries = 3
 
@@ -907,7 +916,6 @@ def generate_embeddings_with_cache(texts):
                                 timeout=REQUESTS_TIMEOUT
                             )
                         chunk_vectors = [d.embedding for d in resp.data]
-                        vectors.extend(chunk_vectors)
 
                         for text, vec in zip(chunk, chunk_vectors):
                             cache[text] = vec
@@ -973,9 +981,9 @@ def get_catalog_and_index():
         if _catalog_and_index_cache["catalog"] is not None:
             return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
 
-        index, catalog = load_faiss_index()
+        catalog, index = load_faiss_index()
 
-        if index and catalog:
+        if catalog and index:
             _catalog_and_index_cache["catalog"] = catalog
             _catalog_and_index_cache["index"] = index
             _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
@@ -1087,6 +1095,7 @@ def semantic_search_v2(query: str, top_k: int = 60) -> list:
     1) Filtra lexicalmente
     2) Embedde solo el sub-conjunto
     3) FAISS sobre ese sub-conjunto
+    Retorna lista de (producto, score)
     """
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
@@ -1173,16 +1182,16 @@ def process_bulk_sync(phone, raw_list):
     total_quoted = Decimal("0")
 
     for requested_qty, product_name in parsed_items:
-        matches = semantic_search_v2(product_name, limit=3)
+        matches = semantic_search_v2(product_name, top_k=3)
         if matches:
-            best = matches[0]
-            price_ars = to_decimal_money(best["price_ars"])
+            best, score = matches[0]
+            price_ars = to_decimal_money(best.get("price_ars", 0))
             subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
             total_quoted += subtotal
             results.append({
                 "requested": product_name,
-                "found": best["name"],
-                "code": best["code"],
+                "found": best.get("name", ""),
+                "code": best.get("code", ""),
                 "quantity": requested_qty,
                 "price_unit": float(price_ars),
                 "subtotal": float(subtotal)
@@ -1242,16 +1251,16 @@ def process_bulk_async(job):
                 logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
                 break
 
-            matches = semantic_search_v2(product_name, limit=3)
+            matches = semantic_search_v2(product_name, top_k=3)
             if matches:
-                best = matches[0]
-                price_ars = to_decimal_money(best["price_ars"])
+                best, score = matches[0]
+                price_ars = to_decimal_money(best.get("price_ars", 0))
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
                 total_quoted += subtotal
                 results.append({
                     "requested": product_name,
-                    "found": best["name"],
-                    "code": best["code"],
+                    "found": best.get("name", ""),
+                    "code": best.get("code", ""),
                     "quantity": requested_qty,
                     "price_unit": float(price_ars),
                     "subtotal": float(subtotal)
@@ -1487,18 +1496,21 @@ def build_execution_summary(ctx):
         if ctx["quality_score"] is not None:
             quality_label = "ALTA" if ctx["quality_score"] >= 60 else "MEDIA" if ctx["quality_score"] >= 30 else "BAJA"
             lines.append(f"Calidad de resultados: {quality_label} ({ctx['quality_score']}%)")
-        if ctx["filters_applied"]: lines.append(f"Filtros aplicados: {', '.join(ctx['filters_applied'])}")
+        if ctx["filters_applied"]:
+            lines.append(f"Filtros aplicados: {', '.join(ctx['filters_applied'])}")
         if ctx["will_send_chunks"]:
             chunk_info = ctx["chunk_info"]
             lines.append(f"⚠️ IMPORTANTE: Se enviarán {chunk_info['total_chunks']} mensajes adicionales con el listado completo de {chunk_info['total_products']} productos.")
             lines.append("Tu respuesta debe PREPARAR al cliente para recibir estos mensajes. Ejemplo: 'Dale, encontré X productos. Te los mando en partes para que los veas bien.'")
-    else: lines.append("No se ejecutó búsqueda de productos")
-    if ctx["warnings"]: lines.append(f"Advertencias: {'; '.join(ctx['warnings'])}")
+    else:
+        lines.append("No se ejecutó búsqueda de productos")
+    if ctx["warnings"]:
+        lines.append(f"Advertencias: {'; '.join(ctx['warnings'])}")
     return "\n".join(lines)
 
 def build_full_history_prompt(phone: str, user_message: str, catalog_products: list) -> list:
     """
-    Construye el prompt con TODA la conversación (hasta 128 k tokens) sin resumir.
+    Construye el prompt con TODA la conversación (hasta 128k tokens) sin resumir.
     """
     msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT_V2}]
 
@@ -1539,13 +1551,16 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         msgs = build_full_history_prompt(phone, user_message, catalog_products)
 
         # Detectamos tipo de producto para personalizar el prompt
-        product_type = ("batería" if any(k in user_message.lower() for k in ("bateria","batería","battery"))
-                        else "filtro" if any(k in user_message.lower() for k in ("filtro","filter"))
-                        else "cadena" if any(k in user_message.lower() for k in ("cadena","chain"))
-                        else "aceite" if any(k in user_message.lower() for k in ("aceite","oil"))
-                        else "bujía" if any(k in user_message.lower() for k in ("bujia","bujía","spark"))
-                        else "amortiguador" if any(k in user_message.lower() for k in ("amort","shock","suspension"))
-                        else "repuesto")
+        user_lower = user_message.lower()
+        product_type = (
+            "batería" if any(k in user_lower for k in ("bateria","batería","battery"))
+            else "filtro" if any(k in user_lower for k in ("filtro","filter"))
+            else "cadena" if any(k in user_lower for k in ("cadena","chain"))
+            else "aceite" if any(k in user_lower for k in ("aceite","oil"))
+            else "bujía" if any(k in user_lower for k in ("bujia","bujía","spark"))
+            else "amortiguador" if any(k in user_lower for k in ("amort","shock","suspension"))
+            else "repuesto"
+        )
         personalized_prompt = SMART_SYSTEM_PROMPT_V2.replace("{{product_type}}", product_type)
 
         # Reemplazamos el system prompt por el personalizado
@@ -1556,9 +1571,16 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BUSQUEDA]\n{exec_summary}"})
 
         with openai_sem:
-            resp = client.chat.completions.create(model=MODEL_NAME, messages=msgs, temperature=0.3, max_tokens=500, timeout=REQUESTS_TIMEOUT)
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=msgs,
+                temperature=0.3,
+                max_tokens=500,
+                timeout=REQUESTS_TIMEOUT
+            )
         txt = (resp.choices[0].message.content or "").strip()
-        if not txt or len(txt) < 10: return "Uy, tuve un problema. ¿Me repetís?"
+        if not txt or len(txt) < 10:
+            return "Uy, tuve un problema. ¿Me repetís?"
         return txt
     except Exception as e:
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
@@ -1609,6 +1631,78 @@ NUNCA termines con:
 Sos vendedor EFICIENTE, no Wikipedia.
 """
 
+def sanitize_llm_response(response_text, allowed_products):
+    if not response_text:
+        return "No pude generar una respuesta. ¿Me repetís?"
+
+    # Validación de códigos
+    allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
+    mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
+    hallucinated = mentioned_codes - allowed_codes
+
+    if hallucinated:
+        logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
+        if allowed_products:
+            product_list = "\n".join([
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                for p in allowed_products[:5]
+            ])
+            return (
+                f"Dale, mirá lo que tengo disponible:\n\n{product_list}\n\n"
+                "¿Cuál te sirve o necesitás que te explique las diferencias?"
+            )
+        else:
+            return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
+
+    # ========== VALIDACIÓN DE NOMBRES ==========
+    mentioned_names = []
+    
+    # Nombres entre comillas
+    quoted_names = re.findall(r'"([^"]{3,})"', response_text)
+    mentioned_names.extend(quoted_names)
+    
+    # Nombres después de "tengo", "tenemos", "hay"
+    pattern_names = re.findall(
+        r'(?:tengo|tenemos|hay|encontré)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-Z][a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{5,40})(?:\s+(?:para|de|en|cod|código)|\.|,|$)',
+        response_text
+    )
+    mentioned_names.extend(pattern_names)
+    
+    if mentioned_names and allowed_products:
+        allowed_names_normalized = {normalize_search_query(p.get("name", "")) for p in allowed_products if p.get("name")}
+        
+        hallucinated_names = []
+        for name in mentioned_names:
+            name_norm = normalize_search_query(name)
+            if not any(
+                fuzz.partial_ratio(name_norm, allowed_name) > 60 
+                for allowed_name in allowed_names_normalized
+            ):
+                hallucinated_names.append(name)
+        
+        if hallucinated_names:
+            logger.warning(f"LLM mencionó productos no permitidos: {hallucinated_names}")
+            product_list = "\n".join([
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                for p in allowed_products[:5]
+            ])
+            return (
+                f"Dale, te muestro lo que tengo disponible:\n\n{product_list}\n\n"
+                "¿Cuál te sirve?"
+            )
+    # ========== FIN VALIDACIÓN DE NOMBRES ==========
+
+    # Límite de líneas
+    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
+    if len(lines) > 6:
+        logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
+        if len(lines) >= 4:
+            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
+        else:
+            return response_text
+
+    return response_text
+
 def build_technical_answer(phone, user_message, top_products):
     try:
         context_lines = []
@@ -1653,82 +1747,7 @@ def build_technical_answer(phone, user_message, top_products):
         return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise y mientras vemos alternativas?"
 
 # ------------------------------------------------------------------
-# VALIDACIÓN ANTI-ALUCINACIÓN Y ANTI-DIVAGACIÓN
-# ------------------------------------------------------------------
-def sanitize_llm_response(response_text, allowed_products):
-    if not response_text:
-        return "No pude generar una respuesta. ¿Me repetís?"
-
-    # Validación de códigos (ya existe)
-    allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
-    mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
-    hallucinated = mentioned_codes - allowed_codes
-
-    if hallucinated:
-        logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
-        if allowed_products:
-            product_list = "\n".join([
-                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                for p in allowed_products[:5]
-            ])
-            return (
-                f"Dale, mirá lo que tengo disponible:\n\n{product_list}\n\n"
-                "¿Cuál te sirve o necesitás que te explique las diferencias?"
-            )
-        else:
-            return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
-
-    # ========== FIX 3: VALIDACIÓN DE NOMBRES ==========
-    # Extraer nombres mencionados entre comillas o en formatos específicos
-    mentioned_names = []
-    
-    # Nombres entre comillas
-    quoted_names = re.findall(r'"([^"]{3,})"', response_text)
-    mentioned_names.extend(quoted_names)
-    
-    # Nombres después de "tengo", "tenemos", "hay" (común en respuestas)
-    pattern_names = re.findall(r'(?:tengo|tenemos|hay|encontré)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-Z][a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{5,40})(?:\s+(?:para|de|en|cod|código)|\.|,|$)', response_text)
-    mentioned_names.extend(pattern_names)
-    
-    if mentioned_names and allowed_products:
-        allowed_names_normalized = {normalize_search_query(p.get("name", "")) for p in allowed_products if p.get("name")}
-        
-        hallucinated_names = []
-        for name in mentioned_names:
-            name_norm = normalize_search_query(name)
-            # Verificar si el nombre mencionado NO está en los productos permitidos
-            # Usamos similitud parcial (al menos 60% de coincidencia)
-            if not any(
-                fuzz.partial_ratio(name_norm, allowed_name) > 60 
-                for allowed_name in allowed_names_normalized
-            ):
-                hallucinated_names.append(name)
-        
-        if hallucinated_names:
-            logger.warning(f"LLM mencionó productos no permitidos: {hallucinated_names}")
-            product_list = "\n".join([
-                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                for p in allowed_products[:5]
-            ])
-            return (
-                f"Dale, te muestro lo que tengo disponible:\n\n{product_list}\n\n"
-                "¿Cuál te sirve?"
-            )
-    # ========== FIN VALIDACIÓN DE NOMBRES ==========
-
-    # Resto de la función (límite de líneas, etc.) sigue igual
-    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-    if len(lines) > 6:
-        logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
-        if len(lines) >= 4:
-            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
-        else:
-            return response_text
-
-    return response_text
-
-# ------------------------------------------------------------------
-# IA EMPÁTICA
+# IA EMPÁTICA (PROMPT GENERAL DE VENTA)
 # ------------------------------------------------------------------
 SMART_SYSTEM_PROMPT = f"""
 Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
@@ -1822,15 +1841,16 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.11.0
+# AGENTE PRINCIPAL – VERSIÓN 3.11.1
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
     save_message(phone, user_message, "user")
 
     if not rate_limit_check(phone):
-        save_message(phone, "Demasiados mensajes, esperá un minuto.", "assistant")
-        return "Demasiados mensajes, esperá un minuto."
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
 
     # 1. Detectar intent
     intent_data = detect_intent_llm(user_message)
@@ -1904,13 +1924,14 @@ def run_agent(phone, user_message):
     # 5. Búsqueda + quality + filtros
     products = []
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
-        products = [p for p, _ in semantic_search_v2(query_for_search, limit=MAX_SEARCH_RESULTS)]
+        products = [p for p, _ in semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)]
         execution_context["search_executed"] = True
         execution_context["products_found"] = len(products)
         quality = validate_search_quality(query_for_search, products)
         execution_context["quality_score"] = quality["score"]
-        if detect_category_filter(query_for_search):
-            execution_context["filters_applied"].append(f"category: {detect_category_filter(query_for_search)}")
+        cat_filter = detect_category_filter(query_for_search)
+        if cat_filter:
+            execution_context["filters_applied"].append(f"category: {cat_filter}")
         if len(products) > MAX_PRODUCTS_FOR_LLM and quality["quality"] == "low":
             reply = (
                 f"Encontré {len(products)} productos pero algunos no calzan bien.\n\n"
@@ -1934,10 +1955,12 @@ def run_agent(phone, user_message):
     # 6. Generar respuesta con execution context
     if intent == "pregunta_tecnica":
         reply = build_technical_answer(phone, user_message, products[:8])
+        # para preguntas técnicas NO mandamos el listado enorme
+        execution_context["will_send_chunks"] = False
     else:
         reply = generate_smart_ai_reply_v2(phone, user_message, products[:MAX_PRODUCTS_FOR_LLM], execution_context)
 
-    # 7. Enviar chunks DESPUÉS de la respuesta inicial (solo si quality no es low)
+    # 7. Enviar chunks DESPUÉS de la respuesta inicial (solo si quality no es low y no es técnica)
     if execution_context["will_send_chunks"]:
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
@@ -2020,6 +2043,14 @@ def whatsapp_webhook():
             resp.message("Demasiados mensajes, esperá un minuto.")
             return Response(str(resp), mimetype="text/xml")
 
+        # Detectar si es lista masiva (por ahora solo job async)
+        is_bulk, count = is_bulk_list_request(message_body)
+        if is_bulk and count > INSTANT_THRESHOLD:
+            job_id = create_bulk_job(from_number, message_body, count)
+            resp = MessagingResponse()
+            resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
+            return Response(str(resp), mimetype="text/xml")
+
         reply = run_agent(from_number, message_body)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
@@ -2051,7 +2082,7 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.11.0"}), 200
+    return jsonify({"status": "ok", "version": "3.11.1"}), 200
 
 
 # ------------------------------------------------------------------
@@ -2071,10 +2102,9 @@ init_db()
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.11.0 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.11.1 en puerto {port}")
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
