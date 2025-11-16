@@ -1,10 +1,11 @@
 # =========================================================
-# Fran 3.11.2 – Bot Mayorista Inteligente
+# Fran 3.11.3 – Bot Mayorista Inteligente
 # =========================================================
 # - Contexto conversacional: hasta 128 k tokens (ventana deslizante)
 # - Búsqueda: filtro lexical → FAISS sobre sub-conjunto
 # - Sin inyección de memoria larga
 # - Autocorrector de palabras para bajar errores por typos
+# - Mejora pedidos implícitos tipo “3 de cada una”, “todos x5”, etc.
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -32,7 +33,7 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran312")
+logger = logging.getLogger("fran313")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -82,7 +83,7 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.2"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.3"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -1530,25 +1531,82 @@ def detect_intent_llm(msg):
         return {"intent": "desconocido", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
-# IMPLÍCITO – "3 de cada una"
+# IMPLÍCITO – "3 de cada una" (MEJORADO)
 # ------------------------------------------------------------------
 def detect_implicit_cart_action(message, phone):
-    patterns = {
-        r"(\d+)\s+de\s+cada": "add_each_quantity",
-        r"(todo|todos|todas)": "add_all",
-        r"(esos|esas|los|las)\s+(quiero|necesito|dame)": "add_referenced"
+    """
+    Detecta pedidos implícitos basados en la última búsqueda:
+    - "3 de cada una"
+    - "3 de cada"
+    - "2 c/u"
+    - "2 de todos", "todos x5", "todos por 5"
+    - "agregame todos", "los quiero todos"
+    - "de esos 3", "de esos poneme 5"
+
+    Siempre devuelve una acción homogénea:
+    {
+        "action": "add_each_quantity",
+        "quantity": <int>,
+        "products": [ ... productos de last_search ... ]
     }
-    msg = message.lower()
-    for pat, action in patterns.items():
-        m = re.search(pat, msg)
-        if m:
-            last = get_last_search(phone)
-            if last and last.get("products"):
-                return {
-                    "action": action,
-                    "quantity": int(m.group(1)) if action == "add_each_quantity" else 1,
-                    "products": last["products"]
-                }
+
+    Si no detecta nada o no hay last_search, devuelve None.
+    """
+    msg = (message or "").lower()
+    last = get_last_search(phone)
+    if not last or not last.get("products"):
+        return None
+
+    products = last["products"]
+
+    # A) "3 de cada", "3 de cada una/uno", "3 c/u"
+    m = re.search(r"(\d+)\s*(de\s*cada(\s+una|\s+uno)?|c\/u)", msg)
+    if m:
+        qty = int(m.group(1))
+        return {
+            "action": "add_each_quantity",
+            "quantity": qty,
+            "products": products
+        }
+
+    # B) "2 de todos", "3 de todas"
+    m = re.search(r"(\d+)\s+de\s+(todos?|todas?)", msg)
+    if m:
+        qty = int(m.group(1))
+        return {
+            "action": "add_each_quantity",
+            "quantity": qty,
+            "products": products
+        }
+
+    # C) "todos x5" / "todos por 5" / "todas 5"
+    m = re.search(r"(todos?|todas?)\s*(x|por)?\s*(\d+)", msg)
+    if m:
+        qty = int(m.group(3))
+        return {
+            "action": "add_each_quantity",
+            "quantity": qty,
+            "products": products
+        }
+
+    # D) "agregame todos", "sumame todos", "mandame todos"
+    if re.search(r"(agregame|sumame|mandame|poneme|dejame)\s+(todos?|todas?)", msg):
+        return {
+            "action": "add_each_quantity",
+            "quantity": 1,
+            "products": products
+        }
+
+    # E) "esos" / "esas" / "los que me pasaste" / "los de arriba"
+    if re.search(r"(esos|esas|los que me pasaste|los de arriba|los anteriores)", msg):
+        m_qty = re.search(r"(\d+)", msg)
+        qty = int(m_qty.group(1)) if m_qty else 1
+        return {
+            "action": "add_each_quantity",
+            "quantity": qty,
+            "products": products
+        }
+
     return None
 
 # ------------------------------------------------------------------
@@ -1948,7 +2006,7 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.11.2
+# AGENTE PRINCIPAL – VERSIÓN 3.11.3
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
@@ -2011,14 +2069,14 @@ def run_agent(phone, user_message):
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
 
-    # 4. Detectar "3 de cada una" implícito
+    # 4. Detectar "3 de cada una" implícito (y variantes)
     implicit = detect_implicit_cart_action(user_message, phone)
     if implicit:
         products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
         qty = implicit["quantity"]
         total = sum(to_decimal_money(p["price_ars"]) * qty for p in products)
         reply = (
-            f"Dale! Te preparo {qty} unidades de cada uno:\n"
+            f"Dale! Te preparo {qty} unidad(es) de cada uno de los últimos productos que te mostré.\n"
             f"Total aprox: {format_price(total)}\n\n"
             "¿Confirmás? (decime 'si' o 'dale')"
         )
@@ -2199,7 +2257,7 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.11.2"}), 200
+    return jsonify({"status": "ok", "version": "3.11.3"}), 200
 
 
 # ------------------------------------------------------------------
@@ -2221,7 +2279,7 @@ init_db()
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.11.2 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.11.3 en puerto {port}")
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
