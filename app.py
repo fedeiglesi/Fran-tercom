@@ -1,9 +1,10 @@
 # =========================================================
-# Fran 3.11.1 – Bot Mayorista Inteligente
+# Fran 3.11.2 – Bot Mayorista Inteligente
 # =========================================================
 # - Contexto conversacional: hasta 128 k tokens (ventana deslizante)
 # - Búsqueda: filtro lexical → FAISS sobre sub-conjunto
 # - Sin inyección de memoria larga
+# - Autocorrector de palabras para bajar errores por typos
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -31,7 +32,7 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran311")
+logger = logging.getLogger("fran312")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -81,7 +82,7 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.1"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.2"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -191,7 +192,7 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 def normalize_search_query(query):
     return strip_accents(query)
 
-# ---- funciones faltantes ----
+# ---- funciones faltantes / calidad de búsqueda ----
 def validate_search_quality(query, products):
     if not products:
         return {"quality": "none", "score": 0, "suggestion": "Sin resultados"}
@@ -284,7 +285,7 @@ def clear_pending_action(phone):
 
 # ------------------------------------------------------------------
 # DATABASE – SQLITE RESILIENTE
-# ------------------------------------------------------------
+# ------------------------------------------------------------------
 @contextmanager
 def get_db_connection():
     conn = None
@@ -861,6 +862,15 @@ def load_faiss_index():
             index = faiss.read_index(FAISS_INDEX_PATH)
             with open(FAISS_MAPPING_PATH, "rb") as f:
                 catalog = pickle.load(f)
+
+            # Validar consistencia
+            if index.ntotal != len(catalog):
+                logger.warning(
+                    f"FAISS inconsistente (index.ntotal={index.ntotal}, catalog={len(catalog)}). "
+                    "Se reconstruirá desde cero."
+                )
+                return None, None
+
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
             # Orden consistente: (catalog, index)
             return catalog, index
@@ -1034,6 +1044,90 @@ MODEL_LIST = [
     "wave", "x3m", "xr", "xtz", "zb", "ztt"
 ]
 
+# ------------------------------------------------------------------
+# AUTOCORRECTOR – PARA BAJAR ERRORES POR TYPOS
+# ------------------------------------------------------------------
+def _build_autocorrect_vocab():
+    base_tokens = []
+
+    # categorías y variantes
+    for cat, variants in CATEGORY_MAP.items():
+        base_tokens.append(cat)
+        base_tokens.extend(variants)
+
+    # marcas y modelos
+    base_tokens.extend(BRAND_LIST)
+    base_tokens.extend(MODEL_LIST)
+
+    # algunas piezas / palabras comunes
+    base_tokens.extend([
+        "pastilla", "disco", "embrague", "regulador", "rectificador",
+        "carburador", "inyector", "tanque", "asiento", "manubrio",
+        "espejo", "cubierta", "neumatico", "ruleman", "rodamiento",
+        "corona", "piñon", "kit transmision", "kit freno"
+    ])
+
+    vocab = {normalize(t) for t in base_tokens if t}
+    return sorted(vocab)
+
+AUTOCORRECT_VOCAB = _build_autocorrect_vocab()
+
+def _looks_like_code_or_number(token: str) -> bool:
+    if not token:
+        return False
+    if token.isdigit():
+        return True
+    if re.match(r"^\d{4}/\d{5}-\d{3}$", token):
+        return True
+    if re.match(r"^\d{3,}[/-]\d+", token):
+        return True
+    return False
+
+def autocorrect_keywords(text: str):
+    """
+    Autocorrector simple:
+    - No toca códigos ni números (1234/56789-012)
+    - Corrige palabras largas usando vocabulario de marcas/modelos/categorías
+    Devuelve: (texto_corregido, lista_de_correcciones)
+    """
+    if not text:
+        return "", []
+
+    tokens = text.split()
+    corrections = []
+    new_tokens = []
+
+    for tok in tokens:
+        raw = tok
+        base = normalize(tok)
+
+        if _looks_like_code_or_number(raw):
+            new_tokens.append(raw)
+            continue
+
+        # no corrijo tokens muy cortos
+        if len(base) <= 3:
+            new_tokens.append(raw)
+            continue
+
+        try:
+            best = process.extractOne(base, AUTOCORRECT_VOCAB, scorer=fuzz.ratio)
+        except Exception:
+            best = None
+
+        if best and best[1] >= 90 and best[0] != base:
+            corrected = best[0]
+            new_tokens.append(corrected)
+            corrections.append(f"{raw}→{corrected}")
+        else:
+            new_tokens.append(raw)
+
+    corrected_text = " ".join(new_tokens)
+    return corrected_text, corrections
+
+# ------------------------------------------------------------------
+# PARSEO DE QUERY
+# ------------------------------------------------------------------
 def parse_query_v2(query: str) -> dict:
     """
     Devuelve marca, modelo, categoría detectados (puede haber más de uno).
@@ -1094,7 +1188,7 @@ def semantic_search_v2(query: str, top_k: int = 60) -> list:
     """
     1) Filtra lexicalmente
     2) Embedde solo el sub-conjunto
-    3) FAISS sobre ese sub-conjunto
+    3) FAISS/inner-product temporal sobre ese sub-conjunto
     Retorna lista de (producto, score)
     """
     catalog, _ = get_catalog_and_index()
@@ -1103,8 +1197,10 @@ def semantic_search_v2(query: str, top_k: int = 60) -> list:
 
     parsed = parse_query_v2(query)
     filtered = filter_catalog(catalog, parsed)
+
+    # Si el filtro devolvió vacío, caemos al catálogo completo (mejor tolerancia)
     if not filtered:
-        return []
+        filtered = catalog
 
     # embeddear solo los filtrados
     texts = [p["search_text"] for p in filtered]
@@ -1182,7 +1278,12 @@ def process_bulk_sync(phone, raw_list):
     total_quoted = Decimal("0")
 
     for requested_qty, product_name in parsed_items:
-        matches = semantic_search_v2(product_name, top_k=3)
+        # autocorrect por cada renglón de lista
+        corrected_name, corr = autocorrect_keywords(product_name)
+        if corr:
+            logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
+
+        matches = semantic_search_v2(corrected_name, top_k=3)
         if matches:
             best, score = matches[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -1190,6 +1291,7 @@ def process_bulk_sync(phone, raw_list):
             total_quoted += subtotal
             results.append({
                 "requested": product_name,
+                "corrected": corrected_name,
                 "found": best.get("name", ""),
                 "code": best.get("code", ""),
                 "quantity": requested_qty,
@@ -1251,7 +1353,11 @@ def process_bulk_async(job):
                 logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
                 break
 
-            matches = semantic_search_v2(product_name, top_k=3)
+            corrected_name, corr = autocorrect_keywords(product_name)
+            if corr:
+                logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
+
+            matches = semantic_search_v2(corrected_name, top_k=3)
             if matches:
                 best, score = matches[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -1259,6 +1365,7 @@ def process_bulk_async(job):
                 total_quoted += subtotal
                 results.append({
                     "requested": product_name,
+                    "corrected": corrected_name,
                     "found": best.get("name", ""),
                     "code": best.get("code", ""),
                     "quantity": requested_qty,
@@ -1841,7 +1948,7 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.11.1
+# AGENTE PRINCIPAL – VERSIÓN 3.11.2
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
@@ -1855,12 +1962,12 @@ def run_agent(phone, user_message):
     # 1. Detectar intent
     intent_data = detect_intent_llm(user_message)
     intent = intent_data.get("intent", "desconocido")
-    query_for_search = intent_data.get("query") or user_message
+    raw_query_for_search = intent_data.get("query") or user_message
 
     # 2. CREAR EXECUTION CONTEXT
     execution_context = {
         "intent_detected": intent,
-        "search_query": query_for_search,
+        "search_query": raw_query_for_search,
         "search_executed": False,
         "products_found": 0,
         "products_shown_to_llm": 0,
@@ -1890,7 +1997,7 @@ def run_agent(phone, user_message):
                 subtotal = (price * q).quantize(Decimal("0.01"))
                 lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
             lines.append(f"\nTOTAL: {format_price(total)}")
-            reply = "\n".join(lines)
+        reply = "\n".join(lines)
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "ver_carrito", 0)
         log_performance(phone, "ver_carrito", time.time()-start_time, 0)
@@ -1921,9 +2028,19 @@ def run_agent(phone, user_message):
         log_performance(phone, "implicit_cart", time.time()-start_time, len(products))
         return reply
 
-    # 5. Búsqueda + quality + filtros
+    # 5. Búsqueda + quality + filtros (con autocorrect)
     products = []
+    query_for_search = raw_query_for_search
+    corrections = []
+
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
+        query_for_search, corrections = autocorrect_keywords(raw_query_for_search)
+        if corrections:
+            execution_context["warnings"].append(
+                f"Autocorrect aplicado: {', '.join(corrections)}"
+            )
+        execution_context["search_query"] = query_for_search
+
         products = [p for p, _ in semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)]
         execution_context["search_executed"] = True
         execution_context["products_found"] = len(products)
@@ -2082,7 +2199,7 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.11.1"}), 200
+    return jsonify({"status": "ok", "version": "3.11.2"}), 200
 
 
 # ------------------------------------------------------------------
@@ -2104,7 +2221,7 @@ init_db()
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.11.1 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.11.2 en puerto {port}")
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
