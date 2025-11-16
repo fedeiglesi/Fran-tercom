@@ -1,8 +1,9 @@
 # =========================================================
-# Fran 3.10.2 – Bot Mayorista Inteligente (FULL FIX +)
+# Fran 3.11.0 – Bot Mayorista Inteligente
 # =========================================================
-# - Todos los fixes aplicados
-# - Listo para producción
+# - Contexto conversacional: hasta 128 k tokens (ventana deslizante)
+# - Búsqueda: filtro lexical → FAISS sobre sub-conjunto
+# - Sin inyección de memoria larga
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -30,14 +31,14 @@ app = Flask(__name__)
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran310")
+logger = logging.getLogger("fran311")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(handler)
 
-logger.info("✅ Imports completados")
+logger.info("✅ Imports completos")
 
 # ------------------------------------------------------------
 # CONFIG
@@ -46,7 +47,7 @@ OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 if not OPENAI_API_KEY:
     raise RuntimeError("Falta OPENAI_API_KEY")
 
-MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o").strip()
+MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
     "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
@@ -80,7 +81,7 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.10.2"}
+REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.0"}
 
 # ------------------------------------------------------------
 # TWILIO
@@ -213,6 +214,7 @@ CATEGORY_KEYWORDS = {
     "filtro": ["filtro", "filter"],
     "cadena": ["cadena", "chain", "transmision"],
     "bujia": ["bujia", "bujía", "spark"],
+    "amortiguador": ["amort", "shock", "suspension"],
 }
 
 def detect_category_filter(query):
@@ -363,20 +365,6 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS session_summary (
-                phone TEXT PRIMARY KEY, products_mentioned TEXT, brands_mentioned Text,
-                last_intent TEXT, message_count INTEGER DEFAULT 0, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS customer_data (
-                phone TEXT PRIMARY KEY, name TEXT, address TEXT, notes TEXT,
-                created_at TEXT, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
                 customer_address TEXT, items_json TEXT, total_ars TEXT,
@@ -507,7 +495,11 @@ def save_message(phone, msg, role):
     except Exception as e:
         logger.error(f"Error guardando mensaje: {e}")
 
-def get_history_since(phone, days=3, limit=20):
+def get_history_since(phone, days=7, limit=2000):
+    """
+    Devuelve TODOS los mensajes de la conversación actual (hasta 7 días).
+    Se usa para armar el prompt completo sin resumir.
+    """
     if not phone:
         return []
     try:
@@ -516,8 +508,8 @@ def get_history_since(phone, days=3, limit=20):
             cur = conn.cursor()
             cur.execute(
                 "SELECT message, role, timestamp FROM conversations "
-                "WHERE phone = ? AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
-                (phone, since, limit)
+                "WHERE phone = ? AND timestamp >= ? ORDER BY timestamp ASC",
+                (phone, since)
             )
             rows = cur.fetchall()
             return [{"role": r[1], "content": r[0], "timestamp": r[2]} for r in rows]
@@ -613,96 +605,6 @@ def get_last_search(phone):
             return {"products": json.loads(row[0]), "query": row[1], "metadata": json.loads(row[2]) if row[2] else {}}
     except Exception as e:
         logger.error(f"get_last_search error: {e}")
-        return None
-
-def update_session_summary(phone, products, brands, intent):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT message_count FROM session_summary WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            count = (row[0] if row else 0) + 1
-            conn.execute(
-                """INSERT INTO session_summary
-                (phone, products_mentioned, brands_mentioned, last_intent, message_count, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                products_mentioned=excluded.products_mentioned,
-                brands_mentioned=excluded.brands_mentioned,
-                last_intent=excluded.last_intent,
-                message_count=excluded.message_count,
-                updated_at=excluded.updated_at""",
-                (phone, json.dumps(products), json.dumps(brands), intent, count, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error actualizando session_summary: {e}")
-
-def get_session_summary(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT products_mentioned, brands_mentioned, last_intent, message_count "
-                "FROM session_summary WHERE phone=?",
-                (phone,)
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "products": json.loads(row[0]) if row[0] else [],
-                "brands": json.loads(row[1]) if row[1] else [],
-                "intent": row[2],
-                "count": row[3]
-            }
-    except Exception as e:
-        logger.error(f"Error leyendo session_summary: {e}")
-        return None
-
-def save_customer_data(phone, name=None, address=None, notes=None):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT name, address, notes FROM customer_data WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            now = datetime.now().isoformat()
-
-            if row:
-                new_name = name if name else row[0]
-                new_address = address if address else row[1]
-                new_notes = notes if notes else row[2]
-                conn.execute(
-                    "UPDATE customer_data SET name=?, address=?, notes=?, updated_at=? WHERE phone=?",
-                    (new_name, new_address, new_notes, now, phone)
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO customer_data (phone, name, address, notes, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (phone, name or "", address or "", notes or "", now, now)
-                )
-    except Exception as e:
-        logger.error(f"Error guardando customer_data: {e}")
-
-def get_customer_data(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT name, address, notes FROM customer_data WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"name": row[0], "address": row[1], "notes": row[2]}
-    except Exception as e:
-        logger.error(f"Error leyendo customer_data: {e}")
         return None
 
 def create_order(phone, customer_name, customer_address, items, total_ars):
@@ -1080,115 +982,134 @@ def get_catalog_and_index():
         return catalog, index
 
 # ------------------------------------------------------------------
-# BÚSQUEDA – FILTRO LIVIANO + LLM EXPANSOR
+# BÚSQUEDA – FILTRO LEXICAL + FAISS
 # ------------------------------------------------------------------
 hybrid_cache = TTLCache(maxsize=1024, ttl=300)
 
-def hybrid_search(query, limit=60):
-    if not query:
-        return []
-    q_norm = normalize_search_query(query)
-    products = hybrid_cache.get(q_norm)
-    if products is None:
-        products = hybrid_search_impl(q_norm, limit)
-        hybrid_cache[q_norm] = products
+# Normalización rápida
+def normalize(text):
+    return strip_accents(text).lower()
 
-    q_low = query.lower()
-    for cat, words in CATEGORY_KEYWORDS.items():
-        if any(w in q_low for w in words):
-            products = [p for p in products
-                        if any(w in p.get("name","").lower() or
-                               w in p.get("category","").lower()
-                               for w in words)]
+# ---------- sinónimos ----------
+CATEGORY_MAP = {
+    "amortiguador": ["amort", "shock", "suspension"],
+    "bateria": ["bateria", "batería", "battery"],
+    "aceite": ["aceite", "oil", "lubricante"],
+    "filtro": ["filtro", "filter"],
+    "cadena": ["cadena", "chain"],
+    "bujia": ["bujia", "bujía", "spark"],
+}
+BRAND_LIST = [
+    "appia", "bajaj", "benelli", "beta", "brava", "corven", "gilera", "guerrero", "hero", "honda",
+    "husqvarna", "kawasaki", "keeway", "keller", "kymco", "mondial", "motomel", "moto guzzi",
+    "nsu", "suzuki", "tvs", "yamaha", "zanella"
+]
+MODEL_LIST = [
+    "50", "70", "80", "90", "100", "110", "125", "135", "150", "160", "180", "200", "220", "250", "300",
+    "ax100", "biz", "blade", "blitz", "boxer", "c50", "c70", "c90", "cb", "cg", "crypton", "dominar",
+    "dakar", "due", "eco", "en125", "energy", "falcon", "fazer", "fire", "flash", "fly", "fz", "gixxer",
+    "gn125", "go", "hd", "hunter", "jet", "jog", "k1", "k2", "k3", "k4", "kmx", "liberty", "luxe", "magic",
+    "monkey", "motard", "navi", "ns", "pulsar", "rc", "rks", "road", "rocket", "rouser", "rs", "rx",
+    "sahel", "sempre", "sma", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
+    "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
+    "wave", "x3m", "xr", "xtz", "zb", "ztt"
+]
+
+def parse_query_v2(query: str) -> dict:
+    """
+    Devuelve marca, modelo, categoría detectados (puede haber más de uno).
+    """
+    q = normalize(query)
+    tokens = q.split()
+    out = {"brands": [], "models": [], "category": None, "raw": q}
+
+    # categoría
+    for cat, variants in CATEGORY_MAP.items():
+        if any(v in q for v in variants):
+            out["category"] = cat
             break
-    logger.info(f"[SEARCH] query='{query}' -> {len(products)} prod después de filtros")
-    return products[:15]   # nunca más de 15
 
-def fuzzy_search(query, limit=100):
+    # marcas
+    for b in BRAND_LIST:
+        if b in q:
+            out["brands"].append(b)
+
+    # modelos
+    for m in MODEL_LIST:
+        if m in q:
+            out["models"].append(m)
+
+    return out
+
+def filter_catalog(catalog, parsed):
+    """
+    Filtra el catálogo completo por marca/modelo/categoría.
+    """
+    if not catalog:
+        return []
+    brands = set(parsed["brands"])
+    models = set(parsed["models"])
+    cat = parsed["category"]
+
+    def _match(p):
+        # marca
+        if brands:
+            p_brand = normalize(p.get("brand", ""))
+            if not any(b in p_brand for b in brands):
+                return False
+        # modelo
+        if models:
+            p_model = normalize(p.get("model", ""))
+            if not any(m in p_model for m in models):
+                return False
+        # categoría
+        if cat:
+            p_cat = normalize(p.get("category", ""))
+            if not any(v in p_cat for v in CATEGORY_MAP.get(cat, [cat])):
+                return False
+        return True
+
+    return [p for p in catalog if _match(p)]
+
+def semantic_search_v2(query: str, top_k: int = 60) -> list:
+    """
+    1) Filtra lexicalmente
+    2) Embedde solo el sub-conjunto
+    3) FAISS sobre ese sub-conjunto
+    """
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
         return []
-    try:
-        names = [p["search_text"] for p in catalog]
-        matches = process.extract(query, names, scorer=fuzz.WRatio, limit=limit)  # sin workers
-        return [(catalog[idx], score) for _, score, idx in matches if score >= 75]
-    except Exception as e:
-        logger.error(f"Error en fuzzy_search: {e}")
+
+    parsed = parse_query_v2(query)
+    filtered = filter_catalog(catalog, parsed)
+    if not filtered:
         return []
 
-def semantic_search(query, top_k=60, max_retries=3):
-    catalog, index = get_catalog_and_index()
-    if not catalog or index is None or not query:
-        return []
-    try:
-        for retry in range(max_retries):
-            try:
-                with openai_sem:
-                    resp = client.embeddings.create(
-                        input=[query],
-                        model="text-embedding-3-small",
-                        timeout=REQUESTS_TIMEOUT
-                    )
-                emb = np.array([resp.data[0].embedding]).astype("float32")
-                break
-            except RateLimitError as e:
-                if retry < max_retries - 1:
-                    wait_time = (2 ** retry) * random.uniform(1, 2)
-                    logger.warning(f"RateLimitError en busqueda semantica, reintentando en {wait_time:.2f}s...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"RateLimitError persistente: {e}")
-                    return []
+    # embeddear solo los filtrados
+    texts = [p["search_text"] for p in filtered]
+    vectors = generate_embeddings_with_cache(texts)
+    vecs = np.array(vectors).astype("float32")
 
-        D, I = index.search(emb, top_k)
-        results = []
-        for dist, idx in zip(D[0], I[0]):
-            if 0 <= idx < len(catalog):
-                score = 1.0 / (1.0 + float(dist))
-                results.append((catalog[idx], score))
-        return results
-    except Exception as e:
-        logger.error(f"Error en busqueda semantica: {e}")
-        return []
+    # índice temporal
+    dim = vecs.shape[1]
+    temp_index = faiss.IndexFlatIP(dim)
+    faiss.normalize_L2(vecs)
+    temp_index.add(vecs)
 
-def hybrid_search_impl(query, limit=60):
-    if not query:
-        return []
-    # ---- filtro por categoría ANTES de mezclar ----
-    q_low = query.lower()
-    for cat, words in CATEGORY_KEYWORDS.items():
-        if any(w in q_low for w in words):
-            fuzzy_raw = fuzzy_search(query, limit=80)
-            semantic_raw = semantic_search(query, top_k=60)
-            # filtramos
-            fuzzy_raw = [(p, s) for p, s in fuzzy_raw if any(w in p.get("name","").lower() or w in p.get("category","").lower() for w in words)]
-            semantic_raw = [(p, s) for p, s in semantic_raw if any(w in p.get("name","").lower() or w in p.get("category","").lower() for w in words)]
-            break
-    else:
-        # sin categoría detectada → sin filtro
-        fuzzy_raw = fuzzy_search(query, limit=80)
-        semantic_raw = semantic_search(query, top_k=60)
+    # embeddear consulta
+    emb = generate_embeddings_with_cache([query])[0]
+    emb = np.array([emb]).astype("float32")
+    faiss.normalize_L2(emb)
 
-    # mezcla igual que antes
-    combined = {}
-    for prod, score in fuzzy_raw:
-        key = prod["code"]
-        combined[key] = {"prod": prod, "fuzzy": score / 100.0, "sem": 0.0}
+    D, I = temp_index.search(emb, top_k)
+    results = []
+    for dist, idx in zip(D[0], I[0]):
+        if 0 <= idx < len(filtered):
+            score = float(dist)
+            results.append((filtered[idx], score))
 
-    for prod, score in semantic_raw:
-        key = prod["code"]
-        if key not in combined:
-            combined[key] = {"prod": prod, "fuzzy": 0.0, "sem": score}
-        else:
-            combined[key]["sem"] = max(combined[key]["sem"], score)
-
-    final = []
-    for v in combined.values():
-        combined_score = 0.7 * v["sem"] + 0.3 * v["fuzzy"]
-        final.append((v["prod"], combined_score))
-
-    final.sort(key=lambda x: x[1], reverse=True)
-    return [p for p, _ in final[:limit]]
+    return sorted(results, key=lambda x: x[1], reverse=True)
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -1241,7 +1162,7 @@ def process_bulk_sync(phone, raw_list):
     total_quoted = Decimal("0")
 
     for requested_qty, product_name in parsed_items:
-        matches = hybrid_search(product_name, limit=3)
+        matches = semantic_search_v2(product_name, limit=3)
         if matches:
             best = matches[0]
             price_ars = to_decimal_money(best["price_ars"])
@@ -1310,7 +1231,7 @@ def process_bulk_async(job):
                 logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
                 break
 
-            matches = hybrid_search(product_name, limit=3)
+            matches = semantic_search_v2(product_name, limit=3)
             if matches:
                 best = matches[0]
                 price_ars = to_decimal_money(best["price_ars"])
@@ -1564,54 +1485,64 @@ def build_execution_summary(ctx):
     if ctx["warnings"]: lines.append(f"Advertencias: {'; '.join(ctx['warnings'])}")
     return "\n".join(lines)
 
+def build_full_history_prompt(phone: str, user_message: str, catalog_products: list) -> list:
+    """
+    Construye el prompt con TODA la conversación (hasta 128 k tokens) sin resumir.
+    """
+    msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT_V2}]
+
+    # Toda la historia sin límite de mensajes (sí de tokens)
+    history = get_history_since(phone, days=7, limit=2000)
+    token_count = len(SMART_SYSTEM_PROMPT_V2.split())
+
+    temp_msgs = []
+    for h in reversed(history):
+        role = "assistant" if h["role"] == "assistant" else "user"
+        content = h["content"]
+        temp_msgs.append({"role": role, "content": content})
+        token_count += len(content.split())
+        # Cortamos cuando estemos cerca del límite del modelo (120k para dejar margen)
+        if token_count > 120000:
+            break
+
+    for m in reversed(temp_msgs):
+        msgs.append(m)
+
+    # Productos encontrados (solo si hay)
+    if catalog_products:
+        catalog_text = "\n".join([
+            f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}"
+            for p in catalog_products[:15]
+        ])
+        msgs.append({
+            "role": "system",
+            "content": f"[TOP {len(catalog_products)} PRODUCTOS]\n{catalog_text}"
+        })
+
+    msgs.append({"role": "user", "content": user_message})
+    return msgs
+
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context):
     try:
-        history = get_history_since(phone, days=3, limit=15)
-        user_context = ""
+        # Construimos prompt con TODO el historial (hasta 128k tokens)
+        msgs = build_full_history_prompt(phone, user_message, catalog_products)
 
-        # ---- prompt personalizado ----
+        # Detectamos tipo de producto para personalizar el prompt
         product_type = ("batería" if any(k in user_message.lower() for k in ("bateria","batería","battery"))
                         else "filtro" if any(k in user_message.lower() for k in ("filtro","filter"))
                         else "cadena" if any(k in user_message.lower() for k in ("cadena","chain"))
                         else "aceite" if any(k in user_message.lower() for k in ("aceite","oil"))
                         else "bujía" if any(k in user_message.lower() for k in ("bujia","bujía","spark"))
+                        else "amortiguador" if any(k in user_message.lower() for k in ("amort","shock","suspension"))
                         else "repuesto")
         personalized_prompt = SMART_SYSTEM_PROMPT_V2.replace("{{product_type}}", product_type)
 
-        msgs = [{"role": "system", "content": personalized_prompt}]
-        for h in history[-15:]:
-            role = "assistant" if h["role"] == "assistant" else "user"
-            msgs.append({"role": role, "content": h["content"]})
-        if user_context:
-            msgs.append({"role": "system", "name": "context", "content": f"[CONTEXTO DE SESION]\n{user_context}"})
+        # Reemplazamos el system prompt por el personalizado
+        msgs[0]["content"] = personalized_prompt
+
+        # Agregamos el execution summary
         exec_summary = build_execution_summary(execution_context)
-        msgs.append({"role": "system", "name": "execution", "content": f"[RESULTADO DE BUSQUEDA]\n{exec_summary}"})
-
-        # ---- filtro ANTES de armar el texto que ve el LLM ----
-        if catalog_products:
-            filtered = []
-            for p in catalog_products:
-                if product_type in ("batería","bateria","battery") and any(k in p.get("name","").lower() for k in ("batería","bateria","battery")):
-                    filtered.append(p)
-                elif product_type in ("filtro","filter") and any(k in p.get("name","").lower() for k in ("filtro","filter")):
-                    filtered.append(p)
-                elif product_type in ("cadena","chain") and any(k in p.get("name","").lower() for k in ("cadena","chain")):
-                    filtered.append(p)
-                elif product_type in ("aceite","oil") and any(k in p.get("name","").lower() for k in ("aceite","oil")):
-                    filtered.append(p)
-                elif product_type in ("bujía","bujia","spark") and any(k in p.get("name","").lower() for k in ("bujía","bujia","spark")):
-                    filtered.append(p)
-                else:
-                    filtered.append(p)   # para "repuesto" u otros, dejamos pasar
-
-            if not filtered:
-                # ---- no hay coincidencias ----
-                return f"No encontré {product_type}s para esa moto. ¿Me decís marca y modelo exacto?"
-
-            catalog_text = "\n".join([f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}" for p in filtered])
-            msgs.append({"role": "system", "name": "products", "content": f"[TOP {len(filtered)} PRODUCTOS]\n{catalog_text}"})
-
-        msgs.append({"role": "user", "content": user_message})
+        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BUSQUEDA]\n{exec_summary}"})
 
         with openai_sem:
             resp = client.chat.completions.create(model=MODEL_NAME, messages=msgs, temperature=0.3, max_tokens=500, timeout=REQUESTS_TIMEOUT)
@@ -1805,120 +1736,6 @@ Sos vendedor que SABE de motos, ENTIENDE a la gente, pero CIERRA VENTAS.
 No sos un chatbot genérico. Sos un tipo que vende repuestos y quiere ayudar AL CLIENTE A COMPRAR.
 """
 
-def build_enhanced_context(phone, user_message):
-    if not phone:
-        return ""
-
-    try:
-        session = get_session_summary(phone)
-        search_hist = get_search_history(phone, limit=5)
-        customer = get_customer_data(phone)
-        pending = get_pending_action(phone)
-
-        context_parts = []
-
-        if session and session.get("count", 0) > 0:
-            context_parts.append(f"[SESION: {session['count']} mensajes")
-            if session.get("brands"):
-                context_parts.append(f", marcas: {', '.join(session['brands'][:3])}")
-            if session.get("products"):
-                context_parts.append(f", productos: {', '.join(session['products'][:3])}")
-            context_parts.append("]")
-
-        if search_hist:
-            context_parts.append(f"\n[BUSQUEDAS PREVIAS: {len(search_hist)} cotizaciones")
-            for i, s in enumerate(search_hist[:3], 1):
-                prods = s.get("products", [])
-                if prods:
-                    context_parts.append(f"\n  {i}. {s.get('query', '')}: {len(prods)} items")
-            context_parts.append("]")
-
-        if customer and customer.get("name"):
-            context_parts.append(f"\n[CLIENTE: {customer['name']}")
-            if customer.get("address"):
-                context_parts.append(f", {customer['address']}")
-            context_parts.append("]")
-
-        if pending:
-            action_type = pending.get("action_type", "")
-            context_text = pending.get("context", "")
-            context_parts.append(f"\n[ACCION PENDIENTE: {action_type}")
-            if context_text:
-                context_parts.append(f" - {context_text}")
-            context_parts.append("]")
-
-        brands_mentioned = []
-        products_mentioned = []
-        lower_msg = user_message.lower()
-
-        brand_keywords = ["yamaha", "honda", "suzuki", "zanella", "rouser", "guerrero", "corven", "gilera", "motomel", "bajaj", "ktm"]
-        product_keywords = ["aceite", "filtro", "bujia", "pastilla", "cadena", "kit", "amortiguador", "bateria", "neumatico"]
-
-        for brand in brand_keywords:
-            if brand in lower_msg:
-                brands_mentioned.append(brand)
-
-        for product in product_keywords:
-            if product in lower_msg:
-                products_mentioned.append(product)
-
-        if brands_mentioned or products_mentioned:
-            intent = "search" if any(x in lower_msg for x in ["busca", "tenes", "precio"]) else "chat"
-            update_session_summary(phone, products_mentioned, brands_mentioned, intent)
-
-        return "".join(context_parts) if context_parts else ""
-    except Exception as e:
-        logger.error(f"Error en build_enhanced_context: {e}")
-        return ""
-
-def generate_smart_ai_reply(phone, user_message, catalog_products):
-    try:
-        history = get_history_since(phone, days=3, limit=15)
-        context = build_enhanced_context(phone, user_message)
-
-        msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT}]
-
-        for h in history[-15:]:
-            role = "assistant" if h["role"] == "assistant" else "user"
-            msgs.append({"role": role, "content": h["content"]})
-
-        if context:
-            msgs.append({"role": "user", "content": f"{context}\n\nMensaje: {user_message}"})
-        else:
-            msgs.append({"role": "user", "content": f"Mensaje: {user_message}"})
-
-        if catalog_products:
-            catalog_text = "\n".join([
-                f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}"
-                for p in catalog_products[:8]
-            ])
-            msgs.append({
-                "role": "assistant",
-                "content": f"(Productos encontrados en catalogo)\n{catalog_text}"
-            })
-
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=msgs,
-                temperature=0.3,
-                max_tokens=400 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 300,
-                timeout=REQUESTS_TIMEOUT
-            )
-
-        txt = (resp.choices[0].message.content or "").strip()
-
-        if not txt or len(txt) < 10:
-            return "Uy, tuve un problema. ¿Me repetis?"
-
-        txt = sanitize_llm_response(txt, catalog_products)
-
-        return txt
-
-    except Exception as e:
-        logger.error(f"IA fallo: {e}", exc_info=True)
-        return "Uy, tuve un problema tecnico. Proba de nuevo en un ratito."
-
 # ------------------------------------------------------------------
 # FORMATO RESULTADOS
 # ------------------------------------------------------------------
@@ -1954,7 +1771,7 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.10.2
+# AGENTE PRINCIPAL – VERSIÓN 3.11.0
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
@@ -2036,7 +1853,7 @@ def run_agent(phone, user_message):
     # 5. Búsqueda + quality + filtros
     products = []
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
-        products = hybrid_search(query_for_search, limit=MAX_SEARCH_RESULTS)
+        products = [p for p, _ in semantic_search_v2(query_for_search, limit=MAX_SEARCH_RESULTS)]
         execution_context["search_executed"] = True
         execution_context["products_found"] = len(products)
         quality = validate_search_quality(query_for_search, products)
@@ -2194,7 +2011,7 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.10.2"}), 200
+    return jsonify({"status": "ok", "version": "3.11.0"}), 200
 
 
 # ------------------------------------------------------------------
@@ -2216,7 +2033,7 @@ init_db()
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.10.2 en puerto {port}")
+    logger.info(f"Iniciando Fran 3.11.0 en puerto {port}")
     logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"TC inicial: {get_exchange_rate()}")
     app.run(host="0.0.0.0", port=port, debug=False)
