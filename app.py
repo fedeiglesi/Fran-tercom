@@ -50,7 +50,9 @@ if not OPENAI_API_KEY:
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 CATALOG_URL = (
     os.environ.get("CATALOG_URL") or
-    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/main/catalogo_tercom_faiss.csv"
+    "CATALOG_URL = (
+    os.environ.get("CATALOG_URL") or
+    "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.11/catalogo_limpio_final_v4.csv"
 ).strip()
 
 EXCHANGE_API_URL = (
