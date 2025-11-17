@@ -1,11 +1,17 @@
+# Fran 3.11.4 - Arquitectura Mejorada Inspirada en Claude
+
+Acá va el código completo con la nueva arquitectura:
+
+```python
 # =========================================================
-# Fran 3.11.3 – Bot Mayorista Inteligente
+# Fran 3.11.4 – Bot Mayorista Inteligente
 # =========================================================
-# - Contexto conversacional: hasta 128 k tokens (ventana deslizante)
-# - Búsqueda: filtro lexical → FAISS sobre sub-conjunto
-# - Sin inyección de memoria larga
-# - Autocorrector de palabras para bajar errores por typos
-# - Mejora pedidos implícitos tipo “3 de cada una”, “todos x5”, etc.
+# NUEVA ARQUITECTURA inspirada en Claude:
+# - Context Quality Check pre-LLM
+# - Relevance scoring general (no keywords hardcoded)
+# - Forced code citation
+# - Post-validation de códigos mencionados
+# - Fallbacks seguros
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -40,7 +46,7 @@ CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.11/ca
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran313")
+logger = logging.getLogger("fran314")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -78,10 +84,15 @@ FAISS_MAPPING_PATH = os.environ.get("FAISS_MAPPING_PATH", "catalog_mapping.pkl")
 _safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
-MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "40"))
+MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
 MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
+
+# Nuevos parámetros de calidad
+RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "60.0"))
+QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "70.0"))
+QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "50.0"))
 
 INSTANT_THRESHOLD = 15
 ASYNC_QUICK = 40
@@ -89,7 +100,6 @@ ASYNC_MEDIUM = 80
 MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
-
 
 # ------------------------------------------------------------
 # TWILIO
@@ -126,6 +136,9 @@ _catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
 _catalog_lock = Lock()
 
 _embeddings_cache_lock = Lock()
+
+# Cache de fuzzy matching para post-validation
+_fuzzy_match_cache = TTLCache(maxsize=5000, ttl=3600)
 
 # ------------------------------------------------------------
 # UTILS
@@ -199,41 +212,418 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 def normalize_search_query(query):
     return strip_accents(query)
 
-# ---- funciones faltantes / calidad de búsqueda ----
-def validate_search_quality(query, products):
+# ------------------------------------------------------------
+# NUEVO: RELEVANCE SCORING GENERAL
+# ------------------------------------------------------------
+def calculate_relevance_score(query: str, product: dict) -> float:
+    """
+    Calcula qué tan relevante es un producto para el query.
+    Retorna score 0-100.
+    
+    Componentes:
+    - 40% overlap de palabras clave
+    - 40% fuzzy match del nombre completo
+    - 20% match de categoría
+    """
+    q_norm = normalize_search_query(query)
+    q_words = set(q_norm.split())
+    
+    # Texto del producto (multi-campo)
+    p_text = normalize_search_query(
+        f"{product.get('name', '')} {product.get('category', '')} "
+        f"{product.get('keywords', '')} {product.get('brand', '')} {product.get('model', '')}"
+    )
+    p_words = set(p_text.split())
+    
+    # 1. Overlap de palabras (40%)
+    overlap = len(q_words & p_words) / len(q_words) if q_words else 0
+    overlap_score = overlap * 40
+    
+    # 2. Fuzzy match del nombre completo (40%)
+    product_name = normalize_search_query(product.get('name', ''))
+    try:
+        fuzzy_ratio = fuzz.token_set_ratio(q_norm, product_name)
+        fuzzy_score = fuzzy_ratio * 0.4
+    except Exception:
+        fuzzy_score = 0
+    
+    # 3. Category match (20%)
+    category_score = 0
+    product_cat = normalize_search_query(product.get('category', ''))
+    for q_word in q_words:
+        if len(q_word) >= 4:  # Solo palabras significativas
+            if q_word in product_cat or product_cat in q_word:
+                category_score = 20
+                break
+    
+    total = overlap_score + fuzzy_score + category_score
+    return min(total, 100)
+
+
+def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE_MIN_SCORE) -> list:
+    """
+    Filtra productos por relevancia mínima.
+    Si NINGUNO supera min_score, retorna lista vacía.
+    """
+    if not products or not query:
+        return []
+    
+    scored = []
+    for p in products:
+        score = calculate_relevance_score(query, p)
+        if score >= min_score:
+            scored.append((p, score))
+    
+    # Ordenar por score descendente
+    scored.sort(key=lambda x: x[1], reverse=True)
+    
+    return [p for p, score in scored]
+
+
+# ------------------------------------------------------------
+# NUEVO: CONTEXT QUALITY ASSESSMENT
+# ------------------------------------------------------------
+def assess_context_quality(query: str, products: list) -> dict:
+    """
+    Evalúa si el contexto recuperado es suficiente para responder.
+    Similar a cómo Claude valida sus tool results.
+    
+    Returns:
+        dict con:
+        - sufficient: bool
+        - reason: str
+        - action: str (proceed | ask_clarification | suggest_alternatives)
+        - confidence: str (high | medium | low)
+        - message: str (opcional, para respuestas tempranas)
+    """
     if not products:
-        return {"quality": "none", "score": 0, "suggestion": "Sin resultados"}
-    q_words = set(normalize_search_query(query).split())
-    scores = []
-    for p in products[:10]:
-        p_words = set(normalize_search_query(p.get("name","")).split())
-        overlap = len(q_words & p_words) / len(q_words) if q_words else 0
-        scores.append(overlap)
-    avg = sum(scores) / len(scores) if scores else 0
-    if avg < 0.3:
-        return {"quality": "low", "score": int(avg*100), "suggestion": "¿Marca/modelo/año?"}
-    if avg < 0.6:
-        return {"quality": "medium", "score": int(avg*100)}
-    return {"quality": "high", "score": int(avg*100)}
+        return {
+            "sufficient": False,
+            "reason": "no_results",
+            "action": "ask_clarification",
+            "confidence": "none",
+            "message": "No encontré ese repuesto en el catálogo. ¿Me pasás más detalles? (marca/modelo/año)"
+        }
+    
+    # Calcular relevancia de top productos
+    scores = [calculate_relevance_score(query, p) for p in products[:10]]
+    avg_score = sum(scores) / len(scores) if scores else 0
+    max_score = max(scores) if scores else 0
+    
+    # Contar productos relevantes
+    relevant_count = sum(1 for s in scores if s >= RELEVANCE_MIN_SCORE)
+    
+    logger.info(f"Quality assessment - Avg: {avg_score:.1f}, Max: {max_score:.1f}, Relevant: {relevant_count}/{len(products[:10])}")
+    
+    # Si el MEJOR producto es irrelevante
+    if max_score < QUALITY_MEDIUM_THRESHOLD:
+        return {
+            "sufficient": False,
+            "reason": "low_relevance",
+            "action": "suggest_alternatives",
+            "confidence": "low",
+            "top_products": products[:3],
+            "avg_score": avg_score,
+            "max_score": max_score
+        }
+    
+    # Si hay pocos productos relevantes pero algunos buenos
+    if relevant_count < 3 and max_score >= RELEVANCE_MIN_SCORE:
+        return {
+            "sufficient": True,
+            "reason": "limited_but_valid",
+            "action": "show_with_caveat",
+            "confidence": "medium",
+            "relevant_count": relevant_count,
+            "avg_score": avg_score
+        }
+    
+    # Contexto de alta calidad
+    if avg_score >= QUALITY_HIGH_THRESHOLD:
+        confidence = "high"
+    elif avg_score >= QUALITY_MEDIUM_THRESHOLD:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    
+    return {
+        "sufficient": True,
+        "reason": "high_quality" if confidence == "high" else "acceptable",
+        "action": "proceed",
+        "confidence": confidence,
+        "avg_score": avg_score,
+        "relevant_count": relevant_count
+    }
 
-CATEGORY_KEYWORDS = {
-    "bateria": ["bateria", "batería", "battery"],
-    "aceite": ["aceite", "lubricante", "oil", "yamalube", "castrol"],
-    "filtro": ["filtro", "filter"],
-    "cadena": ["cadena", "chain", "transmision"],
-    "bujia": ["bujia", "bujía", "spark"],
+
+# ------------------------------------------------------------
+# NUEVO: CODE EXTRACTION & VALIDATION
+# ------------------------------------------------------------
+def extract_mentioned_codes(response_text: str) -> set:
+    """
+    Extrae todos los códigos TERCOM mencionados en la respuesta del LLM.
+    Busca patrones como:
+    - (1234/56789-012)
+    - (código 1234/56789-012)
+    - 1234/56789-012 (suelto)
+    """
+    codes = set()
+    
+    # Patrón 1: Códigos entre paréntesis con o sin "código"
+    pattern1 = r'\((?:código\s+|cod\s+)?(\d{4}/\d{5}-\d{3})\)'
+    codes.update(re.findall(pattern1, response_text, re.IGNORECASE))
+    
+    # Patrón 2: Códigos sueltos
+    pattern2 = r'\b(\d{4}/\d{5}-\d{3})\b'
+    codes.update(re.findall(pattern2, response_text))
+    
+    return codes
+
+
+def validate_response_codes(response_text: str, allowed_products: list) -> dict:
+    """
+    Valida que todos los códigos mencionados existan en productos permitidos.
+    Esto previene que el LLM invente códigos.
+    """
+    mentioned = extract_mentioned_codes(response_text)
+    allowed = {p.get('code', '') for p in allowed_products if p.get('code')}
+    
+    hallucinated = mentioned - allowed
+    
+    if hallucinated:
+        logger.error(f"⚠️ LLM mencionó códigos inexistentes: {hallucinated}")
+        return {
+            "valid": False,
+            "hallucinated_codes": list(hallucinated),
+            "mentioned_codes": list(mentioned),
+            "allowed_codes": list(allowed),
+            "action": "regenerate_or_fallback"
+        }
+    
+    if not mentioned and allowed:
+        # LLM no citó ningún código (puede ser válido para respuestas generales)
+        logger.warning("LLM no citó códigos específicos")
+        return {
+            "valid": True,
+            "cited_products": 0,
+            "warning": "no_citations"
+        }
+    
+    return {
+        "valid": True,
+        "cited_products": len(mentioned),
+        "codes": list(mentioned)
+    }
+
+
+def validate_mentioned_names(response_text: str, allowed_products: list) -> dict:
+    """
+    Valida que los nombres de productos mencionados existan en el catálogo.
+    Usa fuzzy matching para tolerar pequeñas variaciones.
+    """
+    if not allowed_products:
+        return {"valid": True}
+    
+    # Extraer nombres mencionados
+    mentioned_names = []
+    
+    # Nombres entre comillas
+    quoted = re.findall(r'"([^"]{5,})"', response_text)
+    mentioned_names.extend(quoted)
+    
+    # Nombres después de "tengo", "hay", etc.
+    patterns = [
+        r'(?:tengo|tenemos|hay|encontré)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{5,50})(?:\s+(?:para|de|en|cod|código|\()|\.|\,|$)',
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, response_text, re.IGNORECASE)
+        mentioned_names.extend(matches)
+    
+    if not mentioned_names:
+        return {"valid": True}
+    
+    # Normalizar nombres permitidos
+    allowed_names_normalized = [
+        normalize_search_query(p.get("name", "")) 
+        for p in allowed_products if p.get("name")
+    ]
+    
+    hallucinated_names = []
+    for name in mentioned_names:
+        name_norm = normalize_search_query(name)
+        
+        # Buscar match con fuzzy
+        cache_key = (name_norm, tuple(sorted(allowed_names_normalized)))
+        
+        if cache_key in _fuzzy_match_cache:
+            is_valid = _fuzzy_match_cache[cache_key]
+        else:
+            is_valid = any(
+                fuzz.partial_ratio(name_norm, allowed_name) > 70
+                for allowed_name in allowed_names_normalized
+            )
+            _fuzzy_match_cache[cache_key] = is_valid
+        
+        if not is_valid:
+            hallucinated_names.append(name)
+    
+    if hallucinated_names:
+        logger.warning(f"⚠️ LLM mencionó productos dudosos: {hallucinated_names}")
+        return {
+            "valid": False,
+            "hallucinated_names": hallucinated_names,
+            "action": "fallback"
+        }
+    
+    return {"valid": True}
+
+
+# ------------------------------------------------------------
+# AUTOCORRECTOR (de 3.11.3)
+# ------------------------------------------------------------
+CATEGORY_MAP = {
     "amortiguador": ["amort", "shock", "suspension"],
+    "bateria": ["bateria", "batería", "battery"],
+    "aceite": ["aceite", "oil", "lubricante"],
+    "filtro": ["filtro", "filter"],
+    "cadena": ["cadena", "chain"],
+    "bujia": ["bujia", "bujía", "spark"],
 }
+BRAND_LIST = [
+    "appia", "bajaj", "benelli", "beta", "brava", "corven", "gilera", "guerrero", "hero", "honda",
+    "husqvarna", "kawasaki", "keeway", "keller", "kymco", "mondial", "motomel", "moto guzzi",
+    "nsu", "suzuki", "tvs", "yamaha", "zanella"
+]
+MODEL_LIST = [
+    "50", "70", "80", "90", "100", "110", "125", "135", "150", "160", "180", "200", "220", "250", "300",
+    "ax100", "biz", "blade", "blitz", "boxer", "c50", "c70", "c90", "cb", "cg", "crypton", "dominar",
+    "dakar", "due", "eco", "en125", "energy", "falcon", "fazer", "fire", "flash", "fly", "fz", "gixxer",
+    "gn125", "go", "hd", "hunter", "jet", "jog", "k1", "k2", "k3", "k4", "kmx", "liberty", "luxe", "magic",
+    "monkey", "motard", "navi", "ns", "pulsar", "rc", "rks", "road", "rocket", "rouser", "rs", "rx",
+    "sahel", "sempre", "sma", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
+    "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
+    "wave", "x3m", "xr", "xtz", "zb", "ztt"
+]
 
-def detect_category_filter(query):
-    if not query:
-        return None
-    q = query.lower()
-    for cat, words in CATEGORY_KEYWORDS.items():
-        if any(w in q for w in words):
-            return cat
-    return None
+def _build_autocorrect_vocab():
+    base_tokens = []
+    for cat, variants in CATEGORY_MAP.items():
+        base_tokens.append(cat)
+        base_tokens.extend(variants)
+    base_tokens.extend(BRAND_LIST)
+    base_tokens.extend(MODEL_LIST)
+    base_tokens.extend([
+        "pastilla", "disco", "embrague", "regulador", "rectificador",
+        "carburador", "inyector", "tanque", "asiento", "manubrio",
+        "espejo", "cubierta", "neumatico", "ruleman", "rodamiento",
+        "corona", "piñon", "kit transmision", "kit freno"
+    ])
+    vocab = {normalize_search_query(t) for t in base_tokens if t}
+    return sorted(vocab)
 
+AUTOCORRECT_VOCAB = _build_autocorrect_vocab()
+
+def _looks_like_code_or_number(token: str) -> bool:
+    if not token:
+        return False
+    if token.isdigit():
+        return True
+    if re.match(r"^\d{4}/\d{5}-\d{3}$", token):
+        return True
+    if re.match(r"^\d{3,}[/-]\d+", token):
+        return True
+    return False
+
+def autocorrect_keywords(text: str):
+    """
+    Autocorrector simple que no toca códigos ni números.
+    """
+    if not text:
+        return "", []
+    
+    tokens = text.split()
+    corrections = []
+    new_tokens = []
+    
+    for tok in tokens:
+        raw = tok
+        base = normalize_search_query(tok)
+        
+        if _looks_like_code_or_number(raw):
+            new_tokens.append(raw)
+            continue
+        
+        if len(base) <= 3:
+            new_tokens.append(raw)
+            continue
+        
+        try:
+            best = process.extractOne(base, AUTOCORRECT_VOCAB, scorer=fuzz.ratio)
+        except Exception:
+            best = None
+        
+        if best and best[1] >= 90 and best[0] != base:
+            corrected = best[0]
+            new_tokens.append(corrected)
+            corrections.append(f"{raw}→{corrected}")
+        else:
+            new_tokens.append(raw)
+    
+    corrected_text = " ".join(new_tokens)
+    return corrected_text, corrections
+
+
+# ------------------------------------------------------------
+# QUERY PARSING (de 3.11.3)
+# ------------------------------------------------------------
+def parse_query_v2(query: str) -> dict:
+    q = normalize_search_query(query)
+    tokens = q.split()
+    out = {"brands": [], "models": [], "category": None, "raw": q}
+    
+    for cat, variants in CATEGORY_MAP.items():
+        if any(v in q for v in variants):
+            out["category"] = cat
+            break
+    
+    for b in BRAND_LIST:
+        if b in q:
+            out["brands"].append(b)
+    
+    for m in MODEL_LIST:
+        if m in q:
+            out["models"].append(m)
+    
+    return out
+
+def filter_catalog(catalog, parsed):
+    if not catalog:
+        return []
+    brands = set(parsed["brands"])
+    models = set(parsed["models"])
+    cat = parsed["category"]
+    
+    def _match(p):
+        if brands:
+            p_brand = normalize_search_query(p.get("brand", ""))
+            if not any(b in p_brand for b in brands):
+                return False
+        if models:
+            p_model = normalize_search_query(p.get("model", ""))
+            if not any(m in p_model for m in models):
+                return False
+        if cat:
+            p_cat = normalize_search_query(p.get("category", ""))
+            if not any(v in p_cat for v in CATEGORY_MAP.get(cat, [cat])):
+                return False
+        return True
+    
+    return [p for p in catalog if _match(p)]
+
+
+# ------------------------------------------------------------
+# PENDING ACTIONS
+# ------------------------------------------------------------
 def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
     if not phone:
         return
@@ -291,7 +681,7 @@ def clear_pending_action(phone):
         logger.error(f"Error limpiando pending_action: {e}")
 
 # ------------------------------------------------------------------
-# DATABASE – SQLITE RESILIENTE
+# DATABASE
 # ------------------------------------------------------------------
 @contextmanager
 def get_db_connection():
@@ -302,7 +692,7 @@ def get_db_connection():
             os.makedirs(db_dir, exist_ok=True)
     except Exception as e:
         logger.warning(f"No se pudo crear dir DB: {e}")
-
+    
     for attempt in range(3):
         try:
             conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -335,14 +725,14 @@ def init_db():
             c.execute("PRAGMA journal_mode=WAL;")
         except Exception as e:
             logger.warning(f"No se pudo activar WAL: {e}")
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 phone TEXT, message TEXT, role TEXT, timestamp TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone_timestamp ON conversations(phone, timestamp DESC)")
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS carts (
                 phone TEXT, code TEXT, quantity INTEGER, name TEXT,
@@ -350,14 +740,14 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS user_state (
                 phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT,
                 last_price_ars TEXT, updated_at TEXT
             )
         """)
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS search_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -365,13 +755,13 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone_timestamp ON search_history(phone, timestamp DESC)")
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS last_search (
                 phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT, metadata TEXT
             )
         """)
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
@@ -379,7 +769,7 @@ def init_db():
                 status TEXT, created_at TEXT
             )
         """)
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS bulk_jobs (
                 job_id TEXT PRIMARY KEY, phone TEXT, raw_list TEXT,
@@ -387,7 +777,7 @@ def init_db():
                 results_json TEXT, status TEXT, created_at TEXT, completed_at TEXT
             )
         """)
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS interactions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -397,7 +787,7 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone_timestamp ON interactions(phone, timestamp DESC)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS performance_metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -405,7 +795,7 @@ def init_db():
                 results_count INTEGER, timestamp TEXT
             )
         """)
-
+        
         c.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 phone TEXT PRIMARY KEY,
@@ -451,19 +841,14 @@ def log_performance(phone, intent, duration, results_count):
 def get_exchange_rate():
     with exchange_lock:
         now = datetime.now().timestamp()
-
+        
         if exchange_cache["rate"] and exchange_cache["timestamp"]:
             age = now - exchange_cache["timestamp"]
             if age < EXCHANGE_CACHE_TTL:
                 return exchange_cache["rate"]
-
+        
         try:
             res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
-        except NameError:
-            # fallback si hay typo en REQUEST_HEADERS
-            res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
-
-        try:
             res.raise_for_status()
             venta = res.json().get("venta", None)
             rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
@@ -509,10 +894,6 @@ def save_message(phone, msg, role):
         logger.error(f"Error guardando mensaje: {e}")
 
 def get_history_since(phone, days=7, limit=2000):
-    """
-    Devuelve TODOS los mensajes de la conversación actual (hasta 7 días).
-    Se usa para armar el prompt completo sin resumir.
-    """
     if not phone:
         return []
     try:
@@ -521,8 +902,8 @@ def get_history_since(phone, days=7, limit=2000):
             cur = conn.cursor()
             cur.execute(
                 "SELECT message, role, timestamp FROM conversations "
-                "WHERE phone = ? AND timestamp >= ? ORDER BY timestamp ASC",
-                (phone, since)
+                "WHERE phone = ? AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
+                (phone, since, limit)
             )
             rows = cur.fetchall()
             return [{"role": r[1], "content": r[0], "timestamp": r[2]} for r in rows]
@@ -549,7 +930,7 @@ def save_to_search_history(phone, products, query):
                 "INSERT INTO search_history (phone, products_json, query, timestamp) VALUES (?, ?, ?, ?)",
                 (phone, json.dumps(serializable, ensure_ascii=False), query or "", datetime.now().isoformat())
             )
-
+            
             cur = conn.cursor()
             cur.execute(
                 "SELECT id FROM search_history WHERE phone=? ORDER BY timestamp DESC LIMIT -1 OFFSET 5",
@@ -631,7 +1012,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
         real_total, _ = cart_totals(phone)
         if abs(Decimal(total_ars) - real_total) > Decimal("0.01"):
             raise ValueError("Total manipulado")
-
+        
         order_id = f"ORD-{int(time.time()*10)}"
         with get_db_connection() as conn:
             conn.execute(
@@ -647,7 +1028,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
         return None
 
 # ------------------------------------------------------------------
-# CARRITO – TTL 7 DÍAS
+# CARRITO
 # ------------------------------------------------------------------
 def cart_add(phone, code, qty, name, price_ars, price_usd):
     if not phone or not code:
@@ -656,20 +1037,20 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
         qty = max(1, min(int(qty or 1), 1000))
         price_ars = price_ars.quantize(Decimal("0.01"))
         price_usd = price_usd.quantize(Decimal("0.01"))
-
+        
         catalog, _idx = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
         if prod is None:
             logger.warning(f"Producto {code} no existe en catalogo")
             return False
-
+        
         with cart_lock:
             with get_db_connection() as conn:
                 cur = conn.cursor()
                 cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=?", (phone, code))
                 row = cur.fetchone()
                 now = datetime.now().isoformat()
-
+                
                 if row:
                     new_qty = int(row[0]) + qty
                     cur.execute(
@@ -687,7 +1068,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
         logger.error(f"Error en cart_add: {e}")
         return False
 
-def cart_get(phone, max_age_hours=168):  # 7 días
+def cart_get(phone, max_age_hours=168):
     if not phone:
         return []
     try:
@@ -770,18 +1151,15 @@ def load_catalog_enriched():
         text = _load_raw_csv()
         if not text:
             return []
-
+        
         reader = csv.reader(io.StringIO(text))
         rows = list(reader)
         if not rows:
             return []
-
+        
         header = rows[0]
         data_rows = rows[1:]
-
-        # Mapeo explícito al CSV:
-        # code, description, price_importado, price_nacional,
-        # categoria_nueva, marca_final, modelo_final
+        
         idx_code = _extract_column(header, ["code", "codigo", "id"])
         idx_name = _extract_column(header, ["description", "descripcion", "producto", "nombre", "name"])
         idx_usd = _extract_column(header, ["price_importado", "precio_importado", "usd", "dolar", "precio en dolares", "price_usd"])
@@ -793,23 +1171,23 @@ def load_catalog_enriched():
         idx_oem = _extract_column(header, ["oem", "codigo oem", "original"])
         idx_alt = _extract_column(header, ["alt_names", "nombres alternativos", "alias"])
         idx_vehicle = _extract_column(header, ["vehicle_type", "tipo de moto", "aplica a"])
-
+        
         exchange = get_exchange_rate()
         catalog = []
-
+        
         for line in data_rows:
             if not line:
                 continue
             try:
                 code = line[idx_code].strip() if (idx_code is not None and idx_code < len(line)) else ""
                 name = line[idx_name].strip() if (idx_name is not None and idx_name < len(line)) else ""
-
+                
                 price_usd = to_decimal_money(line[idx_usd]) if (idx_usd is not None and idx_usd < len(line)) else Decimal("0")
                 price_ars = to_decimal_money(line[idx_ars]) if (idx_ars is not None and idx_ars < len(line)) else Decimal("0")
-
+                
                 if price_ars == 0 and price_usd > 0:
                     price_ars = (price_usd * exchange).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
+                
                 brand = line[idx_brand].strip() if (idx_brand is not None and idx_brand < len(line)) else ""
                 model = line[idx_model].strip() if (idx_model is not None and idx_model < len(line)) else ""
                 category = line[idx_category].strip() if (idx_category is not None and idx_category < len(line)) else ""
@@ -817,7 +1195,7 @@ def load_catalog_enriched():
                 oem = line[idx_oem].strip() if (idx_oem is not None and idx_oem < len(line)) else ""
                 alt_names = line[idx_alt].strip() if (idx_alt is not None and idx_alt < len(line)) else ""
                 vehicle_type = line[idx_vehicle].strip() if (idx_vehicle is not None and idx_vehicle < len(line)) else ""
-
+                
                 search_text_parts = [
                     name,
                     f"marca {brand}" if brand else "",
@@ -829,10 +1207,10 @@ def load_catalog_enriched():
                     f"palabras clave {keywords}" if keywords else "",
                 ]
                 search_text = " ".join([p for p in search_text_parts if p]).strip()
-
+                
                 if not name and not search_text:
                     continue
-
+                
                 catalog.append({
                     "code": code,
                     "name": name,
@@ -850,7 +1228,7 @@ def load_catalog_enriched():
             except Exception as e:
                 logger.warning(f"Error procesando linea CSV: {e}")
                 continue
-
+        
         logger.info(f"Catalogo enriquecido cargado: {len(catalog)} productos")
         return catalog
     except Exception as e:
@@ -872,17 +1250,15 @@ def load_faiss_index():
             index = faiss.read_index(FAISS_INDEX_PATH)
             with open(FAISS_MAPPING_PATH, "rb") as f:
                 catalog = pickle.load(f)
-
-            # Validar consistencia
+            
             if index.ntotal != len(catalog):
                 logger.warning(
                     f"FAISS inconsistente (index.ntotal={index.ntotal}, catalog={len(catalog)}). "
                     "Se reconstruirá desde cero."
                 )
                 return None, None
-
+            
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
-            # Orden consistente: (catalog, index)
             return catalog, index
         else:
             logger.warning("FAISS no encontrado en disco, se construira de cero.")
@@ -894,7 +1270,6 @@ def load_faiss_index():
 def generate_embeddings_with_cache(texts):
     with _embeddings_cache_lock:
         cache = {}
-        # ========== FIX 1: CACHE CORRUPTO RESILIENTE ==========
         if os.path.exists(EMBEDDINGS_CACHE_PATH):
             try:
                 with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
@@ -903,30 +1278,28 @@ def generate_embeddings_with_cache(texts):
             except Exception as e:
                 logger.error(f"Cache corrupto, recreando desde cero: {e}")
                 cache = {}
-                # Borrar archivo corrupto
                 try:
                     os.remove(EMBEDDINGS_CACHE_PATH)
                     logger.info("Cache corrupto eliminado")
                 except Exception as e2:
                     logger.warning(f"No se pudo borrar cache corrupto: {e2}")
-        # ========== FIN FIX 1 ==========
-
+        
         texts_to_embed = []
         text_indices = []
-
+        
         for idx, text in enumerate(texts):
             if text not in cache:
                 texts_to_embed.append(text)
                 text_indices.append(idx)
-
+        
         if texts_to_embed:
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
             batch = 256
             max_retries = 3
-
+            
             for i in range(0, len(texts_to_embed), batch):
                 chunk = texts_to_embed[i:i + batch]
-
+                
                 for retry in range(max_retries):
                     try:
                         with openai_sem:
@@ -936,29 +1309,27 @@ def generate_embeddings_with_cache(texts):
                                 timeout=REQUESTS_TIMEOUT
                             )
                         chunk_vectors = [d.embedding for d in resp.data]
-
+                        
                         for text, vec in zip(chunk, chunk_vectors):
                             cache[text] = vec
-
+                        
                         break
                     except RateLimitError as e:
                         if retry < max_retries - 1:
-                            # ========== FIX 2: BACKOFF EXPONENCIAL MÁS AGRESIVO ==========
-                            wait_time = min((2 ** retry) * random.uniform(2, 5), 60)  # Tope de 60s
+                            wait_time = min((2 ** retry) * random.uniform(2, 5), 60)
                             logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s... (intento {retry+1}/{max_retries})")
-                            # ========== FIN FIX 2 ==========
                             time.sleep(wait_time)
                         else:
                             logger.error(f"RateLimitError persistente: {e}")
                             raise
-
+                
                 try:
                     with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
                         pickle.dump(cache, f)
                     logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
                 except Exception as e:
                     logger.warning(f"Error guardando cache de embeddings: {e}")
-
+        
         final_vectors = []
         for text in texts:
             if text in cache and cache[text]:
@@ -966,30 +1337,30 @@ def generate_embeddings_with_cache(texts):
             else:
                 logger.error(f"Texto sin embedding: {text[:50]}")
                 final_vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
-
+        
         return final_vectors
 
 def _build_faiss_index_from_catalog(catalog):
     try:
         if not catalog:
             return None, 0
-
+        
         texts = [c["search_text"] for c in catalog]
         if not texts:
             return None, 0
-
+        
         vectors = generate_embeddings_with_cache(texts)
-
+        
         if not vectors:
             return None, 0
-
+        
         vecs = np.array(vectors).astype("float32")
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
             return None, 0
-
+        
         index = faiss.IndexFlatL2(vecs.shape[1])
         index.add(vecs)
-
+        
         logger.info(f"Indice FAISS creado con {vecs.shape[0]} vectores")
         return index, vecs.shape[0]
     except Exception as e:
@@ -1000,247 +1371,80 @@ def get_catalog_and_index():
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None:
             return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
-
+        
         catalog, index = load_faiss_index()
-
+        
         if catalog and index:
             _catalog_and_index_cache["catalog"] = catalog
             _catalog_and_index_cache["index"] = index
             _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
             return catalog, index
-
+        
         catalog = load_catalog_enriched()
         index, _ = _build_faiss_index_from_catalog(catalog)
-
+        
         if index and catalog:
             save_faiss_index(index, catalog)
-
+        
         _catalog_and_index_cache["catalog"] = catalog
         _catalog_and_index_cache["index"] = index
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         return catalog, index
 
 # ------------------------------------------------------------------
-# BÚSQUEDA – FILTRO LEXICAL + FAISS
+# BÚSQUEDA SEMÁNTICA
 # ------------------------------------------------------------------
-hybrid_cache = TTLCache(maxsize=1024, ttl=300)
-
-# Normalización rápida
-def normalize(text):
-    return strip_accents(text).lower()
-
-# ---------- sinónimos ----------
-CATEGORY_MAP = {
-    "amortiguador": ["amort", "shock", "suspension"],
-    "bateria": ["bateria", "batería", "battery"],
-    "aceite": ["aceite", "oil", "lubricante"],
-    "filtro": ["filtro", "filter"],
-    "cadena": ["cadena", "chain"],
-    "bujia": ["bujia", "bujía", "spark"],
-}
-BRAND_LIST = [
-    "appia", "bajaj", "benelli", "beta", "brava", "corven", "gilera", "guerrero", "hero", "honda",
-    "husqvarna", "kawasaki", "keeway", "keller", "kymco", "mondial", "motomel", "moto guzzi",
-    "nsu", "suzuki", "tvs", "yamaha", "zanella"
-]
-MODEL_LIST = [
-    "50", "70", "80", "90", "100", "110", "125", "135", "150", "160", "180", "200", "220", "250", "300",
-    "ax100", "biz", "blade", "blitz", "boxer", "c50", "c70", "c90", "cb", "cg", "crypton", "dominar",
-    "dakar", "due", "eco", "en125", "energy", "falcon", "fazer", "fire", "flash", "fly", "fz", "gixxer",
-    "gn125", "go", "hd", "hunter", "jet", "jog", "k1", "k2", "k3", "k4", "kmx", "liberty", "luxe", "magic",
-    "monkey", "motard", "navi", "ns", "pulsar", "rc", "rks", "road", "rocket", "rouser", "rs", "rx",
-    "sahel", "sempre", "sma", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
-    "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
-    "wave", "x3m", "xr", "xtz", "zb", "ztt"
-]
-
-# ------------------------------------------------------------------
-# AUTOCORRECTOR – PARA BAJAR ERRORES POR TYPOS
-# ------------------------------------------------------------------
-def _build_autocorrect_vocab():
-    base_tokens = []
-
-    # categorías y variantes
-    for cat, variants in CATEGORY_MAP.items():
-        base_tokens.append(cat)
-        base_tokens.extend(variants)
-
-    # marcas y modelos
-    base_tokens.extend(BRAND_LIST)
-    base_tokens.extend(MODEL_LIST)
-
-    # algunas piezas / palabras comunes
-    base_tokens.extend([
-        "pastilla", "disco", "embrague", "regulador", "rectificador",
-        "carburador", "inyector", "tanque", "asiento", "manubrio",
-        "espejo", "cubierta", "neumatico", "ruleman", "rodamiento",
-        "corona", "piñon", "kit transmision", "kit freno"
-    ])
-
-    vocab = {normalize(t) for t in base_tokens if t}
-    return sorted(vocab)
-
-AUTOCORRECT_VOCAB = _build_autocorrect_vocab()
-
-def _looks_like_code_or_number(token: str) -> bool:
-    if not token:
-        return False
-    if token.isdigit():
-        return True
-    if re.match(r"^\d{4}/\d{5}-\d{3}$", token):
-        return True
-    if re.match(r"^\d{3,}[/-]\d+", token):
-        return True
-    return False
-
-def autocorrect_keywords(text: str):
-    """
-    Autocorrector simple:
-    - No toca códigos ni números (1234/56789-012)
-    - Corrige palabras largas usando vocabulario de marcas/modelos/categorías
-    Devuelve: (texto_corregido, lista_de_correcciones)
-    """
-    if not text:
-        return "", []
-
-    tokens = text.split()
-    corrections = []
-    new_tokens = []
-
-    for tok in tokens:
-        raw = tok
-        base = normalize(tok)
-
-        if _looks_like_code_or_number(raw):
-            new_tokens.append(raw)
-            continue
-
-        # no corrijo tokens muy cortos
-        if len(base) <= 3:
-            new_tokens.append(raw)
-            continue
-
-        try:
-            best = process.extractOne(base, AUTOCORRECT_VOCAB, scorer=fuzz.ratio)
-        except Exception:
-            best = None
-
-        if best and best[1] >= 90 and best[0] != base:
-            corrected = best[0]
-            new_tokens.append(corrected)
-            corrections.append(f"{raw}→{corrected}")
-        else:
-            new_tokens.append(raw)
-
-    corrected_text = " ".join(new_tokens)
-    return corrected_text, corrections
-
-# ------------------------------------------------------------------
-# PARSEO DE QUERY
-# ------------------------------------------------------------------
-def parse_query_v2(query: str) -> dict:
-    """
-    Devuelve marca, modelo, categoría detectados (puede haber más de uno).
-    """
-    q = normalize(query)
-    tokens = q.split()
-    out = {"brands": [], "models": [], "category": None, "raw": q}
-
-    # categoría
-    for cat, variants in CATEGORY_MAP.items():
-        if any(v in q for v in variants):
-            out["category"] = cat
-            break
-
-    # marcas
-    for b in BRAND_LIST:
-        if b in q:
-            out["brands"].append(b)
-
-    # modelos
-    for m in MODEL_LIST:
-        if m in q:
-            out["models"].append(m)
-
-    return out
-
-def filter_catalog(catalog, parsed):
-    """
-    Filtra el catálogo completo por marca/modelo/categoría.
-    """
-    if not catalog:
-        return []
-    brands = set(parsed["brands"])
-    models = set(parsed["models"])
-    cat = parsed["category"]
-
-    def _match(p):
-        # marca
-        if brands:
-            p_brand = normalize(p.get("brand", ""))
-            if not any(b in p_brand for b in brands):
-                return False
-        # modelo
-        if models:
-            p_model = normalize(p.get("model", ""))
-            if not any(m in p_model for m in models):
-                return False
-        # categoría
-        if cat:
-            p_cat = normalize(p.get("category", ""))
-            if not any(v in p_cat for v in CATEGORY_MAP.get(cat, [cat])):
-                return False
-        return True
-
-    return [p for p in catalog if _match(p)]
-
 def semantic_search_v2(query: str, top_k: int = 60) -> list:
-    """
-    1) Filtra lexicalmente
-    2) Embedde solo el sub-conjunto
-    3) FAISS/inner-product temporal sobre ese sub-conjunto
-    Retorna lista de (producto, score)
-    """
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
         return []
-
-    # PREFILTRO POR CATEGORÍA ANTES DE EMBEDDINGS
-    cat = detect_category_filter(query)
-    if cat:
-        catalog = [p for p in catalog if cat in normalize(p.get("category", ""))]
-        logger.info(f"[PRE-FILTER] Cat={cat} → {len(catalog)} productos")
-
+    
+    # Pre-filtro por categoría si aplica
+    detected_category = None
+    for cat, variants in CATEGORY_MAP.items():
+        if any(v in normalize_search_query(query) for v in variants):
+            detected_category = cat
+            break
+    
+    if detected_category:
+        filtered_catalog = [
+            p for p in catalog 
+            if detected_category in normalize_search_query(p.get("category", ""))
+        ]
+        if filtered_catalog:
+            logger.info(f"Pre-filtro por categoría '{detected_category}': {len(filtered_catalog)} productos")
+            catalog = filtered_catalog
+    
+    # Filtro lexical
     parsed = parse_query_v2(query)
     filtered = filter_catalog(catalog, parsed)
-
-    # Si el filtro devolvió vacío, caemos al catálogo completo (mejor tolerancia)
+    
     if not filtered:
         filtered = catalog
-
-    # embeddear solo los filtrados
+    
+    # Embeddings solo del sub-conjunto
     texts = [p["search_text"] for p in filtered]
     vectors = generate_embeddings_with_cache(texts)
     vecs = np.array(vectors).astype("float32")
-
-    # índice temporal
+    
+    # Índice temporal
     dim = vecs.shape[1]
     temp_index = faiss.IndexFlatIP(dim)
     faiss.normalize_L2(vecs)
     temp_index.add(vecs)
-
-    # embeddear consulta
+    
+    # Embedding del query
     emb = generate_embeddings_with_cache([query])[0]
     emb = np.array([emb]).astype("float32")
     faiss.normalize_L2(emb)
-
-    D, I = temp_index.search(emb, top_k)
+    
+    D, I = temp_index.search(emb, min(top_k, len(filtered)))
     results = []
     for dist, idx in zip(D[0], I[0]):
         if 0 <= idx < len(filtered):
             score = float(dist)
             results.append((filtered[idx], score))
-
+    
     return sorted(results, key=lambda x: x[1], reverse=True)
 
 # ------------------------------------------------------------------
@@ -1263,11 +1467,11 @@ def parse_bulk_list(text):
             parsed.append((qty, product_name))
         else:
             parsed.append((1, line))
-
+    
     if len(parsed) > MAX_BULK_ITEMS:
         logger.warning(f"Lista truncada: {len(parsed)} -> {MAX_BULK_ITEMS}")
         return parsed[:MAX_BULK_ITEMS]
-
+    
     return parsed
 
 def is_bulk_list_request(text):
@@ -1279,26 +1483,25 @@ def is_bulk_list_request(text):
     lines_with_qty = sum(1 for l in lines if re.match(r"^\d+\s+\w", l.strip()))
     has_quote_intent = any(kw in lower for kw in ["cotiz", "precio", "cuanto", "tenes", "stock", "pedido", "lista"])
     is_multiline = len(lines) >= 3
-
+    
     is_bulk = (lines_with_qty >= 3) or (has_quote_intent and is_multiline and lines_with_qty >= 1)
     count = len(lines) if is_bulk else 0
-
+    
     return is_bulk, count
 
 def process_bulk_sync(phone, raw_list):
     parsed_items = parse_bulk_list(raw_list)
     if not parsed_items:
         return {"success": False, "error": "No pude interpretar la lista"}
-
+    
     results, not_found = [], []
     total_quoted = Decimal("0")
-
+    
     for requested_qty, product_name in parsed_items:
-        # autocorrect por cada renglón de lista
         corrected_name, corr = autocorrect_keywords(product_name)
         if corr:
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
-
+        
         matches = semantic_search_v2(corrected_name, top_k=3)
         if matches:
             best, score = matches[0]
@@ -1316,7 +1519,7 @@ def process_bulk_sync(phone, raw_list):
             })
         else:
             not_found.append({"requested": product_name, "quantity": requested_qty})
-
+    
     return {
         "success": True,
         "found_count": len(results),
@@ -1338,14 +1541,14 @@ def create_bulk_job(phone, raw_list, item_count):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (job_id, phone, raw_list, item_count, 0, 0, "[]", "processing", datetime.now().isoformat())
             )
-
+        
         bulk_queue.put({
             "job_id": job_id,
             "phone": phone,
             "raw_list": raw_list,
             "total_items": item_count
         })
-
+        
         return job_id
     except Exception as e:
         logger.error(f"Error creando bulk_job: {e}")
@@ -1357,22 +1560,22 @@ def process_bulk_async(job):
         phone = job["phone"]
         raw_list = job["raw_list"]
         start_time = time.time()
-
+        
         logger.info(f"Procesando job {job_id}")
-
+        
         parsed_items = parse_bulk_list(raw_list)
         results, not_found = [], []
         total_quoted = Decimal("0")
-
+        
         for i, (requested_qty, product_name) in enumerate(parsed_items):
             if time.time() - start_time > BULK_TIMEOUT:
                 logger.warning(f"Job {job_id} timeout despues de {BULK_TIMEOUT}s")
                 break
-
+            
             corrected_name, corr = autocorrect_keywords(product_name)
             if corr:
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
-
+            
             matches = semantic_search_v2(corrected_name, top_k=3)
             if matches:
                 best, score = matches[0]
@@ -1390,14 +1593,14 @@ def process_bulk_async(job):
                 })
             else:
                 not_found.append({"requested": product_name, "quantity": requested_qty})
-
+            
             if (i + 1) % 10 == 0:
                 with get_db_connection() as conn:
                     conn.execute(
                         "UPDATE bulk_jobs SET processed_items=?, found_items=? WHERE job_id=?",
                         (i + 1, len(results), job_id)
                     )
-
+        
         final_results = {
             "results": results,
             "not_found": not_found,
@@ -1405,7 +1608,7 @@ def process_bulk_async(job):
             "found_count": len(results),
             "not_found_count": len(not_found)
         }
-
+        
         with get_db_connection() as conn:
             conn.execute(
                 """UPDATE bulk_jobs
@@ -1413,7 +1616,7 @@ def process_bulk_async(job):
                    WHERE job_id=?""",
                 (len(parsed_items), len(results), json.dumps(final_results), "completed", datetime.now().isoformat(), job_id)
             )
-
+        
         products_for_save = [
             {
                 "code": r["code"],
@@ -1426,11 +1629,11 @@ def process_bulk_async(job):
         ]
         save_last_search(phone, products_for_save, "Lista async")
         save_to_search_history(phone, products_for_save, "Lista async")
-
+        
         send_bulk_completion(phone, final_results)
-
+        
         logger.info(f"Job {job_id} completado: {len(results)}/{len(parsed_items)} encontrados")
-
+        
     except Exception as e:
         logger.error(f"Error procesando job: {e}", exc_info=True)
         try:
@@ -1451,19 +1654,18 @@ def bulk_worker():
             logger.exception("Worker crashed, respawning...")
             time.sleep(5)
 
-# Lanzar 2 workers
 for _ in range(2):
     threading.Thread(target=bulk_worker, daemon=True).start()
 
 def send_bulk_completion(phone, results):
     if not twilio_rest_client or not phone:
         return
-
+    
     try:
         found = results.get("found_count", 0)
         not_found_count = results.get("not_found_count", 0)
         total = results.get("total_quoted", 0)
-
+        
         message = f"""Listo! Procesé tu lista:
 
 {found} productos encontrados
@@ -1472,19 +1674,19 @@ def send_bulk_completion(phone, results):
 TOTAL: {format_price(Decimal(str(total)))}
 
 ¿Los agregamos al carrito? Decime: dale"""
-
+        
         twilio_rest_client.messages.create(
             from_=TWILIO_WHATSAPP_FROM,
             body=message,
             to=phone
         )
-
+        
         logger.info(f"Notificacion enviada a {phone}")
     except Exception as e:
         logger.error(f"Error enviando notificacion: {e}")
 
 # ------------------------------------------------------------------
-# INTENT DETECTOR CON LLM
+# INTENT DETECTOR
 # ------------------------------------------------------------------
 INTENT_SYSTEM_PROMPT = """
 Sos un clasificador de intenciones para un vendedor mayorista (WhatsApp).
@@ -1546,34 +1748,16 @@ def detect_intent_llm(msg):
         return {"intent": "desconocido", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
-# IMPLÍCITO – "3 de cada una" (MEJORADO)
+# PEDIDOS IMPLÍCITOS
 # ------------------------------------------------------------------
 def detect_implicit_cart_action(message, phone):
-    """
-    Detecta pedidos implícitos basados en la última búsqueda:
-    - "3 de cada una"
-    - "3 de cada"
-    - "2 c/u"
-    - "2 de todos", "todos x5", "todos por 5"
-    - "agregame todos", "los quiero todos"
-    - "de esos 3", "de esos poneme 5"
-
-    Siempre devuelve una acción homogénea:
-    {
-        "action": "add_each_quantity",
-        "quantity": <int>,
-        "products": [ ... productos de last_search ... ]
-    }
-
-    Si no detecta nada o no hay last_search, devuelve None.
-    """
     msg = (message or "").lower()
     last = get_last_search(phone)
     if not last or not last.get("products"):
         return None
-
+    
     products = last["products"]
-
+    
     # A) "3 de cada", "3 de cada una/uno", "3 c/u"
     m = re.search(r"(\d+)\s*(de\s*cada(\s+una|\s+uno)?|c\/u)", msg)
     if m:
@@ -1583,7 +1767,7 @@ def detect_implicit_cart_action(message, phone):
             "quantity": qty,
             "products": products
         }
-
+    
     # B) "2 de todos", "3 de todas"
     m = re.search(r"(\d+)\s+de\s+(todos?|todas?)", msg)
     if m:
@@ -1593,7 +1777,7 @@ def detect_implicit_cart_action(message, phone):
             "quantity": qty,
             "products": products
         }
-
+    
     # C) "todos x5" / "todos por 5" / "todas 5"
     m = re.search(r"(todos?|todas?)\s*(x|por)?\s*(\d+)", msg)
     if m:
@@ -1603,7 +1787,7 @@ def detect_implicit_cart_action(message, phone):
             "quantity": qty,
             "products": products
         }
-
+    
     # D) "agregame todos", "sumame todos", "mandame todos"
     if re.search(r"(agregame|sumame|mandame|poneme|dejame)\s+(todos?|todas?)", msg):
         return {
@@ -1611,7 +1795,7 @@ def detect_implicit_cart_action(message, phone):
             "quantity": 1,
             "products": products
         }
-
+    
     # E) "esos" / "esas" / "los que me pasaste" / "los de arriba"
     if re.search(r"(esos|esas|los que me pasaste|los de arriba|los anteriores)", msg):
         m_qty = re.search(r"(\d+)", msg)
@@ -1621,11 +1805,11 @@ def detect_implicit_cart_action(message, phone):
             "quantity": qty,
             "products": products
         }
-
+    
     return None
 
 # ------------------------------------------------------------------
-# LLM REPLY – EXECUTION CONTEXT
+# NUEVO: PROMPTS MEJORADOS CON FORCED CITATION
 # ------------------------------------------------------------------
 BUSINESS_CONTEXT = """
 TERCOM - Mayorista Motopartes Argentina
@@ -1645,73 +1829,115 @@ HORARIOS:
 - Sab: 9-13hs
 """
 
-SMART_SYSTEM_PROMPT_V2 = f"""
+CITATION_ENFORCED_PROMPT = f"""
 Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
 
-Recibirás:
-- [RESULTADO DE BUSQUEDA] → intent, total encontrado, calidad, si vienen chunks
-- [TOP N PRODUCTOS] → solo los que ves
+=== REGLA DE CITACIÓN OBLIGATORIA ===
+NUNCA menciones un producto sin su código completo.
 
-Reglas:
-- Si total > 15, **decí cuántos encontraste** y que vienen en partes
-- Si calidad == "low", **pedí marca/modelo** en vez de listar
-- Nunca inventes productos que no estén en [TOP N PRODUCTOS]
-- Cerrá con pregunta de venta
+FORMATO OBLIGATORIO:
+"Tengo [NOMBRE PRODUCTO] (código [CÓDIGO]) - [PRECIO]"
 
-=== VALIDACIÓN OBLIGATORIA ===
-Antes de listar, descartá cualquier producto que NO sea {{{{product_type}}}}.
-Si ninguno calza, decí: "No tengo {{{{product_type}}}} para {{{{modelo}}}}, pero tengo estas alternativas:"
-y mostrá los 3 más cercanos.
+Ejemplos CORRECTOS:
+✅ "Tengo ACEITE YAMALUBE 10W40 (1234/56789-012) - $15.000"
+✅ "Te sirve BATERÍA YUASA YTX9 (5678/12345-678) - $45.000"
+
+Ejemplos INCORRECTOS:
+❌ "Tengo aceite Yamalube" (falta código)
+❌ "Hay varias baterías Yuasa" (no específica cuál)
+❌ "Tenemos filtros de aire" (no lista productos concretos)
+
+Si no tenés el código de un producto, NO LO MENCIONES.
+
+=== BREVEDAD EXTREMA ===
+LIMITE: 5 líneas MAX (salvo listados de productos)
+
+PLANTILLA:
+Línea 1: Entender qué busca
+Líneas 2-3: Productos con códigos y precios
+Línea 4-5: Pregunta de cierre
+
+=== GROUNDING ESTRICTO ===
+SOLO podés mencionar productos que están en [TOP N PRODUCTOS].
+Si el cliente pidió X y NO está en tu lista → decí "No tengo X exacto, pero tengo estas alternativas:"
 
 {BUSINESS_CONTEXT}
+
+Sos vendedor que SABE de motos, ENTIENDE a la gente, CITA productos reales.
 """
 
+TECH_SYSTEM_PROMPT = f"""
+Sos Fran, vendedor experto en motopartes. Tu objetivo es VENDER RÁPIDO.
+
+=== BREVEDAD EXTREMA ===
+LIMITE ESTRICTO: Máximo 4 líneas
+
+PLANTILLA OBLIGATORIA:
+Línea 1: Diferencia clave directa
+Líneas 2-3: Cuál de TUS productos (con código y precio)
+Línea 4: ¿Lo/Los agregamos?
+
+=== CITACIÓN OBLIGATORIA ===
+Si mencionás un producto, incluí su código:
+✅ "El ACEITE YAMALUBE 10W40 SINTETICO (1234/56789-012) - $15.000 es sintético, dura más"
+❌ "El Yamalube 10W40 es sintético" (falta código)
+
+=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
+Podés explicar conceptos en 1 LÍNEA:
+- "El sintético dura más pero es más caro"
+- "Para frío el 10W, para calor el 20W"
+
+{BUSINESS_CONTEXT}
+
+Sos vendedor EFICIENTE, no Wikipedia.
+"""
+
+# ------------------------------------------------------------------
+# GENERACIÓN DE RESPUESTAS
+# ------------------------------------------------------------------
 def build_execution_summary(ctx):
     lines = []
     lines.append(f"Intent detectado: {ctx['intent_detected']}")
     if ctx["search_executed"]:
         lines.append(f"Query de búsqueda: '{ctx['search_query']}'")
         lines.append(f"Productos encontrados: {ctx['products_found']}")
-        lines.append(f"Productos mostrados a ti (LLM): {ctx['products_shown_to_llm']}")
-        if ctx["quality_score"] is not None:
-            quality_label = "ALTA" if ctx["quality_score"] >= 60 else "MEDIA" if ctx["quality_score"] >= 30 else "BAJA"
-            lines.append(f"Calidad de resultados: {quality_label} ({ctx['quality_score']}%)")
+        lines.append(f"Productos relevantes mostrados: {ctx['products_shown_to_llm']}")
+        if ctx.get("quality_assessment"):
+            qa = ctx["quality_assessment"]
+            lines.append(f"Calidad de resultados: {qa.get('confidence', 'unknown').upper()} (avg score: {qa.get('avg_score', 0):.1f})")
         if ctx["filters_applied"]:
             lines.append(f"Filtros aplicados: {', '.join(ctx['filters_applied'])}")
         if ctx["will_send_chunks"]:
             chunk_info = ctx["chunk_info"]
-            lines.append(f"⚠️ IMPORTANTE: Se enviarán {chunk_info['total_chunks']} mensajes adicionales con el listado completo de {chunk_info['total_products']} productos.")
-            lines.append("Tu respuesta debe PREPARAR al cliente para recibir estos mensajes. Ejemplo: 'Dale, encontré X productos. Te los mando en partes para que los veas bien.'")
+            lines.append(f"⚠️ Se enviarán {chunk_info['total_chunks']} mensajes adicionales con {chunk_info['total_products']} productos.")
+            lines.append("Prepará al cliente para recibirlos.")
     else:
         lines.append("No se ejecutó búsqueda de productos")
     if ctx["warnings"]:
         lines.append(f"Advertencias: {'; '.join(ctx['warnings'])}")
     return "\n".join(lines)
 
-def build_full_history_prompt(phone: str, user_message: str, catalog_products: list) -> list:
-    """
-    Construye el prompt con TODA la conversación (hasta 128k tokens) sin resumir.
-    """
-    msgs = [{"role": "system", "content": SMART_SYSTEM_PROMPT_V2}]
-
-    # Toda la historia sin límite de mensajes (sí de tokens)
+def build_full_history_prompt(phone: str, user_message: str, catalog_products: list, system_prompt: str = None) -> list:
+    if system_prompt is None:
+        system_prompt = CITATION_ENFORCED_PROMPT
+    
+    msgs = [{"role": "system", "content": system_prompt}]
+    
     history = get_history_since(phone, days=7, limit=2000)
-    token_count = len(SMART_SYSTEM_PROMPT_V2.split())
-
+    token_count = len(system_prompt.split())
+    
     temp_msgs = []
     for h in reversed(history):
         role = "assistant" if h["role"] == "assistant" else "user"
         content = h["content"]
         temp_msgs.append({"role": role, "content": content})
         token_count += len(content.split())
-        # Cortamos cuando estemos cerca del límite del modelo (120k para dejar margen)
         if token_count > 120000:
             break
-
+    
     for m in reversed(temp_msgs):
         msgs.append(m)
-
-    # Productos encontrados (solo si hay)
+    
     if catalog_products:
         catalog_text = "\n".join([
             f"- {p['name']} (Cod: {p.get('code', 'N/A')}) - {format_price(Decimal(str(p['price_ars'])))}"
@@ -1719,41 +1945,21 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
         ])
         msgs.append({
             "role": "system",
-            "content": f"[TOP {len(catalog_products)} PRODUCTOS]\n{catalog_text}"
+            "content": f"[TOP {len(catalog_products)} PRODUCTOS DISPONIBLES]\n{catalog_text}"
         })
-
+    
     msgs.append({"role": "user", "content": user_message})
     return msgs
 
-def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context):
+def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
-        # Construimos prompt con TODO el historial (hasta 128k tokens)
-        msgs = build_full_history_prompt(phone, user_message, catalog_products)
-
-        # GATEKEEPER: el LLM solo puede hablar de lo que realmente coincide
-        msgs.insert(1, {
-            "role": "system",
-            "content": (
-                f"CLIENTE DIJO: {user_message}\n\n"
-                "BUSQUEDA DEVOLVIÓ:\n" +
-                "\n".join([
-                    f"- {p['name']} ({p.get('code','')}) - "
-                    f"{format_price(Decimal(str(p['price_ars'])))}"
-                    for p in catalog_products[:10]
-                ]) +
-                "\n\nREGLAS: "
-                "1) Solo podés mencionar productos que estén en la lista de arriba. "
-                "2) Si ninguno calza exactamente, decí: 'No tengo eso exacto, pero tengo estas alternativas:' y mostrá hasta 3. "
-                "3) No inventes códigos, marcas ni precios. "
-                "4) Máximo 4 líneas. "
-                "5) Cerrá con una pregunta de venta."
-            )
-        })
-
-        # Detectamos tipo de producto para personalizar el prompt
+        msgs = build_full_history_prompt(phone, user_message, catalog_products, system_prompt)
+        
+        # GATEKEEPER: validación de producto solicitado vs disponible
         user_lower = user_message.lower()
         product_type = (
-            "batería" if any(k in user_lower for k in ("bateria","batería","battery"))
+            "cubierta" if any(k in user_lower for k in ("cubierta","neumatico","llanta","tire"))
+            else "batería" if any(k in user_lower for k in ("bateria","batería","battery"))
             else "filtro" if any(k in user_lower for k in ("filtro","filter"))
             else "cadena" if any(k in user_lower for k in ("cadena","chain"))
             else "aceite" if any(k in user_lower for k in ("aceite","oil"))
@@ -1761,15 +1967,27 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             else "amortiguador" if any(k in user_lower for k in ("amort","shock","suspension"))
             else "repuesto"
         )
-        personalized_prompt = SMART_SYSTEM_PROMPT_V2.replace("{{product_type}}", product_type)
-
-        # Reemplazamos el system prompt por el personalizado
-        msgs[0]["content"] = personalized_prompt
-
-        # Agregamos el execution summary
+        
+        msgs.insert(1, {
+            "role": "system",
+            "content": (
+                f"CLIENTE PIDIÓ: {product_type}\n\n"
+                "PRODUCTOS DISPONIBLES:\n" +
+                "\n".join([
+                    f"- {p['name']} ({p.get('code','')}) - {format_price(Decimal(str(p['price_ars'])))}"
+                    for p in catalog_products[:10]
+                ]) +
+                "\n\n⚠️ VALIDACIÓN CRÍTICA:\n"
+                f"1) Si NINGÚN producto de arriba es un/a {product_type}, NO LOS MENCIONES.\n"
+                f"2) En ese caso, decí: 'No tengo {product_type}s exactos, pero puedo ayudarte con otros repuestos.'\n"
+                "3) Si SÍ hay productos que coinciden, listá solo ESOS.\n"
+                "4) SIEMPRE incluí el código entre paréntesis cuando menciones un producto."
+            )
+        })
+        
         exec_summary = build_execution_summary(execution_context)
-        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BUSQUEDA]\n{exec_summary}"})
-
+        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BÚSQUEDA]\n{exec_summary}"})
+        
         with openai_sem:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -1786,123 +2004,6 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
         return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
 
-# ------------------------------------------------------------------
-# RESPUESTA TÉCNICA ESPECIALIZADA
-# ------------------------------------------------------------------
-TECH_SYSTEM_PROMPT = """
-Sos Fran, vendedor experto en motopartes. Tu objetivo es VENDER RÁPIDO, no educar.
-
-=== BREVEDAD EXTREMA ===
-LIMITE ESTRICTO: Máximo 4 líneas (aprox 250 caracteres)
-
-- Respuesta directa a la pregunta
-- Sin introducción ni contexto
-- Sin explicaciones teóricas
-- Cierre con pregunta de venta
-
-Si sentís ganas de decir estas FRASES PROHIBIDAS, FRENA:
-- "Para que entiendas..."
-- "Históricamente..."
-- "Es importante saber que..."
-- "Primero déjame explicarte..."
-- "Hay varias cosas a considerar..."
-- "Técnicamente hablando..."
-
-PLANTILLA OBLIGATORIA:
-Línea 1: Diferencia clave directa
-Líneas 2-3: Cuál de TUS productos (con precio)
-Línea 4: ¿Lo/Los agregamos?
-
-=== REGLAS ANTI-ALUCINACIÓN ===
-1. SOLO menciona productos del "Contexto CSV" que te paso
-1. NUNCA inventes códigos, marcas o precios
-1. Si no está en el contexto, NO LO NOMBRES
-
-=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
-Podés explicar conceptos, pero en 1 LÍNEA:
-- "El sintético dura más pero es más caro"
-- "Para frío el 10W, para calor el 20W"
-
-NUNCA termines con:
-- "Espero haberte ayudado"
-- "Cualquier cosa avisame"
-- "Saludos"
-
-Sos vendedor EFICIENTE, no Wikipedia.
-"""
-
-def sanitize_llm_response(response_text, allowed_products):
-    if not response_text:
-        return "No pude generar una respuesta. ¿Me repetís?"
-
-    # Validación de códigos
-    allowed_codes = {p.get("code", "") for p in allowed_products if p.get("code")}
-    mentioned_codes = set(re.findall(r'\d{4}/\d{5}-\d{3}', response_text))
-    hallucinated = mentioned_codes - allowed_codes
-
-    if hallucinated:
-        logger.warning(f"LLM mencionó códigos no permitidos: {hallucinated}")
-        if allowed_products:
-            product_list = "\n".join([
-                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                for p in allowed_products[:5]
-            ])
-            return (
-                f"Dale, mirá lo que tengo disponible:\n\n{product_list}\n\n"
-                "¿Cuál te sirve o necesitás que te explique las diferencias?"
-            )
-        else:
-            return "No encontré ese repuesto específico en el catálogo. ¿Me pasás más detalles?"
-
-    # ========== VALIDACIÓN DE NOMBRES ==========
-    mentioned_names = []
-    
-    # Nombres entre comillas
-    quoted_names = re.findall(r'"([^"]{3,})"', response_text)
-    mentioned_names.extend(quoted_names)
-    
-    # Nombres después de "tengo", "tenemos", "hay"
-    pattern_names = re.findall(
-        r'(?:tengo|tenemos|hay|encontré)\s+(?:el\s+|la\s+|los\s+|las\s+)?([A-Z][a-zA-ZáéíóúÁÉÍÓÚñÑ\s]{5,40})(?:\s+(?:para|de|en|cod|código)|\.|,|$)',
-        response_text
-    )
-    mentioned_names.extend(pattern_names)
-    
-    if mentioned_names and allowed_products:
-        allowed_names_normalized = {normalize_search_query(p.get("name", "")) for p in allowed_products if p.get("name")}
-        
-        hallucinated_names = []
-        for name in mentioned_names:
-            name_norm = normalize_search_query(name)
-            if not any(
-                fuzz.partial_ratio(name_norm, allowed_name) > 60 
-                for allowed_name in allowed_names_normalized
-            ):
-                hallucinated_names.append(name)
-        
-        if hallucinated_names:
-            logger.warning(f"LLM mencionó productos no permitidos: {hallucinated_names}")
-            product_list = "\n".join([
-                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                for p in allowed_products[:5]
-            ])
-            return (
-                f"Dale, te muestro lo que tengo disponible:\n\n{product_list}\n\n"
-                "¿Cuál te sirve?"
-            )
-    # ========== FIN VALIDACIÓN DE NOMBRES ==========
-
-    # Límite de líneas
-    lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-    if len(lines) > 6:
-        logger.warning(f"Respuesta demasiado larga: {len(lines)} líneas")
-        if len(lines) >= 4:
-            return '\n'.join(lines[-4:]) + "\n\n¿Lo agregamos?"
-        else:
-            return response_text
-
-    return response_text
-
 def build_technical_answer(phone, user_message, top_products):
     try:
         context_lines = []
@@ -1911,8 +2012,8 @@ def build_technical_answer(phone, user_message, top_products):
                 f"- {p.get('name','')} (cod {p.get('code','')}) "
                 f"marca {p.get('brand','')} modelo {p.get('model','')}"
             )
-        ctx = "Contexto CSV:\n" + "\n".join(context_lines) if context_lines else "Contexto CSV: (sin coincidencias exactas)"
-
+        ctx = "Productos disponibles:\n" + "\n".join(context_lines) if context_lines else "Productos disponibles: (sin coincidencias exactas)"
+        
         history = get_history_since(phone, days=1, limit=10)
         msgs = [{"role": "system", "content": TECH_SYSTEM_PROMPT}]
         
@@ -1930,7 +2031,7 @@ def build_technical_answer(phone, user_message, top_products):
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
-                max_tokens=400 if detect_intent_llm(user_message).get("intent") == "pregunta_tecnica" else 300,
+                max_tokens=400,
                 timeout=REQUESTS_TIMEOUT
             )
         
@@ -1939,72 +2040,18 @@ def build_technical_answer(phone, user_message, top_products):
         if not txt or len(txt) < 10:
             return "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
         
-        txt = sanitize_llm_response(txt, top_products)
+        # Validar respuesta técnica
+        code_validation = validate_response_codes(txt, top_products)
+        name_validation = validate_mentioned_names(txt, top_products)
+        
+        if not code_validation["valid"] or not name_validation["valid"]:
+            logger.warning("Respuesta técnica con alucinaciones, usando fallback")
+            return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise cuando tenga la info exacta?"
         
         return txt
     except Exception as e:
         logger.error(f"build_technical_answer error: {e}")
         return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise y mientras vemos alternativas?"
-
-# ------------------------------------------------------------------
-# IA EMPÁTICA (PROMPT GENERAL DE VENTA)
-# ------------------------------------------------------------------
-SMART_SYSTEM_PROMPT = f"""
-Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
-
-=== MENTALIDAD: VENDEDOR DIRECTO ===
-- Argentino natural: che, dale, mira, vos
-- Empático PERO eficiente (no terapeuta)
-- OBJETIVO: Cerrar venta en menos de 3 mensajes
-
-=== BREVEDAD BRUTAL ===
-LIMITE: 5 líneas MAX (salvo listados de productos)
-TARGET: 40-60 palabras por respuesta
-
-FRASES PROHIBIDAS que indican que te estás yendo por las ramas:
-- "Para que entiendas..."
-- "Históricamente..."
-- "Es importante saber que..."
-- "Primero déjame explicarte..."
-- "Hay varias cosas a considerar..."
-- "Técnicamente hablando..."
-
-Si sentís ganas de escribir alguna, FRENA y reescribí.
-
-PLANTILLA OBLIGATORIA:
-Línea 1: Entender qué busca (o dar productos directo)
-Líneas 2-3: Productos con precios O info técnica MÍNIMA
-Línea 4-5: Pregunta de cierre (¿lo agregamos? ¿cuál te sirve?)
-
-=== GROUNDING ESTRICTO ===
-NUNCA menciones productos que no te pasé
-- Si te doy lista de productos, SOLO menciona ESOS
-- NO inventes códigos, marcas o precios
-- NO digas "también tengo X" si X no está en tu lista
-
-=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
-Podés explicar conceptos, pero en 1 LÍNEA:
-- "El sintético dura más pero es más caro"
-- "Para frío el 10W, para calor el 20W"
-
-=== CIERRE DE VENTA OBLIGATORIO ===
-SIEMPRE terminá con una de estas:
-- "¿Lo agregamos al carrito?"
-- "¿Cuál te sirve?"
-- "¿Confirmamos?"
-- "¿Qué cantidad necesitás?"
-- "¿Paso presupuesto?"
-
-NUNCA termines con:
-- "Espero haberte ayudado"
-- "Cualquier cosa avisame"
-- "Saludos"
-
-{BUSINESS_CONTEXT}
-
-Sos vendedor que SABE de motos, ENTIENDE a la gente, pero CIERRA VENTAS.
-No sos un chatbot genérico. Sos un tipo que vende repuestos y quiere ayudar AL CLIENTE A COMPRAR.
-"""
 
 # ------------------------------------------------------------------
 # FORMATO RESULTADOS
@@ -2040,23 +2087,23 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.11.3
+# AGENTE PRINCIPAL – VERSIÓN 3.11.4
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
     save_message(phone, user_message, "user")
-
+    
     if not rate_limit_check(phone):
         reply = "Demasiados mensajes, esperá un minuto."
         save_message(phone, reply, "assistant")
         return reply
-
+    
     # 1. Detectar intent
     intent_data = detect_intent_llm(user_message)
     intent = intent_data.get("intent", "desconocido")
     raw_query_for_search = intent_data.get("query") or user_message
-
-    # 2. CREAR EXECUTION CONTEXT
+    
+    # 2. Execution context
     execution_context = {
         "intent_detected": intent,
         "search_query": raw_query_for_search,
@@ -2064,12 +2111,12 @@ def run_agent(phone, user_message):
         "products_found": 0,
         "products_shown_to_llm": 0,
         "filters_applied": [],
-        "quality_score": None,
+        "quality_assessment": None,
         "will_send_chunks": False,
         "chunk_info": None,
         "warnings": []
     }
-
+    
     # 3. Acciones rápidas sin búsqueda
     if intent == "saludo":
         reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?"
@@ -2077,7 +2124,7 @@ def run_agent(phone, user_message):
         log_interaction(phone, user_message, "saludo", 0)
         log_performance(phone, "saludo", time.time()-start_time, 0)
         return reply
-
+    
     if intent == "ver_carrito":
         items = cart_get(phone)
         if not items:
@@ -2089,12 +2136,12 @@ def run_agent(phone, user_message):
                 subtotal = (price * q).quantize(Decimal("0.01"))
                 lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
             lines.append(f"\nTOTAL: {format_price(total)}")
-        reply = "\n".join(lines)
+            reply = "\n".join(lines)
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "ver_carrito", 0)
         log_performance(phone, "ver_carrito", time.time()-start_time, 0)
         return reply
-
+    
     if intent == "vaciar_carrito":
         cart_clear(phone)
         reply = "Listo, vacié tu carrito."
@@ -2102,10 +2149,11 @@ def run_agent(phone, user_message):
         log_interaction(phone, user_message, "vaciar_carrito", 0)
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
-
-    # 4. Detectar "3 de cada una" implícito (y variantes)
+    
+    # 4. Detectar pedidos implícitos
     implicit = detect_implicit_cart_action(user_message, phone)
-    if implicit:
+    ​​​​​​​​​​​
+   if implicit:
         products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
         qty = implicit["quantity"]
         total = sum(to_decimal_money(p["price_ars"]) * qty for p in products)
@@ -2119,58 +2167,174 @@ def run_agent(phone, user_message):
         log_interaction(phone, user_message, "implicit_cart", len(products))
         log_performance(phone, "implicit_cart", time.time()-start_time, len(products))
         return reply
-
-    # 5. Búsqueda + quality + filtros (con autocorrect)
+    
+    # 5. Búsqueda con autocorrect
     products = []
     query_for_search = raw_query_for_search
     corrections = []
-
+    
     if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
+        # Autocorrect
         query_for_search, corrections = autocorrect_keywords(raw_query_for_search)
         if corrections:
-            execution_context["warnings"].append(
-                f"Autocorrect aplicado: {', '.join(corrections)}"
-            )
+            execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
+            logger.info(f"Autocorrect aplicado: {', '.join(corrections)}")
+        
         execution_context["search_query"] = query_for_search
-
-        products = [p for p, _ in semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)]
+        
+        # Búsqueda semántica
+        semantic_results = semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)
+        products = [p for p, _ in semantic_results]
+        
         execution_context["search_executed"] = True
         execution_context["products_found"] = len(products)
-        quality = validate_search_quality(query_for_search, products)
-        execution_context["quality_score"] = quality["score"]
-        cat_filter = detect_category_filter(query_for_search)
-        if cat_filter:
-            execution_context["filters_applied"].append(f"category: {cat_filter}")
-        if len(products) > MAX_PRODUCTS_FOR_LLM and quality["quality"] == "low":
-            reply = (
-                f"Encontré {len(products)} productos pero algunos no calzan bien.\n\n"
-                f"💡 {quality['suggestion']}\n\n"
-                "¿Mostramos igual o refinamos?"
-            )
+        
+        # ========== NUEVO: FILTRO DE RELEVANCIA ==========
+        if products and intent in {"busqueda_catalogo", "pregunta_tecnica"}:
+            filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
+            
+            logger.info(f"Relevance filter: {len(filtered_products)}/{len(products)} productos relevantes")
+            
+            # Si hay filtrados relevantes, usar solo esos
+            if filtered_products:
+                products = filtered_products
+                execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{len(products)} passed")
+            
+            # Si NO hay productos relevantes después del filtro
+            else:
+                logger.warning(f"Sin productos relevantes para query: {query_for_search}")
+                
+                # Tomar los 3 con mayor score para sugerir
+                top_3 = sorted(
+                    [(p, calculate_relevance_score(query_for_search, p)) for p in products[:10]],
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:3]
+                
+                suggestions = "\n".join([
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p, score in top_3
+                ])
+                
+                reply = (
+                    f"No encontré ese repuesto específico.\n\n"
+                    f"¿Te sirve alguna de estas alternativas?\n\n{suggestions}\n\n"
+                    f"O pasame más detalles (marca/modelo/año) para buscarte algo exacto."
+                )
+                save_message(phone, reply, "assistant")
+                log_interaction(phone, user_message, "no_relevant_results", 0)
+                log_performance(phone, intent, time.time()-start_time, 0)
+                return reply
+        # ========== FIN FILTRO DE RELEVANCIA ==========
+        
+        # ========== NUEVO: CONTEXT QUALITY CHECK ==========
+        quality_assessment = assess_context_quality(query_for_search, products)
+        execution_context["quality_assessment"] = quality_assessment
+        
+        logger.info(f"Quality assessment: {quality_assessment}")
+        
+        # Respuesta temprana si el contexto no es suficiente
+        if not quality_assessment["sufficient"]:
+            if quality_assessment["action"] == "ask_clarification":
+                reply = quality_assessment["message"]
+            
+            elif quality_assessment["action"] == "suggest_alternatives":
+                top_products = quality_assessment.get("top_products", [])
+                suggestions = "\n".join([
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in top_products
+                ])
+                reply = (
+                    f"No encontré ese repuesto exacto.\n\n"
+                    f"¿Te sirve alguna de estas alternativas?\n\n{suggestions}\n\n"
+                    f"O dame más detalles para afinar la búsqueda."
+                )
+            
             save_message(phone, reply, "assistant")
-            log_performance(phone, intent, time.time()-start_time, len(products))
+            log_interaction(phone, user_message, f"low_quality_{quality_assessment['reason']}", 0)
+            log_performance(phone, intent, time.time()-start_time, 0)
             return reply
+        # ========== FIN CONTEXT QUALITY CHECK ==========
+        
+        # Guardar búsqueda
         if products:
             save_last_search(phone, [
-                {"code": p["code"], "name": p["name"], "price_ars": p["price_ars"], "price_usd": p["price_usd"], "qty": 1}
+                {
+                    "code": p["code"], 
+                    "name": p["name"], 
+                    "price_ars": p["price_ars"], 
+                    "price_usd": p["price_usd"], 
+                    "qty": 1
+                }
                 for p in products[:150]
             ], query_for_search)
+        
         execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
-        execution_context["will_send_chunks"] = len(products) > MAX_PRODUCTS_FOR_LLM
-        if execution_context["will_send_chunks"]:
+        
+        # Determinar si enviar chunks (solo para búsqueda_catalogo, NO para pregunta_tecnica)
+        if intent == "busqueda_catalogo" and len(products) > MAX_PRODUCTS_FOR_LLM:
+            execution_context["will_send_chunks"] = True
             num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
-            execution_context["chunk_info"] = {"total_chunks": num_chunks, "products_per_chunk": PRODUCTS_PER_CHUNK, "total_products": len(products)}
-
-    # 6. Generar respuesta con execution context
+            execution_context["chunk_info"] = {
+                "total_chunks": num_chunks, 
+                "products_per_chunk": PRODUCTS_PER_CHUNK, 
+                "total_products": len(products)
+            }
+    
+    # 6. Generar respuesta
     if intent == "pregunta_tecnica":
         reply = build_technical_answer(phone, user_message, products[:8])
-        # para preguntas técnicas NO mandamos el listado enorme
-        execution_context["will_send_chunks"] = False
+        execution_context["will_send_chunks"] = False  # No chunks para técnica
     else:
-        reply = generate_smart_ai_reply_v2(phone, user_message, products[:MAX_PRODUCTS_FOR_LLM], execution_context)
-
-    # 7. Enviar chunks DESPUÉS de la respuesta inicial (solo si quality no es low y no es técnica)
-    if execution_context["will_send_chunks"]:
+        reply = generate_smart_ai_reply_v2(
+            phone, 
+            user_message, 
+            products[:MAX_PRODUCTS_FOR_LLM], 
+            execution_context,
+            system_prompt=CITATION_ENFORCED_PROMPT
+        )
+    
+    # ========== NUEVO: POST-VALIDATION ==========
+    if products:
+        code_validation = validate_response_codes(reply, products[:MAX_PRODUCTS_FOR_LLM])
+        name_validation = validate_mentioned_names(reply, products[:MAX_PRODUCTS_FOR_LLM])
+        
+        if not code_validation["valid"]:
+            logger.error(f"⚠️ LLM alucinó códigos: {code_validation.get('hallucinated_codes', [])}")
+            
+            # Fallback seguro
+            if products[:5]:
+                product_list = "\n".join([
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in products[:5]
+                ])
+                reply = (
+                    f"Dale, te muestro lo que tengo:\n\n{product_list}\n\n"
+                    "¿Cuál te sirve?"
+                )
+            else:
+                reply = "Encontré productos pero necesito más info. ¿Me pasás marca/modelo específico?"
+        
+        elif not name_validation["valid"]:
+            logger.warning(f"⚠️ LLM mencionó productos dudosos: {name_validation.get('hallucinated_names', [])}")
+            
+            # Fallback a lista simple
+            if products[:5]:
+                product_list = "\n".join([
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in products[:5]
+                ])
+                reply = (
+                    f"Dale, mirá lo que tengo:\n\n{product_list}\n\n"
+                    "¿Cuál te sirve?"
+                )
+        
+        elif code_validation.get("warning") == "no_citations":
+            logger.info("LLM no citó códigos (puede ser respuesta general válida)")
+    # ========== FIN POST-VALIDATION ==========
+    
+    # 7. Enviar chunks DESPUÉS de la respuesta (solo para búsqueda_catalogo)
+    if execution_context["will_send_chunks"] and intent == "busqueda_catalogo":
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
             chunk_text = f"\n━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
@@ -2178,7 +2342,7 @@ def run_agent(phone, user_message):
             if idx > 1:
                 time.sleep(0.5)
             send_long_message(phone, chunk_text)
-
+    
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, intent, len(products))
     log_performance(phone, intent, time.time()-start_time, len(products))
@@ -2190,11 +2354,11 @@ def run_agent(phone, user_message):
 def send_long_message(phone, text, chunk_size=1600):
     if not twilio_rest_client or not phone or not text:
         return False
-
+    
     try:
         parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         logger.info(f"Enviando {len(parts)} chunks a {phone}")
-
+        
         for idx, part in enumerate(parts):
             try:
                 message = twilio_rest_client.messages.create(
@@ -2203,17 +2367,17 @@ def send_long_message(phone, text, chunk_size=1600):
                     to=phone
                 )
                 logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
-
+                
                 if idx < len(parts) - 1:
                     time.sleep(0.8)
-
+            
             except Exception as e:
                 logger.error(f"Error enviando chunk {idx + 1}: {e}")
                 raise
-
+        
         logger.info(f"Mensaje largo enviado exitosamente: {len(parts)} partes")
         return True
-
+    
     except Exception as e:
         logger.error(f"Error critico en send_long_message: {e}", exc_info=True)
         return False
@@ -2229,54 +2393,51 @@ def whatsapp_webhook():
         logger.info(f"From: {request.form.get('From', 'N/A')}")
         logger.info(f"Body: {request.form.get('Body', 'N/A')}")
         logger.info(f"MessageSid: {request.form.get('MessageSid', 'N/A')}")
-        logger.info(f"Body length: {len(request.form.get('Body', ''))}")
         logger.info("=" * 50)
-
+        
         from_number = request.form.get("From", "")
         message_body = sanitize_input(request.form.get("Body", "").strip(), max_length=1500)
-
+        
         if not from_number or not message_body:
             logger.warning("Mensaje sin From o Body")
             return Response("<Response></Response>", mimetype="text/xml")
-
+        
         logger.info(f"Mensaje sanitizado: {message_body}")
-
+        
         if is_duplicate_message(from_number, message_body):
             logger.info(f"Mensaje duplicado ignorado de {from_number}")
             return Response("<Response></Response>", mimetype="text/xml")
-
+        
         logger.info(f"Procesando mensaje de {from_number}: {message_body}")
-
+        
         if not rate_limit_check(from_number):
             resp = MessagingResponse()
             resp.message("Demasiados mensajes, esperá un minuto.")
             return Response(str(resp), mimetype="text/xml")
-
-        # Detectar si es lista masiva (por ahora solo job async)
+        
+        # Detectar lista masiva
         is_bulk, count = is_bulk_list_request(message_body)
         if is_bulk and count > INSTANT_THRESHOLD:
             job_id = create_bulk_job(from_number, message_body, count)
             resp = MessagingResponse()
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
-
+        
         reply = run_agent(from_number, message_body)
-
+        
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
-        logger.info(f"Longitud de respuesta: {len(reply)} caracteres")
-
+        
         if len(reply) <= WHATSAPP_MSG_LIMIT:
             logger.info("Mensaje corto, usando TwiML")
             resp = MessagingResponse()
             resp.message(reply)
-            logger.info(f"Respuesta TwiML generada: {reply[:100]}...")
             return Response(str(resp), mimetype="text/xml")
         else:
             logger.info("Mensaje largo, enviando por Twilio REST")
             send_long_message(from_number, reply)
             return Response("<Response></Response>", mimetype="text/xml")
-
+    
     except Exception as e:
         logger.exception(f"Error crítico en webhook: {e}")
         try:
@@ -2291,29 +2452,54 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "3.11.3"}), 200
-
+    catalog, index = get_catalog_and_index()
+    return jsonify({
+        "status": "ok", 
+        "version": "3.11.4",
+        "catalog_size": len(catalog) if catalog else 0,
+        "architecture": "claude_inspired",
+        "features": [
+            "context_quality_check",
+            "relevance_scoring",
+            "forced_code_citation",
+            "post_validation"
+        ]
+    }), 200
 
 # ------------------------------------------------------------------
-# ✅ Cargar índice y cache al arrancar (evita regenerar embeddings)
+# ✅ Cargar índice al arrancar
+# ------------------------------------------------------------------
 catalog, index = load_faiss_index()
 if not (catalog and index):
     catalog, index = get_catalog_and_index()
 else:
     logger.info("✅ Índice FAISS encontrado en disco: %s productos", len(catalog))
 
-
 # ------------------------------------------------------------------
-# ✅ Fuerza creación de tablas al arrancar el contenedor
+# ✅ Inicializar DB
+# ------------------------------------------------------------------
 init_db()
-
 
 # ------------------------------------------------------------------
 # MAIN
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Iniciando Fran 3.11.3 en puerto {port}")
-    logger.info(f"Catalogo: {len(catalog) if catalog else 0} productos")
-    logger.info(f"TC inicial: {get_exchange_rate()}")
+    logger.info("=" * 60)
+    logger.info("🚀 Iniciando Fran 3.11.4 - Arquitectura Inspirada en Claude")
+    logger.info("=" * 60)
+    logger.info(f"Puerto: {port}")
+    logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
+    logger.info(f"Tipo de cambio inicial: {get_exchange_rate()}")
+    logger.info(f"Relevance min score: {RELEVANCE_MIN_SCORE}")
+    logger.info(f"Quality thresholds: HIGH={QUALITY_HIGH_THRESHOLD}, MED={QUALITY_MEDIUM_THRESHOLD}")
+    logger.info("=" * 60)
+    logger.info("Características nuevas:")
+    logger.info("  ✅ Context Quality Check pre-LLM")
+    logger.info("  ✅ Relevance Scoring general (sin keywords hardcoded)")
+    logger.info("  ✅ Forced Code Citation en prompts")
+    logger.info("  ✅ Post-validation de códigos y nombres")
+    logger.info("  ✅ Fallbacks seguros")
+    logger.info("=" * 60)
+    
     app.run(host="0.0.0.0", port=port, debug=False)
