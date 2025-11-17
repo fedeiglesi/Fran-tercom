@@ -2151,9 +2151,8 @@ def run_agent(phone, user_message):
         return reply
     
     # 4. Detectar pedidos implícitos
-    implicit = detect_implicit_cart_action(user_message, phone)
-    ​​​​​​​​​​​
-   if implicit:
+    implicit = detect_implicit_cart_action(user_message, phone)​​​​​​​​​​​
+    if implicit:
         products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
         qty = implicit["quantity"]
         total = sum(to_decimal_money(p["price_ars"]) * qty for p in products)
