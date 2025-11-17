@@ -1,8 +1,3 @@
-# Fran 3.11.4 - Arquitectura Mejorada Inspirada en Claude
-
-Acá va el código completo con la nueva arquitectura:
-
-```python
 # =========================================================
 # Fran 3.11.4 – Bot Mayorista Inteligente
 # =========================================================
