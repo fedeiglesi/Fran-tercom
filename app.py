@@ -1,12 +1,12 @@
 # =========================================================
-# Fran 3.11.4 – Bot Mayorista Inteligente
+# Fran 3.11.5 – Bot Mayorista Inteligente (FAISS FIX +)
 # =========================================================
-# NUEVA ARQUITECTURA inspirada en Claude:
 # - Context Quality Check pre-LLM
 # - Relevance scoring general (no keywords hardcoded)
 # - Forced code citation
 # - Post-validation de códigos mencionados
 # - Fallbacks seguros
+# - FAISS index global reutilizado en semantic_search_v2
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -237,7 +237,7 @@ def calculate_relevance_score(query: str, product: dict) -> float:
     # 2. Fuzzy match del nombre completo (40%)
     product_name = normalize_search_query(product.get('name', ''))
     try:
-        fuzzy_ratio = fuzz.token_set_ratio(q_norm, product_name)
+        fuzzy_ratio = fuzz.partial_ratio(q_norm, product_name)
         fuzzy_score = fuzzy_ratio * 0.4
     except Exception:
         fuzzy_score = 0
@@ -518,6 +518,9 @@ def _build_autocorrect_vocab():
 
 AUTOCORRECT_VOCAB = _build_autocorrect_vocab()
 
+_BRANDS_NORMALIZED = {normalize_search_query(b) for b in BRAND_LIST}
+_MODELS_NORMALIZED = {normalize_search_query(m) for m in MODEL_LIST}
+
 def _looks_like_code_or_number(token: str) -> bool:
     if not token:
         return False
@@ -531,7 +534,7 @@ def _looks_like_code_or_number(token: str) -> bool:
 
 def autocorrect_keywords(text: str):
     """
-    Autocorrector simple que no toca códigos ni números.
+    Autocorrector simple que no toca códigos, números, marcas o modelos conocidos.
     """
     if not text:
         return "", []
@@ -545,6 +548,11 @@ def autocorrect_keywords(text: str):
         base = normalize_search_query(tok)
         
         if _looks_like_code_or_number(raw):
+            new_tokens.append(raw)
+            continue
+        
+        # No tocar marcas/modelos ya conocidos
+        if base in _BRANDS_NORMALIZED or base in _MODELS_NORMALIZED:
             new_tokens.append(raw)
             continue
         
@@ -1301,7 +1309,6 @@ def generate_embeddings_with_cache(texts):
                             resp = client.embeddings.create(
                                 input=chunk,
                                 model="text-embedding-3-small",
-                                timeout=REQUESTS_TIMEOUT
                             )
                         chunk_vectors = [d.embedding for d in resp.data]
                         
@@ -1353,7 +1360,9 @@ def _build_faiss_index_from_catalog(catalog):
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
             return None, 0
         
-        index = faiss.IndexFlatL2(vecs.shape[1])
+        # Normalización + índice IP para similitud coseno
+        faiss.normalize_L2(vecs)
+        index = faiss.IndexFlatIP(vecs.shape[1])
         index.add(vecs)
         
         logger.info(f"Indice FAISS creado con {vecs.shape[0]} vectores")
@@ -1390,57 +1399,61 @@ def get_catalog_and_index():
 # BÚSQUEDA SEMÁNTICA
 # ------------------------------------------------------------------
 def semantic_search_v2(query: str, top_k: int = 60) -> list:
-    catalog, _ = get_catalog_and_index()
-    if not catalog or not query:
+    """
+    Búsqueda semántica usando el índice FAISS global.
+    - Usa embeddings del catálogo precomputados
+    - Aplica filtro lexical (marcas/modelos/categoría) sobre los resultados
+    """
+    catalog, index = get_catalog_and_index()
+    if not catalog or not index or not query:
         return []
     
-    # Pre-filtro por categoría si aplica
-    detected_category = None
-    for cat, variants in CATEGORY_MAP.items():
-        if any(v in normalize_search_query(query) for v in variants):
-            detected_category = cat
-            break
-    
-    if detected_category:
-        filtered_catalog = [
-            p for p in catalog 
-            if detected_category in normalize_search_query(p.get("category", ""))
-        ]
-        if filtered_catalog:
-            logger.info(f"Pre-filtro por categoría '{detected_category}': {len(filtered_catalog)} productos")
-            catalog = filtered_catalog
-    
-    # Filtro lexical
+    # Parseo de query para filtros suaves
     parsed = parse_query_v2(query)
-    filtered = filter_catalog(catalog, parsed)
-    
-    if not filtered:
-        filtered = catalog
-    
-    # Embeddings solo del sub-conjunto
-    texts = [p["search_text"] for p in filtered]
-    vectors = generate_embeddings_with_cache(texts)
-    vecs = np.array(vectors).astype("float32")
-    
-    # Índice temporal
-    dim = vecs.shape[1]
-    temp_index = faiss.IndexFlatIP(dim)
-    faiss.normalize_L2(vecs)
-    temp_index.add(vecs)
     
     # Embedding del query
-    emb = generate_embeddings_with_cache([query])[0]
-    emb = np.array([emb]).astype("float32")
-    faiss.normalize_L2(emb)
+    try:
+        emb = generate_embeddings_with_cache([query])[0]
+    except Exception as e:
+        logger.error(f"Error generando embedding de query: {e}")
+        return []
     
-    D, I = temp_index.search(emb, min(top_k, len(filtered)))
-    results = []
+    q_vec = np.array([emb]).astype("float32")
+    faiss.normalize_L2(q_vec)
+    
+    # Buscar más resultados de los que vamos a devolver, para poder filtrar
+    k_for_index = min(max(top_k * 4, top_k), len(catalog))
+    try:
+        D, I = index.search(q_vec, k_for_index)
+    except Exception as e:
+        logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
+        return []
+    
+    raw_results = []
     for dist, idx in zip(D[0], I[0]):
-        if 0 <= idx < len(filtered):
-            score = float(dist)
-            results.append((filtered[idx], score))
+        if 0 <= idx < len(catalog):
+            raw_results.append((catalog[idx], float(dist)))
     
-    return sorted(results, key=lambda x: x[1], reverse=True)
+    if not raw_results:
+        return []
+    
+    # Aplicar filtro lexical sobre los productos recuperados
+    products_only = [p for p, _ in raw_results]
+    filtered_products = filter_catalog(products_only, parsed)
+    
+    if filtered_products:
+        # Mapear scores a los productos filtrados
+        score_by_id = {id(p): score for p, score in raw_results}
+        results = [
+            (p, score_by_id.get(id(p), 0.0))
+            for p in filtered_products
+        ]
+    else:
+        results = raw_results
+    
+    # Ordenar por score (IP mayor = más similar)
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:top_k]
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -1452,7 +1465,7 @@ def parse_bulk_list(text):
     lines = text.strip().split("\n")
     parsed = []
     for line in lines:
-        line = line.strip()
+        line = line.strip().lstrip("-").strip()
         if not line:
             continue
         match = re.match(r"^(\d+)\s+(.+)$", line)
@@ -1714,8 +1727,7 @@ def detect_intent_llm(msg):
                 messages=[
                     {"role": "system", "content": INTENT_SYSTEM_PROMPT},
                     {"role": "user", "content": msg.strip()[:600]}
-                ],
-                timeout=REQUESTS_TIMEOUT
+                ]
             )
         raw = (resp.choices[0].message.content or "").strip()
         start = raw.find("{")
@@ -1989,7 +2001,6 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                 messages=msgs,
                 temperature=0.3,
                 max_tokens=500,
-                timeout=REQUESTS_TIMEOUT
             )
         txt = (resp.choices[0].message.content or "").strip()
         if not txt or len(txt) < 10:
@@ -2027,7 +2038,6 @@ def build_technical_answer(phone, user_message, top_products):
                 messages=msgs,
                 temperature=0.3,
                 max_tokens=400,
-                timeout=REQUESTS_TIMEOUT
             )
         
         txt = (resp.choices[0].message.content or "").strip()
@@ -2082,7 +2092,7 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.11.4
+# AGENTE PRINCIPAL – VERSIÓN 3.11.5
 # =========================================================
 def run_agent(phone, user_message):
     start_time = time.time()
@@ -2185,25 +2195,23 @@ def run_agent(phone, user_message):
         
         # ========== NUEVO: FILTRO DE RELEVANCIA ==========
         if products and intent in {"busqueda_catalogo", "pregunta_tecnica"}:
+            original_len = len(products)
             filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
             
-            logger.info(f"Relevance filter: {len(filtered_products)}/{len(products)} productos relevantes")
+            logger.info(f"Relevance filter: {len(filtered_products)}/{original_len} productos relevantes")
             
             # Si hay filtrados relevantes, usar solo esos
             if filtered_products:
                 products = filtered_products
-                execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{len(products)} passed")
+                execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
             
             # Si NO hay productos relevantes después del filtro
             else:
                 logger.warning(f"Sin productos relevantes para query: {query_for_search}")
                 
                 # Tomar los 3 con mayor score para sugerir
-                top_3 = sorted(
-                    [(p, calculate_relevance_score(query_for_search, p)) for p in products[:10]],
-                    key=lambda x: x[1],
-                    reverse=True
-                )[:3]
+                top_candidates = semantic_results[:10]
+                top_3 = top_candidates[:3]
                 
                 suggestions = "\n".join([
                     f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
@@ -2290,17 +2298,18 @@ def run_agent(phone, user_message):
     
     # ========== NUEVO: POST-VALIDATION ==========
     if products:
-        code_validation = validate_response_codes(reply, products[:MAX_PRODUCTS_FOR_LLM])
-        name_validation = validate_mentioned_names(reply, products[:MAX_PRODUCTS_FOR_LLM])
+        allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
+        code_validation = validate_response_codes(reply, allowed_products)
+        name_validation = validate_mentioned_names(reply, allowed_products)
         
         if not code_validation["valid"]:
             logger.error(f"⚠️ LLM alucinó códigos: {code_validation.get('hallucinated_codes', [])}")
             
             # Fallback seguro
-            if products[:5]:
+            if allowed_products[:5]:
                 product_list = "\n".join([
                     f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in products[:5]
+                    for p in allowed_products[:5]
                 ])
                 reply = (
                     f"Dale, te muestro lo que tengo:\n\n{product_list}\n\n"
@@ -2313,10 +2322,10 @@ def run_agent(phone, user_message):
             logger.warning(f"⚠️ LLM mencionó productos dudosos: {name_validation.get('hallucinated_names', [])}")
             
             # Fallback a lista simple
-            if products[:5]:
+            if allowed_products[:5]:
                 product_list = "\n".join([
                     f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in products[:5]
+                    for p in allowed_products[:5]
                 ])
                 reply = (
                     f"Dale, mirá lo que tengo:\n\n{product_list}\n\n"
@@ -2449,14 +2458,15 @@ def health():
     catalog, index = get_catalog_and_index()
     return jsonify({
         "status": "ok", 
-        "version": "3.11.4",
+        "version": "3.11.5",
         "catalog_size": len(catalog) if catalog else 0,
         "architecture": "claude_inspired",
         "features": [
             "context_quality_check",
             "relevance_scoring",
             "forced_code_citation",
-            "post_validation"
+            "post_validation",
+            "faiss_global_index"
         ]
     }), 200
 
@@ -2480,7 +2490,7 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("=" * 60)
-    logger.info("🚀 Iniciando Fran 3.11.4 - Arquitectura Inspirada en Claude")
+    logger.info("🚀 Iniciando Fran 3.11.5 - Arquitectura Inspirada en Claude (FAISS FIX)")
     logger.info("=" * 60)
     logger.info(f"Puerto: {port}")
     logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
@@ -2493,6 +2503,7 @@ if __name__ == "__main__":
     logger.info("  ✅ Relevance Scoring general (sin keywords hardcoded)")
     logger.info("  ✅ Forced Code Citation en prompts")
     logger.info("  ✅ Post-validation de códigos y nombres")
+    logger.info("  ✅ FAISS global reutilizado en semantic_search_v2")
     logger.info("  ✅ Fallbacks seguros")
     logger.info("=" * 60)
     
