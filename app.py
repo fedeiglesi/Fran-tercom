@@ -30,6 +30,13 @@ from cachetools import TTLCache
 load_dotenv()
 app = Flask(__name__)
 
+REQUESTS_HEADERS = {
+    "User-Agent": "Safari/605.1.15",
+    "Accept": "text/plain"
+}
+
+CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.11/catalogo_limpio_final_v4.csv"
+
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
