@@ -742,7 +742,7 @@ def cart_totals(phone):
 @lru_cache(maxsize=1)
 def _load_raw_csv():
     try:
-        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUEST_HEADERS)
+        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
         r.raise_for_status()
         r.encoding = "utf-8"
         return r.text
@@ -755,7 +755,7 @@ def _extract_column(header_row, key_variants):
     for variant in key_variants:
         variant_norm = strip_accents(variant)
         for idx, col in enumerate(header_norm):
-            if variant_norm in col:
+            if variant_norm == col or variant_norm in col:
                 return idx
     return None
 
@@ -773,13 +773,16 @@ def load_catalog_enriched():
         header = rows[0]
         data_rows = rows[1:]
 
-        idx_code = _extract_column(header, ["codigo", "code", "id"])
-        idx_name = _extract_column(header, ["producto", "descripcion", "description", "nombre", "name"])
-        idx_usd = _extract_column(header, ["usd", "dolar", "precio en dolares", "price_usd"])
-        idx_ars = _extract_column(header, ["ars", "pesos", "precio en pesos", "price_ars"])
-        idx_brand = _extract_column(header, ["marca", "brand"])
-        idx_model = _extract_column(header, ["modelo", "model"])
-        idx_category = _extract_column(header, ["categoria", "category", "rubro"])
+        # Mapeo explícito al CSV:
+        # code, description, price_importado, price_nacional,
+        # categoria_nueva, marca_final, modelo_final
+        idx_code = _extract_column(header, ["code", "codigo", "id"])
+        idx_name = _extract_column(header, ["description", "descripcion", "producto", "nombre", "name"])
+        idx_usd = _extract_column(header, ["price_importado", "precio_importado", "usd", "dolar", "precio en dolares", "price_usd"])
+        idx_ars = _extract_column(header, ["price_nacional", "precio_nacional", "ars", "pesos", "precio en pesos", "price_ars"])
+        idx_brand = _extract_column(header, ["marca_final", "marca", "brand"])
+        idx_model = _extract_column(header, ["modelo_final", "modelo", "model"])
+        idx_category = _extract_column(header, ["categoria_nueva", "categoria", "category", "rubro"])
         idx_keywords = _extract_column(header, ["keywords", "palabras clave", "sinonimos"])
         idx_oem = _extract_column(header, ["oem", "codigo oem", "original"])
         idx_alt = _extract_column(header, ["alt_names", "nombres alternativos", "alias"])
@@ -1195,6 +1198,12 @@ def semantic_search_v2(query: str, top_k: int = 60) -> list:
     catalog, _ = get_catalog_and_index()
     if not catalog or not query:
         return []
+
+    # PREFILTRO POR CATEGORÍA ANTES DE EMBEDDINGS
+    cat = detect_category_filter(query)
+    if cat:
+        catalog = [p for p in catalog if cat in normalize(p.get("category", ""))]
+        logger.info(f"[PRE-FILTER] Cat={cat} → {len(catalog)} productos")
 
     parsed = parse_query_v2(query)
     filtered = filter_catalog(catalog, parsed)
@@ -1715,6 +1724,26 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         # Construimos prompt con TODO el historial (hasta 128k tokens)
         msgs = build_full_history_prompt(phone, user_message, catalog_products)
 
+        # GATEKEEPER: el LLM solo puede hablar de lo que realmente coincide
+        msgs.insert(1, {
+            "role": "system",
+            "content": (
+                f"CLIENTE DIJO: {user_message}\n\n"
+                "BUSQUEDA DEVOLVIÓ:\n" +
+                "\n".join([
+                    f"- {p['name']} ({p.get('code','')}) - "
+                    f"{format_price(Decimal(str(p['price_ars'])))}"
+                    for p in catalog_products[:10]
+                ]) +
+                "\n\nREGLAS: "
+                "1) Solo podés mencionar productos que estén en la lista de arriba. "
+                "2) Si ninguno calza exactamente, decí: 'No tengo eso exacto, pero tengo estas alternativas:' y mostrá hasta 3. "
+                "3) No inventes códigos, marcas ni precios. "
+                "4) Máximo 4 líneas. "
+                "5) Cerrá con una pregunta de venta."
+            )
+        })
+
         # Detectamos tipo de producto para personalizar el prompt
         user_lower = user_message.lower()
         product_type = (
@@ -2001,7 +2030,6 @@ def format_search_results(products):
         if model:
             extra.append(model)
         extra_txt = f" - {' / '.join(extra)}" if extra else ""
-
         lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   {price}")
     return "\n\n".join(lines)
 
