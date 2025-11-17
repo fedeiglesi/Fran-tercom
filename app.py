@@ -90,7 +90,6 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
-REQUEST_HEADERS = {"User-Agent": "FranBot/3.11.3"}
 
 # ------------------------------------------------------------
 # TWILIO
