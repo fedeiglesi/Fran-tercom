@@ -713,6 +713,62 @@ def clear_pending_action(phone):
         logger.error(f"Error limpiando pending_action: {e}")
 
 
+def get_sales_phase(phone):
+    if not phone:
+        return None
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT phase FROM conversation_phase WHERE phone=?", (phone,))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        logger.error(f"Error leyendo sales_phase: {e}")
+        return None
+
+
+def set_sales_phase(phone, phase):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            if phase:
+                conn.execute(
+                    """INSERT INTO conversation_phase (phone, phase, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(phone) DO UPDATE SET
+                            phase=excluded.phase,
+                            updated_at=excluded.updated_at""",
+                    (phone, phase, datetime.now().isoformat())
+                )
+            else:
+                conn.execute("DELETE FROM conversation_phase WHERE phone=?", (phone,))
+    except Exception as e:
+        logger.error(f"Error guardando sales_phase: {e}")
+
+
+def update_sales_phase_from_intent(phone, intent):
+    phase_map = {
+        "product_search": "search",
+        "cart_action": "cart",
+        "view_cart": "cart",
+        "order_flow": "checkout",
+        "payment": "payment",
+        "shipping": "shipping",
+        "tech_expert": "advice",
+        "empty_cart": "search",
+        "negation": None,
+        "small_talk": None,
+        "confirmation": None
+    }
+    phase = phase_map.get(intent)
+    if phase is None:
+        if intent in {"negation"}:
+            set_sales_phase(phone, None)
+        return
+    set_sales_phase(phone, phase)
+
+
 def apply_add_each_quantity_pending(phone, pending):
     """
     Ejecuta la acción pendiente de "agregar N de cada uno" usando el carrito
@@ -888,6 +944,14 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_phase (
+                phone TEXT PRIMARY KEY,
+                phase TEXT,
+                updated_at TEXT
+            )
+        """)
 
 # ------------------------------------------------------------------
 # ANALYTICS
@@ -1883,58 +1947,34 @@ TOTAL: {format_price(Decimal(str(total)))}
 INTENT_SYSTEM_PROMPT = """
 Sos un clasificador de intenciones para un vendedor mayorista (WhatsApp).
 NO respondas al usuario. NO agregues explicaciones.
-Tu única salida será un JSON válido (UNA línea), con este esquema EXACTO:
-{"intent":"<uno de: saludo|busqueda_catalogo|pregunta_tecnica|pedido_codigo|agregar_carrito|ver_carrito|vaciar_carrito|confirmar|cancelar|desconocido>", "query":"<texto util para buscar o ''>"}
+Tu única salida será un JSON válido (UNA línea) con este esquema EXACTO:
+{"intent":"<uno de: small_talk|product_search|cart_action|order_flow|payment|shipping|tech_expert|view_cart|empty_cart|confirmation|negation|unknown>", "query":"<texto util para buscar o ''>"}
 
-Criterios estrictos (adaptado al habla argentina):
+Criterios estrictos (habla argentina):
 
-- "hola", "buen día", "buenas", "que tal", "cómo va" → saludo
+- "hola", "buen día", "buenas", "que tal", "cómo va", "gracias" → small_talk
 
-- Si aparece un código tipo 1234/56789-012 → pedido_codigo
+- Si aparece un código tipo 1234/56789-012 → product_search (query = código)
+- Pedidos de repuestos / precios / "tenés", "busco", "algo para", menciona marca-modelo → product_search
 
-- Palabras de búsqueda / compra:
-  - Contiene cosas como: "tenes", "tenés", "tendrás", "busco", "necesito", "me hace falta",
-    "precio", "cuánto sale", "cuanto sale", "cuánto está", "cuanto está",
-    "cotizame", "pasame precio", "listado", "lista de", "catálogo", "catalogo"
-  - O menciona nombre de pieza, marca o modelo (ej: "batería xr250", "disco nsu", "amortiguador tornado")
-  → busqueda_catalogo
+- Verbos de carrito: "agregá", "sumame", "sacame", "bajame", "subilo", "ponelo", "agregame", "cargame" → cart_action
+- "ver carrito", "qué tengo", "mostrame el carrito" → view_cart
+- "vaciar", "limpia todo", "borra el carrito" → empty_cart
 
-- Pregunta sobre características técnicas:
-  - "cuánto mide", "medida", "medidas", "longitud", "amperaje", "ampere",
-    "equivalencia", "equivale", "sirve para", "es compatible", "diferencia",
-    "cuál conviene", "que diferencia hay"
-  → pregunta_tecnica
+- "listo, cómo sigo?", "qué opciones hay?", "ya estaría", "cerremos", "hacemos el pedido" → order_flow (checkout)
+- Pagos: "cómo pago", "transferencia", "efectivo", "tenés QR", "cheque", "pago" → payment
+- Envíos: "envío", "mandás moto", "retiro", "mensajero", "cuánto tarda" → shipping
 
-- Acciones claras de carrito:
-  - "agregalo", "sumalo", "sumame", "metelo", "ponelo", "agregame",
-    "mandame", "mandalo", "cargame", "cargar al pedido"
-  → agregar_carrito
+- Preguntas técnicas/mecánicas: "por qué", "qué conviene", "cuánto dura", "cada cuánto" → tech_expert
 
-- Ver carrito:
-  - "ver carrito", "mostrar carrito", "que tengo en el carrito",
-    "qué te pedí", "qué llevamos hasta ahora", "qué me cargaste"
-  → ver_carrito
+- "sí", "dale", "ok", "perfecto", "vamos" → confirmation
+- "no", "cancelá", "dejalo", "me arrepentí" → negation
 
-- Vaciar carrito:
-  - "vaciar carrito", "limpiar carrito", "borra todo", "sacá todo", "saca todo"
-  → vaciar_carrito
+- Cualquier otro caso → unknown
 
-- Confirmar:
-  - Respuestas cortas tipo "si", "sí", "dale", "ok", "ok dale", "perfecto",
-    "está bien", "dejalo así", "confirmo", "cerramos", "cerralo"
-  → confirmar
+La clave "query" solo debe contener texto útil para buscar en catálogo (aplica a product_search). Para otras intenciones usá "".
 
-- Cancelar:
-  - "no", "me arrepentí", "cancelar", "cancela", "no lo hagas",
-    "dejalo para después", "dejalo, gracias"
-  → cancelar
-
-- Otro caso / charla general → desconocido
-
-La clave "query" debe contener el texto más útil para buscar en el catálogo
-(sacar paja como saludos, relleno). Si no sirve nada, poné "".
-
-IMPORTANTE: Devolvé SIEMPRE un JSON de una sola línea.
+IMPORTANTE: devolvé SIEMPRE un JSON de una sola línea.
 """
 
 
@@ -1958,22 +1998,22 @@ def detect_intent_llm(msg):
 
         data = json.loads(raw)
         if not isinstance(data, dict):
-            return {"intent": "desconocido", "query": ""}
+            return {"intent": "unknown", "query": ""}
 
-        intent = str(data.get("intent", "desconocido")).strip()
+        intent = str(data.get("intent", "unknown")).strip()
         query = str(data.get("query", "")).strip()
 
         valid_intents = {
-            "saludo", "busqueda_catalogo", "pregunta_tecnica", "pedido_codigo",
-            "agregar_carrito", "ver_carrito", "vaciar_carrito", "confirmar", "cancelar", "desconocido"
+            "small_talk", "product_search", "cart_action", "order_flow", "payment", "shipping",
+            "tech_expert", "view_cart", "empty_cart", "confirmation", "negation", "unknown"
         }
         if intent not in valid_intents:
-            intent = "desconocido"
+            intent = "unknown"
 
         return {"intent": intent, "query": query or msg.strip()[:600]}
     except Exception as e:
         logger.error(f"detect_intent_llm error: {e}")
-        return {"intent": "desconocido", "query": msg.strip()[:600]}
+        return {"intent": "unknown", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
 # PEDIDOS IMPLÍCITOS (MEJORADOS)
@@ -2046,6 +2086,203 @@ def detect_implicit_cart_action(message, phone):
     return None
 
 # ------------------------------------------------------------------
+# CART ACTION PARSER
+# ------------------------------------------------------------------
+SPANISH_NUMBER_WORDS = {
+    "cero": 0,
+    "un": 1,
+    "uno": 1,
+    "una": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+    "once": 11,
+    "doce": 12
+}
+
+EXPLICIT_QTY_PATTERN = re.compile(r"\b(a|en)\s+(\d+|un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)\b")
+
+
+def extract_number_from_text(text):
+    if not text:
+        return None
+    match = re.search(r"(\d+)", text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    normalized = strip_accents(text.lower())
+    for word, value in SPANISH_NUMBER_WORDS.items():
+        if re.search(rf"\b{word}\b", normalized):
+            return value
+    return None
+
+
+def extract_code_from_text(text):
+    if not text:
+        return None
+    tokens = re.findall(r"[0-9/\-]+", text)
+    for token in tokens:
+        ok, normalized = validate_tercom_code(token)
+        if ok:
+            return normalized
+    digits_only = re.sub(r"\D", "", text)
+    if len(digits_only) >= 12:
+        ok, normalized = validate_tercom_code(digits_only[:12])
+        if ok:
+            return normalized
+    return None
+
+
+def match_product_from_list(message, products, key="name"):
+    if not message or not products:
+        return None
+    query = strip_accents(message.lower())
+    best = None
+    best_score = 0
+    for item in products:
+        name = strip_accents(str(item.get(key, ""))).lower()
+        if not name:
+            continue
+        try:
+            score = fuzz.partial_ratio(query, name)
+        except Exception:
+            continue
+        if score > best_score:
+            best = item
+            best_score = score
+    if best_score < 60:
+        return None
+    return best
+
+
+def handle_cart_action(phone, message):
+    msg_norm = strip_accents((message or "")).lower()
+    if not msg_norm:
+        return "Necesito que me indiques qué producto toco del carrito."
+
+    cart_items = cart_get(phone)
+    cart_snapshot = [
+        {"code": code, "qty": qty, "name": name, "price": price}
+        for code, qty, name, price in cart_items
+    ]
+
+    last_search = get_last_search(phone) or {}
+    last_products = last_search.get("products") or []
+
+    code = extract_code_from_text(message)
+    explicit_qty = bool(EXPLICIT_QTY_PATTERN.search(msg_norm))
+
+    remove_keywords = ("saca", "sacame", "sacalo", "sacalos", "sacalas", "borra", "elimina", "quita", "retira")
+    add_keywords = ("agrega", "agregá", "agregame", "agregalo", "sumame", "sumalo", "sumales", "mandame", "cargame", "poneme")
+    increase_keywords = ("subi", "subile", "subilo", "aumenta", "aumentale", "sumale")
+    decrease_keywords = ("baja", "bajame", "bajale", "restale", "sacale")
+    set_keywords = ("dejalo", "dejala", "dejame", "ponelo", "ponela", "ponele")
+
+    action = "unknown"
+    if any(k in msg_norm for k in remove_keywords):
+        action = "remove"
+    elif explicit_qty and any(k in msg_norm for k in set_keywords):
+        action = "set"
+    elif explicit_qty and any(k in msg_norm for k in ("baja", "subi", "subilo", "bajalo")):
+        action = "set"
+    elif any(k in msg_norm for k in add_keywords):
+        action = "add"
+    elif any(k in msg_norm for k in increase_keywords):
+        action = "increase"
+    elif any(k in msg_norm for k in decrease_keywords):
+        action = "decrease"
+
+    if action == "unknown":
+        return "Para tocar el carrito decime el código o nombre del producto y qué querés hacer."
+
+    if action == "add" and not last_products:
+        return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
+
+    target_cart = None
+    if code:
+        target_cart = next((item for item in cart_snapshot if item["code"] == code), None)
+
+    if action in {"remove", "increase", "decrease", "set"} and not target_cart:
+        target_cart = match_product_from_list(message, cart_snapshot, key="name")
+
+    if action != "add" and not target_cart:
+        return "No ubico ese producto en tu carrito. ¿Me pasás el código exacto?"
+
+    if action == "add":
+        candidate = None
+        if code:
+            candidate = next((p for p in last_products if p.get("code") == code), None)
+        if not candidate:
+            candidate = match_product_from_list(message, last_products, key="name")
+        if not candidate:
+            return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
+
+        qty_to_add = extract_number_from_text(message) or 1
+        qty_to_add = max(1, qty_to_add)
+        price_ars = candidate.get("price_ars")
+        if isinstance(price_ars, Decimal):
+            price_dec = price_ars
+        else:
+            price_dec = to_decimal_money(price_ars)
+        price_usd = Decimal("0")
+        if price_dec and price_dec > 0:
+            try:
+                price_usd = (price_dec / get_exchange_rate()).quantize(Decimal("0.01"))
+            except Exception:
+                price_usd = Decimal("0")
+
+        ok = cart_add(
+            phone,
+            candidate.get("code", ""),
+            qty_to_add,
+            candidate.get("name", ""),
+            price_dec or Decimal("0"),
+            price_usd
+        )
+        if ok:
+            return f"Listo, agregué {qty_to_add}x {candidate.get('name', '').strip()} al carrito."
+        return "No pude agregar ese producto, pasame el código completo y lo cargo."
+
+    current_qty = target_cart["qty"]
+    if action == "remove":
+        cart_update_qty(phone, target_cart["code"], 0)
+        return f"Listo, saqué {target_cart['name']} del carrito."
+
+    if action == "set":
+        qty_target = extract_number_from_text(message)
+        if qty_target is None:
+            return "Decime cuántas unidades querés dejar."
+        qty_target = max(0, qty_target)
+        cart_update_qty(phone, target_cart["code"], qty_target)
+        if qty_target == 0:
+            return f"Listo, saqué {target_cart['name']} del carrito."
+        return f"Dejé {target_cart['name']} en {qty_target}u."
+
+    if action == "increase":
+        delta = extract_number_from_text(message) or 1
+        new_qty = current_qty + max(1, delta)
+        cart_update_qty(phone, target_cart["code"], new_qty)
+        return f"Subí {target_cart['name']} a {new_qty}u."
+
+    if action == "decrease":
+        delta = extract_number_from_text(message) or 1
+        new_qty = max(0, current_qty - max(1, delta))
+        cart_update_qty(phone, target_cart["code"], new_qty)
+        if new_qty == 0:
+            return f"Listo, saqué {target_cart['name']} del carrito."
+        return f"Dejé {target_cart['name']} en {new_qty}u."
+
+    return "No pude interpretar la acción sobre el carrito."
+
+# ------------------------------------------------------------------
 # PROMPTS LLM
 # ------------------------------------------------------------------
 BUSINESS_CONTEXT = """
@@ -2104,29 +2341,17 @@ Sos vendedor que SABE de motos, ENTIENDE a la gente, CITA productos reales.
 """
 
 TECH_SYSTEM_PROMPT = f"""
-Sos Fran, vendedor experto en motopartes. Tu objetivo es VENDER RÁPIDO.
+Sos Fran, mecánico experto y vendedor premium de TERCOM.
 
-=== BREVEDAD EXTREMA ===
-LIMITE ESTRICTO: Máximo 4 líneas
+REGLAS:
+- Respondé en 3-4 líneas máximo.
+- Explicá en criollo qué conviene y por qué (duración, mantenimiento, causas comunes).
+- Podés dar tips rápidos de diagnóstico o cuidado.
+- Cerrá ofreciendo ayuda para cotizar repuestos reales si el cliente quiere avanzar.
 
-PLANTILLA OBLIGATORIA:
-Línea 1: Diferencia clave directa
-Líneas 2-3: Cuál de TUS productos (con código y precio)
-Línea 4: ¿Lo/Los agregamos?
-
-=== CITACIÓN OBLIGATORIA ===
-Si mencionás un producto, incluí su código:
-✅ "El ACEITE YAMALUBE 10W40 SINTETICO (1234/56789-012) - $15.000 es sintético, dura más"
-❌ "El Yamalube 10W40 es sintético" (falta código)
-
-=== CONOCIMIENTO TÉCNICO: ULTRA BREVE ===
-Podés explicar conceptos en 1 LÍNEA:
-- "El sintético dura más pero es más caro"
-- "Para frío el 10W, para calor el 20W"
+NO inventes códigos ni productos, enfocate en el consejo técnico.
 
 {BUSINESS_CONTEXT}
-
-Sos vendedor EFICIENTE, no Wikipedia.
 """
 
 # ------------------------------------------------------------------
@@ -2242,16 +2467,8 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
 
 
-def build_technical_answer(phone, user_message, top_products):
+def build_tech_expert_answer(phone, user_message):
     try:
-        context_lines = []
-        for p in (top_products or [])[:3]:
-            context_lines.append(
-                f"- {p.get('name','')} (cod {p.get('code','')}) "
-                f"marca {p.get('brand','')} modelo {p.get('model','')}"
-            )
-        ctx = "Productos disponibles:\n" + "\n".join(context_lines) if context_lines else "Productos disponibles: (sin coincidencias exactas)"
-
         history = get_history_since(phone, days=1, limit=10)
         msgs = [{"role": "system", "content": TECH_SYSTEM_PROMPT}]
 
@@ -2261,33 +2478,69 @@ def build_technical_answer(phone, user_message, top_products):
 
         msgs.append({
             "role": "user",
-            "content": f"{ctx}\n\nPregunta del cliente: {user_message[:600]}"
+            "content": f"Pregunta del cliente: {user_message[:600]}"
         })
 
         with openai_sem:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=msgs,
-                temperature=0.3,
-                max_tokens=400,
+                temperature=0.4,
+                max_tokens=350,
             )
 
         txt = (resp.choices[0].message.content or "").strip()
 
         if not txt or len(txt) < 10:
-            return "Te confirmo medidas/compatibilidades y te aviso. ¿Querés que lo deje listo?"
-
-        code_validation = validate_response_codes(txt, top_products)
-        name_validation = validate_mentioned_names(txt, top_products)
-
-        if not code_validation["valid"] or not name_validation["valid"]:
-            logger.warning("Respuesta técnica con alucinaciones, usando fallback")
-            return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise cuando tenga la info exacta?"
+            return "Te cuento rápido y si querés te paso opciones concretas del catálogo."
 
         return txt
     except Exception as e:
-        logger.error(f"build_technical_answer error: {e}")
-        return "Estoy revisando las especificaciones técnicas. ¿Querés que te avise y mientras vemos alternativas?"
+        logger.error(f"build_tech_expert_answer error: {e}")
+        return "Estoy revisando la mejor recomendación. ¿Querés que te avise y de paso te cotizo repuestos?"
+
+
+def build_checkout_response(phone):
+    items = cart_get(phone)
+    total, _ = cart_totals(phone)
+    if items:
+        resumen = "\n".join([f"- {q}x {name[:40]}" for _, q, name, _ in items[:3]])
+        header = f"Tengo {len(items)} productos listos:\n{resumen}"
+        total_line = f"Total estimado: {format_price(total)}."
+    else:
+        header = "Todavía no cargamos productos. Decime qué necesitás y lo sumo."
+        total_line = ""
+
+    pasos = (
+        "Paso final: confirmame forma de pago (transferencia, efectivo o cheque clientes)"
+        " y el envío (moto CABA 24-48hs, despacho interior 3-5 días o retiro)."
+    )
+    cierre = "¿Avanzamos con el cierre?"
+    return "\n\n".join([text for text in (header, total_line, pasos, cierre) if text])
+
+
+def build_payment_response(phone):
+    total, _ = cart_totals(phone)
+    lines = []
+    if total > 0:
+        lines.append(f"Total estimado del carrito: {format_price(total)}.")
+    lines.append("Medios disponibles: transferencia (te paso alias), efectivo al retirar y cheque/QR para clientes habituales.")
+    lines.append("Apenas mandes el comprobante libero el pedido al mensajero o despacho.")
+    return "\n".join(lines)
+
+
+def build_shipping_response(phone):
+    items = cart_get(phone)
+    if items:
+        header = f"Tengo {len(items)} productos listos para envío."
+    else:
+        header = "Coordinamos el envío cuando me confirmes qué necesitás."
+    lines = [
+        header,
+        "Opciones: moto propia en CABA (24-48hs, gratis arriba de $100.000), despacho a interior por expreso en 3-5 días o retiro/tu mensajero.",
+        "¿Cuál te sirve así lo agenda?"
+    ]
+    return "\n".join(lines)
 
 # ------------------------------------------------------------------
 # FORMATO RESULTADOS
@@ -2337,8 +2590,9 @@ def run_agent(phone, user_message):
         return reply
 
     intent_data = detect_intent_llm(user_message)
-    intent = intent_data.get("intent", "desconocido")
+    intent = intent_data.get("intent", "unknown")
     raw_query_for_search = intent_data.get("query") or user_message
+    current_phase = get_sales_phase(phone)
 
     execution_context = {
         "intent_detected": intent,
@@ -2358,39 +2612,64 @@ def run_agent(phone, user_message):
     # ------------------------------------------------------
     pending = get_pending_action(phone)
 
-    if intent == "confirmar" and pending:
+    if intent == "confirmation" and pending:
         if pending.get("action_type") == "add_each_quantity":
             reply = apply_add_each_quantity_pending(phone, pending)
             clear_pending_action(phone)
             save_message(phone, reply, "assistant")
-            log_interaction(phone, user_message, "confirmar_pending_add_each", 0)
-            log_performance(phone, "confirmar_pending_add_each", time.time()-start_time, 0)
+            log_interaction(phone, user_message, "confirmation_pending_add_each", 0)
+            log_performance(phone, "confirmation_pending_add_each", time.time()-start_time, 0)
+            update_sales_phase_from_intent(phone, intent)
             return reply
 
-    if intent == "cancelar" and pending:
+    if intent == "negation" and pending:
         clear_pending_action(phone)
-        reply = "Listo, no agrego nada al carrito."
+        reply = "Listo, no avanzo con eso."
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "cancelar_pending", 0)
-        log_performance(phone, "cancelar_pending", time.time()-start_time, 0)
+        log_interaction(phone, user_message, "negation_pending", 0)
+        log_performance(phone, "negation_pending", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
         return reply
 
     # ------------------------------------------------------
     # Intenciones directas simples
     # ------------------------------------------------------
-    if intent == "saludo":
-        reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?"
+    if intent == "confirmation":
+        phase_responses = {
+            "checkout": "Perfecto, definimos pago o envío y lo cierro.",
+            "payment": "Genial, espero el comprobante y te confirmo.",
+            "shipping": "Dale, coordinemos la logística. ¿Moto CABA o despacho interior?",
+            "cart": "Listo, sigo ajustando el carrito con lo que me digas."
+        }
+        reply = phase_responses.get(current_phase, "Perfecto, sigo atento. Decime si querés que agregue algo más.")
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "saludo", 0)
-        log_performance(phone, "saludo", time.time()-start_time, 0)
+        log_interaction(phone, user_message, "confirmation", 0)
+        log_performance(phone, "confirmation", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
         return reply
 
-    if intent == "ver_carrito":
+    if intent == "negation":
+        reply = "Sin drama, quedo atento si querés hacer otro pedido."
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "negation", 0)
+        log_performance(phone, "negation", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "small_talk":
+        reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "small_talk", 0)
+        log_performance(phone, "small_talk", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "view_cart":
         items = cart_get(phone)
         if not items:
             reply = "Tu carrito está vacío."
         else:
-            total, discount = cart_totals(phone)
+            total, _ = cart_totals(phone)
             lines = ["TU CARRITO:\n"]
             for code, q, name, price in items:
                 subtotal = (price * q).quantize(Decimal("0.01"))
@@ -2398,16 +2677,18 @@ def run_agent(phone, user_message):
             lines.append(f"\nTOTAL: {format_price(total)}")
             reply = "\n".join(lines)
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "ver_carrito", 0)
-        log_performance(phone, "ver_carrito", time.time()-start_time, 0)
+        log_interaction(phone, user_message, "view_cart", 0)
+        log_performance(phone, "view_cart", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
         return reply
 
-    if intent == "vaciar_carrito":
+    if intent == "empty_cart":
         cart_clear(phone)
         reply = "Listo, vacié tu carrito."
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "vaciar_carrito", 0)
-        log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
+        log_interaction(phone, user_message, "empty_cart", 0)
+        log_performance(phone, "empty_cart", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
         return reply
 
     # ------------------------------------------------------
@@ -2429,6 +2710,46 @@ def run_agent(phone, user_message):
         log_performance(phone, "implicit_cart", time.time()-start_time, len(products))
         return reply
 
+    if intent == "cart_action":
+        reply = handle_cart_action(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "cart_action", 0)
+        log_performance(phone, "cart_action", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "order_flow":
+        reply = build_checkout_response(phone)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "order_flow", 0)
+        log_performance(phone, "order_flow", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "payment":
+        reply = build_payment_response(phone)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "payment", 0)
+        log_performance(phone, "payment", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "shipping":
+        reply = build_shipping_response(phone)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "shipping", 0)
+        log_performance(phone, "shipping", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
+    if intent == "tech_expert":
+        reply = build_tech_expert_answer(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "tech_expert", 0)
+        log_performance(phone, "tech_expert", time.time()-start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+        return reply
+
     # ------------------------------------------------------
     # Búsqueda en catálogo
     # ------------------------------------------------------
@@ -2436,7 +2757,7 @@ def run_agent(phone, user_message):
     query_for_search = raw_query_for_search
     corrections = []
 
-    if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
+    if intent in {"product_search", "unknown"}:
         query_for_search, corrections = autocorrect_keywords(raw_query_for_search)
         if corrections:
             execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
@@ -2451,7 +2772,7 @@ def run_agent(phone, user_message):
         execution_context["products_found"] = len(products)
 
         # Filtro por relevancia solo cuando hay algo razonable que mostrar
-        if products and intent in {"busqueda_catalogo", "pregunta_tecnica"}:
+        if products and intent in {"product_search"}:
             original_len = len(products)
             filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
 
@@ -2520,7 +2841,7 @@ def run_agent(phone, user_message):
 
         execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
 
-        if intent == "busqueda_catalogo" and len(products) > MAX_PRODUCTS_FOR_LLM:
+        if intent == "product_search" and len(products) > MAX_PRODUCTS_FOR_LLM:
             execution_context["will_send_chunks"] = True
             num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
             execution_context["chunk_info"] = {
@@ -2532,17 +2853,13 @@ def run_agent(phone, user_message):
     # ------------------------------------------------------
     # Respuesta del modelo
     # ------------------------------------------------------
-    if intent == "pregunta_tecnica":
-        reply = build_technical_answer(phone, user_message, products[:8])
-        execution_context["will_send_chunks"] = False
-    else:
-        reply = generate_smart_ai_reply_v2(
-            phone,
-            user_message,
-            products[:MAX_PRODUCTS_FOR_LLM],
-            execution_context,
-            system_prompt=CITATION_ENFORCED_PROMPT
-        )
+    reply = generate_smart_ai_reply_v2(
+        phone,
+        user_message,
+        products[:MAX_PRODUCTS_FOR_LLM],
+        execution_context,
+        system_prompt=CITATION_ENFORCED_PROMPT
+    )
 
     # ------------------------------------------------------
     # Validación post-LLM (códigos / nombres)
@@ -2585,7 +2902,7 @@ def run_agent(phone, user_message):
     # ------------------------------------------------------
     # Enviar listados largos por chunks
     # ------------------------------------------------------
-    if execution_context["will_send_chunks"] and intent == "busqueda_catalogo" and products:
+    if execution_context["will_send_chunks"] and intent == "product_search" and products:
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
             chunk_text = f"\n━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
@@ -2597,6 +2914,7 @@ def run_agent(phone, user_message):
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, intent, len(products))
     log_performance(phone, intent, time.time()-start_time, len(products))
+    update_sales_phase_from_intent(phone, intent)
     return reply
 
 # ------------------------------------------------------------------
@@ -2718,7 +3036,9 @@ def health():
             "progressive_family_fallback",
             "intent_detector_v2",
             "implicit_cart_v2",
-            "pending_actions_execution"
+            "pending_actions_execution",
+            "checkout_intents",
+            "sales_phase_tracking"
         ]
     }), 200
 
@@ -2765,6 +3085,7 @@ if __name__ == "__main__":
     logger.info("  ✅ Índice de familias (FAMILIES_INDEX)")
     logger.info("  ✅ Fallback progresivo por familia + categoría")
     logger.info("  ✅ k dinámico según haya/no haya familia en la query")
+    logger.info("  ✅ Checkout intents + sales phase tracker")
     logger.info("=" * 60)
-    
+
     app.run(host="0.0.0.0", port=port, debug=False)
