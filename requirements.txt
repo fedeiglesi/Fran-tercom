@@ -1,25 +1,6 @@
-# Web Framework
-flask==3.0.3
-gunicorn==21.2.0
-
-# Twilio
-twilio==9.0.4
-
-# OpenAI
-openai==1.54.0
-httpx==0.27.0
-
-# Search
-rapidfuzz==3.10.0
-
-# FAISS
-faiss-cpu==1.8.0
-numpy==1.26.4
-
-# HTTP
-requests==2.32.3
-
-# Utils
-python-dotenv==1.0.1
-
-cachetools==5.5.0
+flask
+twilio
+google-cloud-aiplatform
+google-auth
+vertexai
+gunicorn
