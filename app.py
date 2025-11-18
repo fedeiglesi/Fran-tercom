@@ -1,4 +1,4 @@
-=========================================================
+# =========================================================
 # Fran 3.13.0 – Bot Mayorista Inteligente
 # =========================================================
 # Basado en Fran 3.12 (estructura completa que pasó tests),
@@ -83,6 +83,8 @@ ASYNC_MEDIUM = 80
 MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
+LAST_SEARCH_TTL_HOURS = int(os.environ.get("LAST_SEARCH_TTL_HOURS", "6"))
+LAST_SEARCH_EXPIRED_MESSAGE = "¿Podés repetirme los códigos? Ya no tengo la lista anterior."
 # ------------------------------------------------------------
 # TWILIO
 # ------------------------------------------------------------
@@ -697,10 +699,17 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone_timestamp ON search_history(phone, timestamp DESC)")
         c.execute("""
-            CREATE TABLE IF NOT EXISTS last_search (
-                phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT, metadata TEXT
+            CREATE TABLE IF NOT EXISTS last_search_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                products_json TEXT,
+                query TEXT,
+                created_at TEXT
             )
         """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_last_search_products_phone ON last_search_products(phone, created_at DESC)"
+        )
         c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
@@ -883,49 +892,176 @@ def get_search_history(phone, limit=5):
     except Exception as e:
         logger.error(f"Error leyendo search_history: {e}")
         return []
-def save_last_search(phone, products, query):
-    if not phone or not products:
-        return
-    meta = {
-        "products": products,
-        "query": query,
-        "timestamp": datetime.now().isoformat(),
-        "summary": f"{len(products)} productos",
-        "top_category": max(
-            set(p.get("category", "") for p in products),
-            key=lambda c: sum(1 for p in products if p.get("category") == c),
-            default=""
-        ),
-        "total_value": sum(float(p.get("price_ars", 0)) for p in products)
-    }
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO last_search (phone, products_json, query, timestamp, metadata)
-                VALUES (?,?,?,?,?)
-                ON CONFLICT(phone) DO UPDATE SET
-                  products_json=excluded.products_json,
-                  query=excluded.query,
-                  timestamp=excluded.timestamp,
-                  metadata=excluded.metadata""",
-                (phone, json.dumps(meta["products"], ensure_ascii=False), query, meta["timestamp"], json.dumps(meta, ensure_ascii=False))
-            )
-    except Exception as e:
-        logger.error(f"save_last_search error: {e}")
-def get_last_search(phone):
+def _load_last_search_rows(phone, limit=3):
     if not phone:
-        return None
+        return []
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT products_json, query, metadata FROM last_search WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {"products": json.loads(row[0]), "query": row[1], "metadata": json.loads(row[2]) if row[2] else {}}
+            cur.execute(
+                "SELECT products_json, query, created_at FROM last_search_products "
+                "WHERE phone=? ORDER BY created_at DESC LIMIT ?",
+                (phone, limit)
+            )
+            rows = cur.fetchall()
+            payload = []
+            for row in rows:
+                try:
+                    products = json.loads(row[0]) if row[0] else []
+                except Exception:
+                    products = []
+                payload.append({
+                    "products": products,
+                    "query": row[1] or "",
+                    "created_at": row[2]
+                })
+            return payload
     except Exception as e:
-        logger.error(f"get_last_search error: {e}")
-        return None
+        logger.error(f"_load_last_search_rows error: {e}")
+        return []
+def _is_search_entry_expired(entry):
+    created_at = entry.get("created_at")
+    if not created_at:
+        return True
+    try:
+        created_dt = datetime.fromisoformat(created_at)
+    except Exception:
+        return True
+    return datetime.now() - created_dt > timedelta(hours=LAST_SEARCH_TTL_HOURS)
+def get_recent_search_products(phone, limit=3):
+    rows = _load_last_search_rows(phone, limit=limit)
+    if not rows:
+        return [], False
+    valid = []
+    expired_candidates = []
+    for row in rows:
+        if _is_search_entry_expired(row):
+            expired_candidates.append(row)
+        else:
+            valid.append(row)
+    if expired_candidates:
+        try:
+            with get_db_connection() as conn:
+                cutoff = (datetime.now() - timedelta(hours=LAST_SEARCH_TTL_HOURS * 2)).isoformat()
+                conn.execute(
+                    "DELETE FROM last_search_products WHERE phone=? AND created_at<?",
+                    (phone, cutoff)
+                )
+        except Exception as e:
+            logger.warning(f"Cleanup last_search_products error: {e}")
+    expired_only = bool(rows) and not valid
+    return valid, expired_only
+def save_last_search(phone, products, query):
+    if not phone or not products:
+        return
+    normalized_products = []
+    for p in products:
+        normalized_products.append({
+            "code": p.get("code"),
+            "name": p.get("name"),
+            "price_ars": float(p.get("price_ars", 0)),
+            "price_usd": float(p.get("price_usd", 0)),
+            "qty": int(p.get("qty", 1) or 1),
+            "brand": p.get("brand"),
+            "model": p.get("model"),
+            "category": p.get("category")
+        })
+    now_str = datetime.now().isoformat()
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO last_search_products (phone, products_json, query, created_at)
+                VALUES (?, ?, ?, ?)""",
+                (phone, json.dumps(normalized_products, ensure_ascii=False), query or "", now_str)
+            )
+            cutoff = (datetime.now() - timedelta(hours=LAST_SEARCH_TTL_HOURS * 2)).isoformat()
+            conn.execute(
+                "DELETE FROM last_search_products WHERE phone=? AND created_at<?",
+                (phone, cutoff)
+            )
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM last_search_products WHERE phone=? ORDER BY created_at DESC LIMIT -1 OFFSET 3",
+                (phone,)
+            )
+            stale_ids = [row[0] for row in cur.fetchall()]
+            if stale_ids:
+                placeholders = ",".join("?" * len(stale_ids))
+                conn.execute(
+                    f"DELETE FROM last_search_products WHERE id IN ({placeholders})",
+                    stale_ids
+                )
+    except Exception as e:
+        logger.error(f"save_last_search error: {e}")
+def get_last_search(phone):
+    valid, _ = get_recent_search_products(phone, limit=1)
+    return valid[0] if valid else None
+def _select_search_slot(message_norm: str, available: int) -> int:
+    if "anteayer" in message_norm and available > 2:
+        return 2
+    if any(token in message_norm for token in ("ayer", "de ayer", "del ayer")) and available > 1:
+        return 1
+    if "anterior" in message_norm and available > 1:
+        return 1
+    return 0
+ORDINAL_PRODUCT_MAP = {
+    1: ["el primero", "primero", "1ro", "1°", "primer"],
+    2: ["el segundo", "segundo", "2do", "2°"],
+    3: ["el tercero", "tercero", "3ro", "3°"],
+}
+def _detect_product_index_from_text(message_norm: str):
+    for idx, tokens in ORDINAL_PRODUCT_MAP.items():
+        for token in tokens:
+            if token in message_norm:
+                return idx
+    numeric_match = re.search(r"\b(?:el|numero|nro|num)\s*(\d{1,2})\b", message_norm)
+    if numeric_match:
+        return int(numeric_match.group(1))
+    return None
+def resolve_search_context(phone, message, limit=3):
+    rows = _load_last_search_rows(phone, limit=limit)
+    if not rows:
+        return None, False
+    normalized = strip_accents(message or "")
+    slot = _select_search_slot(normalized, len(rows))
+    entry = rows[slot] if slot < len(rows) else None
+    if not entry:
+        return None, False
+    if _is_search_entry_expired(entry):
+        return None, True
+    return entry, False
+def resolve_product_selection(phone, message):
+    rows = _load_last_search_rows(phone, limit=3)
+    if not rows:
+        return None, False
+    normalized = strip_accents(message or "")
+    slot = _select_search_slot(normalized, len(rows))
+    entry = rows[slot] if slot < len(rows) else None
+    if not entry:
+        return None, False
+    index = _detect_product_index_from_text(normalized)
+    if index is None:
+        return None, False
+    if _is_search_entry_expired(entry):
+        return None, True
+    products = entry.get("products") or []
+    if 1 <= index <= len(products):
+        product = products[index - 1]
+        product_copy = dict(product)
+        product_copy["__slot"] = slot
+        product_copy["__index"] = index
+        product_copy["__query"] = entry.get("query", "")
+        return product_copy, False
+    return None, False
+BRAND_MODEL_HINTS = [
+    "xr", "cb", "fz", "mt", "nc", "twister", "tornado", "crypton", "ybr", "dominar",
+    "gixxer", "duke", "ktm", "benelli", "wave", "biz", "titan", "cg", "z400", "factor",
+]
+def message_mentions_brand_or_model(message: str) -> bool:
+    normalized = strip_accents(message or "")
+    if re.search(r"\b\d{2,4}\b", normalized):
+        return True
+    return any(hint in normalized for hint in BRAND_MODEL_HINTS)
 def create_order(phone, customer_name, customer_address, items, total_ars):
     if not phone:
         return None
@@ -1660,6 +1796,69 @@ def detect_intent_llm(msg):
     except Exception as e:
         logger.error(f"detect_intent_llm error: {e}")
         return {"intent": "desconocido", "query": msg.strip()[:600]}
+NEGATED_STOP_WORDS = [" no ", "nunca", "ni en pedo", "ni ahi", "jamás", "jamas"]
+def detect_intent(message, phase):
+    msg = strip_accents(message or "")
+    words = msg.split()
+    sanitized_query = sanitize_input(message)
+    heuristics = []
+    def add(intent, score, subtype=None, query_override=None):
+        heuristics.append({
+            "intent": intent,
+            "score": score,
+            "subtype": subtype,
+            "query": query_override,
+        })
+    if any(w in msg for w in ["hola", "buen dia", "buenas", "como andas", "todo bien", "que tal"]):
+        add("saludo", 0.95)
+    if msg in ["si", "sí", "dale", "ok", "okay", "perfecto", "joya", "de una"] or \
+            any(re.fullmatch(r"(si|sí|dale|ok|okay)[!.]*", w) for w in words):
+        add("confirmar", 0.85)
+    if any(k in msg for k in ["cancel", "cancela", "cancelar", "no gracias", "dejalo", "me arrepenti", "no lo hagas"]):
+        add("cancelar", 0.8)
+    pago_keywords = ["como pago", "metodo de pago", "metodos de pago", "formas de pago", "pago con", "transferencia", "transfer", "qr", "mercado pago"]
+    envio_keywords = ["envio", "envios", "enviame", "mandas", "mandan", "retiro", "retira", "despacho", "correo"]
+    checkout_keywords = ["como sigo", "que opciones hay", "cerrar pedido", "cerramos", "como cerramos", "armame el pedido", "armame la orden"]
+    if any(k in msg for k in pago_keywords):
+        add("payment", 0.8, subtype="checkout")
+    if any(k in msg for k in envio_keywords):
+        add("shipping", 0.8, subtype="checkout")
+    if any(k in msg for k in checkout_keywords):
+        add("checkout", 0.75)
+    expert_triggers = ["cuanto dura", "cada cuanto", "diferencia entre", "que diferencia hay", "conviene", "es mejor", "que significa", "por que", "porque", "causa que", "que pasa si"]
+    if any(k in msg for k in expert_triggers):
+        add("tech_expert", 0.7, query_override=sanitized_query)
+    cart_add_kw = ["agrega", "agregame", "sumame", "poneme", "mandame", "meteme", "cargame"]
+    cart_remove_kw = ["saca", "sacame", "bajame", "quita", "elimina", "borra"]
+    cart_all_kw = ["de cada", "cada uno", "cada una", "todos", "todas", "los de arriba", "los que me pasaste"]
+    if any(k in msg for k in cart_add_kw + cart_remove_kw + cart_all_kw):
+        add("agregar_carrito", 0.65)
+    product_kw = ["aceite", "bujia", "filtro", "corona", "piñon", "pastilla", "disco", "cdi", "estator", "bateria", "amortiguador", "kit", "embrague", "carburador", "regulador", "cubierta", "cadena"]
+    if any(k in msg for k in product_kw):
+        add("busqueda_catalogo", 0.6, query_override=sanitized_query)
+    if phase in [PHASE_SEARCHING, PHASE_CART] and any(w in msg for w in ["mostrame", "tenes", "tiene", "busco", "algo para", "repuestos", "cosas para"]):
+        add("busqueda_catalogo", 0.55, query_override=sanitized_query)
+    if phase == PHASE_CHECKOUT and not heuristics:
+        add("checkout", 0.5)
+    negative_present = any(token.strip() in msg or token in msg for token in NEGATED_STOP_WORDS)
+    heuristics.sort(key=lambda h: h["score"], reverse=True)
+    best = heuristics[0] if heuristics else None
+    if best and negative_present and best["intent"] in {"busqueda_catalogo", "agregar_carrito"}:
+        best = dict(best)
+        best["score"] -= 0.35
+    if not best or best["score"] < 0.45:
+        llm_result = detect_intent_llm(message)
+        llm_result.setdefault("query", sanitized_query)
+        llm_result["source"] = "llm"
+        return llm_result
+    result = {
+        "intent": best["intent"],
+        "subtype": best.get("subtype"),
+        "query": best.get("query") or sanitized_query,
+        "confidence": best["score"],
+        "source": "heuristic",
+    }
+    return result
 # ------------------------------------------------------------------
 # PEDIDOS IMPLÍCITOS (MEJORADOS)
 # ------------------------------------------------------------------
@@ -1674,10 +1873,12 @@ def detect_implicit_cart_action(message, phone):
     Usa la última búsqueda guardada.
     """
     msg = (message or "").lower()
-    last = get_last_search(phone)
-    if not last or not last.get("products"):
+    context, expired = resolve_search_context(phone, message)
+    if expired:
+        return {"action": "context_expired"}
+    if not context or not context.get("products"):
         return None
-    products = last["products"]
+    products = context["products"]
     # 3 de cada / 3 c/u / 3 c.u.
     m = re.search(r"(\d+)\s*(de\s*cada(\s+una|\s+uno|\s+una de esas|\s+uno de esos)?|c\/u|c\.u\.|c u)", msg)
     if m:
@@ -1960,7 +2161,8 @@ def run_agent(phone, user_message):
         reply = "Demasiados mensajes, esperá un minuto."
         save_message(phone, reply, "assistant")
         return reply
-    intent_data = detect_intent_llm(user_message)
+    phase = get_phase(phone)
+    intent_data = detect_intent(user_message, phase)
     intent = intent_data.get("intent", "desconocido")
     raw_query_for_search = intent_data.get("query") or user_message
     execution_context = {
@@ -1979,7 +2181,7 @@ def run_agent(phone, user_message):
     # Confirmar / cancelar acciones pendientes (CONTEXTO 2.0)
     # ------------------------------------------------------
     pending = get_pending_action(phone)
-    if intent == "confirmar" and pending:
+    if intent in {"confirmar", "confirmation"} and pending:
         if pending.get("action_type") == "add_each_quantity":
             reply = apply_add_each_quantity_pending(phone, pending)
             clear_pending_action(phone)
@@ -1987,7 +2189,7 @@ def run_agent(phone, user_message):
             log_interaction(phone, user_message, "confirmar_pending_add_each", 0)
             log_performance(phone, "confirmar_pending_add_each", time.time()-start_time, 0)
             return reply
-    if intent == "cancelar" and pending:
+    if intent in {"cancelar", "cancel"} and pending:
         clear_pending_action(phone)
         reply = "Listo, no agrego nada al carrito."
         save_message(phone, reply, "assistant")
@@ -1995,13 +2197,54 @@ def run_agent(phone, user_message):
         log_performance(phone, "cancelar_pending", time.time()-start_time, 0)
         return reply
     # ------------------------------------------------------
+    # Selecciones por índice ("el primero", "el de ayer")
+    # ------------------------------------------------------
+    selected_product, selection_expired = resolve_product_selection(phone, user_message)
+    if selection_expired:
+        reply = LAST_SEARCH_EXPIRED_MESSAGE
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "selection_expired", 0)
+        log_performance(phone, "selection_expired", time.time()-start_time, 0)
+        return reply
+    if selected_product:
+        price = format_price(selected_product.get("price_ars", 0))
+        slot = selected_product.get("__slot", 0)
+        index = selected_product.get("__index", 1)
+        slot_hint = " (de la lista de ayer)" if slot == 1 else "" if slot == 0 else " (de la lista anterior)"
+        reply = (
+            f"Opción {index}{slot_hint}: {selected_product.get('name','')} ({selected_product.get('code','')})\n"
+            f"Precio: {price}.\n¿Lo agrego? Decime cuántas unidades."
+        )
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "indexed_selection", 1)
+        log_performance(phone, "indexed_selection", time.time()-start_time, 1)
+        return reply
+    # ------------------------------------------------------
     # Intenciones directas simples
     # ------------------------------------------------------
-    if intent == "saludo":
-        reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?"
+    if intent in {"saludo", "smalltalk"}:
+        reply = handle_smalltalk(phone, user_message)
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "saludo", 0)
         log_performance(phone, "saludo", time.time()-start_time, 0)
+        return reply
+    if intent in {"payment", "pago"}:
+        reply = handle_payment(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "payment", 0)
+        log_performance(phone, "payment", time.time()-start_time, 0)
+        return reply
+    if intent in {"shipping", "envio"}:
+        reply = handle_shipping(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "shipping", 0)
+        log_performance(phone, "shipping", time.time()-start_time, 0)
+        return reply
+    if intent in {"checkout"}:
+        reply = handle_checkout(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "checkout", 0)
+        log_performance(phone, "checkout", time.time()-start_time, 0)
         return reply
     if intent == "ver_carrito":
         items = cart_get(phone)
@@ -2026,11 +2269,23 @@ def run_agent(phone, user_message):
         log_interaction(phone, user_message, "vaciar_carrito", 0)
         log_performance(phone, "vaciar_carrito", time.time()-start_time, 0)
         return reply
+    if intent in {"agregar_carrito", "cart_action"}:
+        reply = handle_cart_action(phone, user_message)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "cart_action", 0)
+        log_performance(phone, "cart_action", time.time()-start_time, 0)
+        return reply
     # ------------------------------------------------------
     # Pedidos implícitos sobre la última búsqueda
     # ------------------------------------------------------
     implicit = detect_implicit_cart_action(user_message, phone)
     if implicit:
+        if implicit.get("action") == "context_expired":
+            reply = LAST_SEARCH_EXPIRED_MESSAGE
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "implicit_cart_context_expired", 0)
+            log_performance(phone, "implicit_cart_context_expired", time.time()-start_time, 0)
+            return reply
         products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
         qty = implicit["quantity"]
         total = sum(to_decimal_money(p["price_ars"]) * qty for p in products)
@@ -2050,18 +2305,23 @@ def run_agent(phone, user_message):
     products = []
     query_for_search = raw_query_for_search
     corrections = []
-    if intent in {"busqueda_catalogo", "pregunta_tecnica", "desconocido"}:
+    run_catalog_search = intent in {"busqueda_catalogo", "pregunta_tecnica", "tech_expert", "desconocido"}
+    if run_catalog_search:
         query_for_search, corrections = autocorrect_keywords(raw_query_for_search)
         if corrections:
             execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
             logger.info(f"Autocorrect aplicado: {', '.join(corrections)}")
         execution_context["search_query"] = query_for_search
-        semantic_results = semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)
+        top_k = MAX_SEARCH_RESULTS
+        if intent == "tech_expert" and message_mentions_brand_or_model(user_message):
+            top_k = max(5, min(MAX_PRODUCTS_FOR_LLM, MAX_SEARCH_RESULTS))
+            execution_context["warnings"].append("expert_catalog_focus")
+        semantic_results = semantic_search_v2(query_for_search, top_k=top_k)
         products = [p for p, _ in semantic_results]
         execution_context["search_executed"] = True
         execution_context["products_found"] = len(products)
         # Filtro por relevancia solo cuando hay algo razonable que mostrar
-        if products and intent in {"busqueda_catalogo", "pregunta_tecnica"}:
+        if products and intent in {"busqueda_catalogo", "pregunta_tecnica", "tech_expert"}:
             original_len = len(products)
             filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
             logger.info(f"Relevance filter: {len(filtered_products)}/{original_len} productos relevantes")
@@ -2129,8 +2389,8 @@ def run_agent(phone, user_message):
     # ------------------------------------------------------
     # Respuesta del modelo
     # ------------------------------------------------------
-    if intent == "pregunta_tecnica":
-        reply = build_technical_answer(phone, user_message, products[:8])
+    if intent in {"pregunta_tecnica", "tech_expert"}:
+        reply = build_technical_answer(phone, user_message, products[:5])
         execution_context["will_send_chunks"] = False
     else:
         reply = generate_smart_ai_reply_v2(
@@ -2334,654 +2594,6 @@ if __name__ == "__main__":
     logger.info("  ✅ k dinámico según haya/no haya familia en la query")
     logger.info("=" * 60)
     
-    app.run(host="0.0.0.0", port=port, debug=False)
-
-
-# =========================================================
-# Fran 3.13 – BLOQUE DE MEJORAS (Intent + Context Engine)
-# (Las funciones redefinidas acá pisan las del bloque base)
-# =========================================================
-
-RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "60.0"))
-QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "70.0"))
-QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "50.0"))
-
-# Fases de contexto
-PHASE_IDLE = "idle"
-PHASE_SEARCHING = "searching"
-PHASE_CART = "cart"
-PHASE_CHECKOUT = "checkout"
-PHASE_EXPERT = "expert"
-PHASE_CONFIRMING = "confirming"
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-_catalog_cache = {"catalog": None, "index": None}
-_catalog_lock = threading.Lock()
-
-# Embeddings cache en disco
-_safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace(".", "_")[-40:]
-EMBEDDINGS_CACHE_PATH = f"embeddings_cache_313_{_safe_catalog_hash}.pkl"
-_embeddings_lock = threading.Lock()
-
-# Twilio client
-if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_WHATSAPP_FROM and TwilioClient:
-    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-else:
-    twilio_client = None
-
-# Rate limit simple
-user_requests = defaultdict(list)
-RATE_LIMIT = 20
-RATE_WINDOW = 60  # segundos
-
-# ------------------------------------------------------------
-# UTILS
-# ------------------------------------------------------------
-def strip_accents(s):
-    if not s:
-        return ""
-    try:
-        return "".join(
-            ch for ch in unicodedata.normalize("NFKD", str(s))
-            if not unicodedata.combining(ch)
-        ).lower()
-    except Exception:
-        return str(s).lower()
-
-def to_decimal_money(x):
-    if x is None or x == "":
-        return Decimal("0")
-    try:
-        s = str(x)
-        for tok in ["USD", "ARS", "$"]:
-            s = s.replace(tok, "")
-        s = s.replace(" ", "").strip()
-        if not s:
-            return Decimal("0")
-        if "," in s and "." in s:
-            s = s.replace(".", "").replace(",", ".")
-        elif "," in s:
-            s = s.replace(",", ".")
-        d = Decimal(s)
-        return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    except (InvalidOperation, ValueError, TypeError):
-        # No spamear logs, simplemente devolver 0
-        return Decimal("0")
-
-def format_price(price):
-    try:
-        if not isinstance(price, Decimal):
-            price = Decimal(str(price))
-        return f"${price:,.0f}".replace(",", ".")
-    except Exception:
-        return "$0"
-
-def sanitize_input(text, max_length=1500):
-    if not text:
-        return ""
-    text = text[:max_length]
-    text = re.sub(r"[^\w\s\-.,;:()/áéíóúñÁÉÍÓÚÑ]", "", text, flags=re.UNICODE)
-    return text.strip()
-
-def rate_limit_check(phone):
-    if not phone:
-        return True
-    try:
-        now = time.time()
-        user_requests[phone] = [t for t in user_requests[phone] if now - t < RATE_WINDOW]
-        if len(user_requests[phone]) >= RATE_LIMIT:
-            return False
-        user_requests[phone].append(now)
-        return True
-    except Exception as e:
-        logger.error(f"rate_limit_check error: {e}")
-        return True
-
-# ------------------------------------------------------------
-# DB
-# ------------------------------------------------------------
-@contextmanager
-def get_db_connection():
-    conn = None
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo crear dir DB: {e}")
-    try:
-        conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        yield conn
-        conn.commit()
-    finally:
-        if conn:
-            conn.close()
-
-def init_db():
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        # Conversaciones simples
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone TEXT, message TEXT, role TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone_timestamp ON conversations(phone, timestamp DESC)")
-        # Carrito
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS carts (
-                phone TEXT, code TEXT, quantity INTEGER, name TEXT,
-                price_ars TEXT, created_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-        # Estado de sesión (fase de contexto)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS session_state (
-                phone TEXT PRIMARY KEY,
-                phase TEXT,
-                last_intent TEXT,
-                updated_at TEXT
-            )
-        """)
-
-def save_message(phone, msg, role):
-    if not phone or not msg:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO conversations VALUES (?, ?, ?, ?)",
-                (phone, msg, role, datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error guardando mensaje: {e}")
-
-def get_history_since(phone, days=3, limit=200):
-    if not phone:
-        return []
-    try:
-        since = (datetime.now() - timedelta(days=days)).isoformat()
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT message, role, timestamp FROM conversations "
-                "WHERE phone=? AND timestamp >= ? ORDER BY timestamp ASC LIMIT ?",
-                (phone, since, limit)
-            )
-            rows = cur.fetchall()
-            return [{"role": r[1], "content": r[0]} for r in rows]
-    except Exception as e:
-        logger.error(f"Error leyendo historial: {e}")
-        return []
-
-def get_phase(phone):
-    if not phone:
-        return PHASE_IDLE
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT phase FROM session_state WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            if not row or not row[0]:
-                return PHASE_IDLE
-            return row[0]
-    except Exception as e:
-        logger.error(f"Error get_phase: {e}")
-        return PHASE_IDLE
-
-def set_phase(phone, phase, last_intent=None):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO session_state (phone, phase, last_intent, updated_at)
-                   VALUES (?,?,?,?)
-                   ON CONFLICT(phone) DO UPDATE SET
-                     phase=excluded.phase,
-                     last_intent=excluded.last_intent,
-                     updated_at=excluded.updated_at""",
-                (phone, phase, last_intent or "", datetime.now().isoformat())
-            )
-    except Exception as e:
-        logger.error(f"Error set_phase: {e}")
-
-# ------------------------------------------------------------
-# TIPO DE CAMBIO
-# ------------------------------------------------------------
-_exchange_cache = {"rate": None, "timestamp": None}
-EXCHANGE_CACHE_TTL = 3600  # 1 hora
-_exchange_lock = threading.Lock()
-
-def get_exchange_rate():
-    with _exchange_lock:
-        now = time.time()
-        if _exchange_cache["rate"] and _exchange_cache["timestamp"]:
-            if now - _exchange_cache["timestamp"] < EXCHANGE_CACHE_TTL:
-                return _exchange_cache["rate"]
-        try:
-            r = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
-            r.raise_for_status()
-            venta = r.json().get("venta", None)
-            rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
-            _exchange_cache["rate"] = rate
-            _exchange_cache["timestamp"] = now
-            return rate
-        except Exception as e:
-            logger.warning(f"Fallo tasa cambio: {e}")
-            if not _exchange_cache["rate"]:
-                _exchange_cache["rate"] = DEFAULT_EXCHANGE
-            return _exchange_cache["rate"]
-
-# ------------------------------------------------------------
-# CARRITO
-# ------------------------------------------------------------
-def cart_add(phone, code, qty, name, price_ars):
-    if not phone or not code:
-        return False
-    try:
-        qty = max(1, min(int(qty or 1), 1000))
-        price_ars = to_decimal_money(price_ars)
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT quantity FROM carts WHERE phone=? AND code=?", (phone, code))
-            row = cur.fetchone()
-            now = datetime.now().isoformat()
-            if row:
-                new_qty = int(row[0]) + qty
-                cur.execute(
-                    "UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?",
-                    (new_qty, now, phone, code)
-                )
-            else:
-                cur.execute(
-                    """INSERT INTO carts (phone, code, quantity, name, price_ars, created_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (phone, code, qty, name[:120], str(price_ars), now)
-                )
-        return True
-    except Exception as e:
-        logger.error(f"cart_add error: {e}")
-        return False
-
-def cart_get(phone):
-    if not phone:
-        return []
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT code, quantity, name, price_ars FROM carts WHERE phone=?", (phone,))
-            rows = cur.fetchall()
-            out = []
-            for r in rows:
-                price = to_decimal_money(r[3])
-                out.append((r[0], int(r[1]), r[2], price))
-            return out
-    except Exception as e:
-        logger.error(f"cart_get error: {e}")
-        return []
-
-def cart_clear(phone):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-    except Exception as e:
-        logger.error(f"cart_clear error: {e}")
-
-def cart_update_qty(phone, code, qty):
-    if not phone or not code:
-        return
-    try:
-        qty = max(0, min(int(qty or 0), 999999))
-        with get_db_connection() as conn:
-            if qty == 0:
-                conn.execute("DELETE FROM carts WHERE phone=? AND code=?", (phone, code))
-            else:
-                now = datetime.now().isoformat()
-                conn.execute(
-                    "UPDATE carts SET quantity=?, created_at=? WHERE phone=? AND code=?",
-                    (qty, now, phone, code)
-                )
-    except Exception as e:
-        logger.error(f"cart_update_qty error: {e}")
-
-def cart_totals(phone):
-    items = cart_get(phone)
-    total = sum(q * price for _, q, __, price in items)
-    discount = Decimal("0.00")
-    final = total.quantize(Decimal("0.01"))
-    return final, discount
-
-# ------------------------------------------------------------
-# CATÁLOGO + FAISS
-# ------------------------------------------------------------
-def _load_raw_csv():
-    try:
-        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        return r.text
-    except Exception as e:
-        logger.error(f"Error descargando CSV: {e}")
-        return ""
-
-def _extract_column(header_row, key_variants):
-    header_norm = [strip_accents(h) for h in header_row]
-    for variant in key_variants:
-        vn = strip_accents(variant)
-        for idx, col in enumerate(header_norm):
-            if vn == col or vn in col:
-                return idx
-    return None
-
-def load_catalog_enriched():
-    text = _load_raw_csv()
-    if not text:
-        return []
-    reader = csv.reader(io.StringIO(text))
-    rows = list(reader)
-    if not rows:
-        return []
-    header = rows[0]
-    data_rows = rows[1:]
-
-    # Columnas esperadas en el CSV ultra normalizado
-    idx_code = _extract_column(header, ["codigo", "code"])
-    idx_desc = _extract_column(header, ["descripcion_final", "descripcion", "description", "name", "producto"])
-    idx_fam_name = _extract_column(header, ["familia_nombre", "familia"])
-    idx_prov_name = _extract_column(header, ["proveedor_nombre", "proveedor"])
-    idx_brand = _extract_column(header, ["marca_final", "marca"])
-    idx_model = _extract_column(header, ["modelo_final", "modelo"])
-    idx_cat = _extract_column(header, ["categoria_final", "categoria", "rubro"])
-    idx_usd = _extract_column(header, ["lista importado final", "price_usd", "usd"])
-    idx_ars = _extract_column(header, ["lista nacional final", "price_ars", "ars", "pesos"])
-
-    exchange = get_exchange_rate()
-    catalog = []
-    for line in data_rows:
-        if not line:
-            continue
-        try:
-            code = line[idx_code].strip() if (idx_code is not None and idx_code < len(line)) else ""
-            desc = line[idx_desc].strip() if (idx_desc is not None and idx_desc < len(line)) else ""
-            fam_name = line[idx_fam_name].strip() if (idx_fam_name is not None and idx_fam_name < len(line)) else ""
-            prov_name = line[idx_prov_name].strip() if (idx_prov_name is not None and idx_prov_name < len(line)) else ""
-            brand = line[idx_brand].strip() if (idx_brand is not None and idx_brand < len(line)) else ""
-            model = line[idx_model].strip() if (idx_model is not None and idx_model < len(line)) else ""
-            category = line[idx_cat].strip() if (idx_cat is not None and idx_cat < len(line)) else ""
-
-            price_usd = to_decimal_money(line[idx_usd]) if (idx_usd is not None and idx_usd < len(line)) else Decimal("0")
-            price_ars = to_decimal_money(line[idx_ars]) if (idx_ars is not None and idx_ars < len(line)) else Decimal("0")
-            if price_ars == 0 and price_usd > 0:
-                price_ars = (price_usd * exchange).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-            if not desc and not fam_name:
-                continue
-
-            search_text_parts = [
-                fam_name, desc, brand, model, category, prov_name
-            ]
-            search_text = " ".join([p for p in search_text_parts if p]).strip()
-
-            catalog.append({
-                "code": code,
-                "name": desc,
-                "family": fam_name,
-                "provider": prov_name,
-                "brand": brand,
-                "model": model,
-                "category": category,
-                "price_usd": float(price_usd),
-                "price_ars": float(price_ars),
-                "search_text": search_text or desc,
-            })
-        except Exception as e:
-            logger.warning(f"Error procesando linea CSV: {e}")
-            continue
-
-    logger.info(f"Catalogo enriquecido cargado: {len(catalog)} productos")
-    # Log top familias
-    fam_counts = defaultdict(int)
-    for p in catalog:
-        if p["family"]:
-            fam_counts[p["family"]] += 1
-    top_20 = sorted(fam_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-    logger.info(f"Top 20 familias: {[f for f, _ in top_20]}")
-    return catalog
-
-def generate_embeddings_with_cache(texts):
-    with _embeddings_lock:
-        cache = {}
-        if os.path.exists(EMBEDDINGS_CACHE_PATH):
-            try:
-                with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
-                    cache = pickle.load(f)
-                logger.info(f"Cache embeddings cargado: {len(cache)} textos")
-            except Exception as e:
-                logger.warning(f"Cache embeddings corrupto: {e}")
-                cache = {}
-        texts_to_embed = []
-        for t in texts:
-            if t not in cache:
-                texts_to_embed.append(t)
-        if texts_to_embed:
-            logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
-            batch = 256
-            for i in range(0, len(texts_to_embed), batch):
-                chunk = texts_to_embed[i:i+batch]
-                for retry in range(3):
-                    try:
-                        resp = client.embeddings.create(
-                            input=chunk,
-                            model="text-embedding-3-small"
-                        )
-                        for t, d in zip(chunk, resp.data):
-                            cache[t] = d.embedding
-                        break
-                    except RateLimitError as e:
-                        wait = min((2**retry) * random.uniform(2,5), 60)
-                        logger.warning(f"RateLimit embeddings, retry en {wait:.1f}s: {e}")
-                        time.sleep(wait)
-                    except Exception as e:
-                        logger.error(f"Error embeddings: {e}")
-                        break
-                try:
-                    with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
-                        pickle.dump(cache, f)
-                    logger.info(f"Cache embeddings guardado: {len(cache)} textos")
-                except Exception as e:
-                    logger.warning(f"No se pudo guardar cache embeddings: {e}")
-        vectors = []
-        for t in texts:
-            if t in cache and cache[t]:
-                vectors.append(cache[t])
-            else:
-                vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
-        return vectors
-
-def build_faiss_index(catalog):
-    if not catalog:
-        return None
-    texts = [c["search_text"] for c in catalog]
-    vectors = generate_embeddings_with_cache(texts)
-    vecs = np.array(vectors).astype("float32")
-    faiss.normalize_L2(vecs)
-    index = faiss.IndexFlatIP(vecs.shape[1])
-    index.add(vecs)
-    logger.info(f"Indice FAISS creado con {vecs.shape[0]} vectores")
-    try:
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        with open(FAISS_MAPPING_PATH, "wb") as f:
-            pickle.dump(catalog, f)
-        logger.info(f"FAISS guardado en disco: {len(catalog)} productos")
-    except Exception as e:
-        logger.warning(f"No se pudo guardar FAISS: {e}")
-    return index
-
-def load_faiss_index_from_disk():
-    try:
-        if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_MAPPING_PATH):
-            index = faiss.read_index(FAISS_INDEX_PATH)
-            with open(FAISS_MAPPING_PATH, "rb") as f:
-                catalog = pickle.load(f)
-            if index.ntotal != len(catalog):
-                logger.warning("FAISS inconsistente, se reconstruirá")
-                return None, None
-            logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
-            return catalog, index
-    except Exception as e:
-        logger.warning(f"Error cargando FAISS: {e}")
-    return None, None
-
-def get_catalog_and_index():
-    with _catalog_lock:
-        if _catalog_cache["catalog"] is not None:
-            return _catalog_cache["catalog"], _catalog_cache["index"]
-        catalog, index = load_faiss_index_from_disk()
-        if not catalog or not index:
-            catalog = load_catalog_enriched()
-            index = build_faiss_index(catalog)
-        _catalog_cache["catalog"] = catalog
-        _catalog_cache["index"] = index
-        return catalog, index
-
-# ------------------------------------------------------------
-# INTENT ENGINE
-# ------------------------------------------------------------
-def detect_intent(message, phase):
-    """
-    Devuelve un dict: {"intent": str, "subtype": str|None}
-    intents:
-      - product_search
-      - cart_action
-      - checkout
-      - payment
-      - shipping
-      - tech_expert
-      - smalltalk
-      - confirmation
-      - unknown
-    """
-    msg = strip_accents(message)
-    words = msg.split()
-
-    # Smalltalk / saludo
-    if any(w in msg for w in ["hola", "buen dia", "buenas", "como andas", "todo bien"]):
-        return {"intent": "smalltalk", "subtype": None}
-
-    # Confirmaciones
-    if msg in ["si", "sí", "dale", "ok", "okay", "perfecto", "joya", "de una"] or \
-       any(re.fullmatch(r"(si|sí|dale|ok)[!.]*", w) for w in words):
-        return {"intent": "confirmation", "subtype": None}
-
-    # Checkout / pago / envio
-    pago_keywords = ["como pago", "metodo de pago", "metodos de pago", "formas de pago", "pago con", "transferencia", "transfer", "qr", "mercado pago"]
-    envio_keywords = ["envio", "envios", "enviame", "mandas", "mandan", "retiro", "retira", "despacho", "correo"]
-    checkout_keywords = ["como sigo", "que opciones hay", "cerrar pedido", "cerramos", "como cerramos", "armame el pedido", "armame la orden"]
-
-    if any(k in msg for k in pago_keywords):
-        return {"intent": "payment", "subtype": "checkout"}
-    if any(k in msg for k in envio_keywords):
-        return {"intent": "shipping", "subtype": "checkout"}
-    if any(k in msg for k in checkout_keywords):
-        return {"intent": "checkout", "subtype": None}
-
-    # Modo experto (consultas técnicas)
-    expert_triggers = ["cuanto dura", "cada cuanto", "diferencia entre", "que diferencia hay", "conviene", "es mejor", "que significa", "por que", "porque", "causa que", "que pasa si"]
-    if any(k in msg for k in expert_triggers):
-        return {"intent": "tech_expert", "subtype": None}
-
-    # Cart actions: agregar / sacar / cantidades
-    cart_add_kw = ["agrega", "agregame", "sumame", "poneme", "mandame", "meteme"]
-    cart_remove_kw = ["saca", "sacame", "bajame", "quita", "elimina", "borra"]
-    cart_all_kw = ["de cada", "cada uno", "cada una", "todos", "todas", "los de arriba", "los que me pasaste"]
-    if any(k in msg for k in cart_add_kw + cart_remove_kw + cart_all_kw):
-        return {"intent": "cart_action", "subtype": None}
-
-    # Búsqueda de producto (fallback principal)
-    # Si detecta palabras típicas de repuesto
-    product_kw = ["aceite", "bujia", "bujia", "filtro", "corona", "piñon", "pastilla", "disco", "cdi", "estator", "bateria", "amortiguador", "kit", "embrague", "carburador", "regulador"]
-    if any(k in msg for k in product_kw):
-        return {"intent": "product_search", "subtype": None}
-
-    # Si está en fase searching/cart y dice algo tipo "mostrame", "tenes"
-    if phase in [PHASE_SEARCHING, PHASE_CART] and any(w in msg for w in ["mostrame", "tenes", "tiene", "busco", "algo para", "repuestos", "cosas para"]):
-        return {"intent": "product_search", "subtype": None}
-
-    # Desconocido
-    return {"intent": "unknown", "subtype": None}
-
-# ------------------------------------------------------------
-# BÚSQUEDA SEMÁNTICA
-# ------------------------------------------------------------
-def semantic_search(query, top_k=MAX_SEARCH_RESULTS):
-    catalog, index = get_catalog_and_index()
-    if not catalog or not index or not query:
-        return []
-
-    # Embedding de query
-    try:
-        emb = generate_embeddings_with_cache([query])[0]
-    except Exception as e:
-        logger.error(f"Error embedding query: {e}")
-        return []
-    q_vec = np.array([emb]).astype("float32")
-    faiss.normalize_L2(q_vec)
-
-    # Dinámico: más resultados si query es genérica
-    generic_tokens = ["repuestos", "cosas", "algo", "varios", "cositas", "varias"]
-    factor = 6 if any(t in strip_accents(query) for t in generic_tokens) else 4
-    k_for_index = min(max(top_k * factor, top_k), len(catalog))
-
-    try:
-        D, I = index.search(q_vec, k_for_index)
-    except Exception as e:
-        logger.error(f"Error FAISS search: {e}")
-        return []
-
-    results = []
-    for dist, idx in zip(D[0], I[0]):
-        if 0 <= idx < len(catalog):
-            results.append((catalog[idx], float(dist)))
-    # ordenar y recortar
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_k]
-
-def format_search_results(products):
-    lines = []
-    for i, p in enumerate(products, 1):
-        name = p.get("name", "").strip()
-        code = p.get("code", "")
-        brand = p.get("brand", "")
-        model = p.get("model", "")
-        fam = p.get("family", "")
-        extra = []
-        if fam:
-            extra.append(fam)
-        if brand:
-            extra.append(brand)
-        if model:
-            extra.append(model)
-        extra_txt = f" - {' / '.join(extra)}" if extra else ""
-        price = format_price(p.get("price_ars", 0))
-        lines.append(f"{i}. {name[:60]} ({code}){extra_txt}\n   {price}")
-    return "\n\n".join(lines)
-
-# ------------------------------------------------------------
-# MODO EXPERTO (LLM)
-# ------------------------------------------------------------
-EXPERT_SYSTEM_PROMPT = """
-Sos Fran, un mecánico y vendedor mayorista experto en motopartes.
-Respondé preguntas técnicas de forma breve, clara y honesta.
-Contexto: el cliente es un mecánico o comerciante que quiere tomar buenas decisiones.
-No inventes datos raros. Si algo no es seguro, decílo.
-Usá 3-5 líneas máximo.
-"""
-
 def build_expert_answer(phone, user_message):
     history = get_history_since(phone, days=1, limit=10)
     msgs = [{"role": "system", "content": EXPERT_SYSTEM_PROMPT}]
@@ -3049,12 +2661,21 @@ def handle_checkout(phone, message):
 def handle_cart_action(phone, message, last_search_products=None):
     msg = strip_accents(message)
     items = cart_get(phone)
+    context_products = last_search_products
+    expired_context = False
+    if context_products is None:
+        context, expired = resolve_search_context(phone, message)
+        expired_context = expired
+        if context:
+            context_products = context.get("products")
+    if expired_context:
+        return LAST_SEARCH_EXPIRED_MESSAGE
     # Regla básica: detectar "3 de cada", "2 de todos", etc.
     m = re.search(r"(\d+)\s*(de\s*cada(\s+uno|\s+una)?|c\/u)", msg)
-    if m and last_search_products:
+    if m and context_products:
         qty = int(m.group(1))
         added = 0
-        for p in last_search_products[:MAX_PRODUCTS_FOR_LLM]:
+        for p in context_products[:MAX_PRODUCTS_FOR_LLM]:
             price = to_decimal_money(p.get("price_ars", 0))
             cart_add(phone, p["code"], qty, p["name"], price)
             added += 1
@@ -3072,6 +2693,8 @@ def handle_cart_action(phone, message, last_search_products=None):
         return "Listo, vacié tu carrito."
     # No tenemos contexto de último search o no se entendió
     set_phase(phone, PHASE_CART, "cart_action")
+    if not context_products:
+        return LAST_SEARCH_EXPIRED_MESSAGE
     return "Decime por ejemplo: '3 de cada uno' o 'bajame el código XXXX a 2 unidades'."
 
 def handle_product_search(phone, message):
@@ -3131,55 +2754,3 @@ def handle_unknown(phone, message):
         "- Para envío: 'hacés envíos?'\n"
     )
 
-# ------------------------------------------------------------
-# AGENTE PRINCIPAL
-# ------------------------------------------------------------
-def run_agent(phone, user_message):
-    start = time.time()
-    save_message(phone, user_message, "user")
-
-    if not rate_limit_check(phone):
-        reply = "Estás mandando muchos mensajes seguidos, esperemos unos segundos y seguimos."
-        save_message(phone, reply, "assistant")
-        return reply
-
-    phase = get_phase(phone)
-    intent_data = detect_intent(user_message, phase)
-    intent = intent_data["intent"]
-
-    logger.info(f"Intent detectado: {intent} | phase={phase}")
-
-    # Ruteo por intención
-    if intent == "smalltalk":
-        reply = handle_smalltalk(phone, user_message)
-
-    elif intent == "payment":
-        reply = handle_payment(phone, user_message)
-
-    elif intent == "shipping":
-        reply = handle_shipping(phone, user_message)
-
-    elif intent == "checkout":
-        reply = handle_checkout(phone, user_message)
-
-    elif intent == "tech_expert":
-        set_phase(phone, PHASE_EXPERT, "tech_expert")
-        reply = build_expert_answer(phone, user_message)
-
-    elif intent == "cart_action":
-        # Para esta versión simplificada no guardamos last_search_products en DB,
-        # pero podríamos integrarlo usando una tabla adicional.
-        reply = handle_cart_action(phone, user_message, last_search_products=None)
-
-    elif intent == "product_search":
-        reply = handle_product_search(phone, user_message)
-
-    elif intent == "confirmation":
-        reply = handle_confirmation(phone, user_message)
-
-    else:
-        reply = handle_unknown(phone, user_message)
-
-    save_message(phone, reply, "assistant")
-    logger.info(f"run_agent completado en {(time.time()-start):.3f}s")
-    return reply
