@@ -42,7 +42,7 @@ REQUESTS_HEADERS = {
 # CATALOGO (Fran 3.12 – versión ultra normalizada FAISS)
 # =========================================================
 
-CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.12/catalogo_tercom_ultra_normalizado_faiss_v2.csv"
+CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-3.13.2/catalogo_tercom_ultra_normalizado_faiss_v2.csv"
 CATALOG_URL = (os.environ.get("CATALOG_URL") or CSV_URL).strip()
 
 print(f"[Fran] Catálogo cargado desde: {CATALOG_URL}")
