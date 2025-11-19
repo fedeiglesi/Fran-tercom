@@ -1,14 +1,15 @@
 # =========================================================
-# Fran 3.13.0 – Bot Mayorista Inteligente
+# Fran 3.14.0 – Bot Mayorista Inteligente
 # =========================================================
-# Basado en Fran 3.12 (estructura completa que pasó tests),
-# con mejoras:
-# - INTENTOS 2.0 (prompt ampliado, más sinónimos)
-# - CONTEXTO 2.0 (pending_actions realmente ejecutadas)
-# - Mensajes más humanos (no dice "no encontré" si hay alternativas)
-# - Pedidos implícitos mejorados ("2 de todos", "todos x5", etc.)
-# - Uso efectivo de pending_actions + snapshot de carrito
-# - Mantiene arquitectura FAISS + familias + quality check
+# Basado en Fran 3.13.0, con mejoras críticas:
+# - JSON estructurado obligatorio (previene alucinaciones)
+# - Boost 30% para productos de familia correcta
+# - Autocorrect threshold bajado (90% → 78%)
+# - Vocabulario autocorrect expandido (+12 términos)
+# - Cap absoluto FAISS (max 200 resultados)
+# - Auto-limpieza de pending actions (15 min)
+# - Cache fuzzy aumentado (5K → 10K)
+# - Logs verbosos → DEBUG (reduce noise)
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -100,6 +101,8 @@ ASYNC_MEDIUM = 80
 MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
+MAX_FAISS_K = 200  # Cap absoluto para búsquedas FAISS
+PENDING_ACTION_TTL = 15  # Minutos (bajado de 30)
 
 # ------------------------------------------------------------
 # TWILIO
@@ -138,7 +141,7 @@ _catalog_lock = Lock()
 _embeddings_cache_lock = Lock()
 
 # Cache de fuzzy matching para post-validation
-_fuzzy_match_cache = TTLCache(maxsize=5000, ttl=3600)
+_fuzzy_match_cache = TTLCache(maxsize=10000, ttl=3600)  # Aumentado de 5000 a 10000
 
 # Índice de familias (global)
 FAMILIES_INDEX = []
@@ -295,7 +298,8 @@ def assess_context_quality(query: str, products: list) -> dict:
     max_score = max(scores) if scores else 0
     relevant_count = sum(1 for s in scores if s >= RELEVANCE_MIN_SCORE)
 
-    logger.info(f"Quality assessment - Avg: {avg_score:.1f}, Max: {max_score:.1f}, Relevant: {relevant_count}/{len(products[:10])}")
+    # CAMBIAR A DEBUG
+    logger.debug(f"Quality assessment - Avg: {avg_score:.1f}, Max: {max_score:.1f}, Relevant: {relevant_count}/{len(products[:10])}")
 
     if max_score < QUALITY_MEDIUM_THRESHOLD:
         return {
@@ -466,7 +470,13 @@ def _build_autocorrect_vocab():
         "pastilla", "disco", "embrague", "regulador", "rectificador",
         "carburador", "inyector", "tanque", "asiento", "manubrio",
         "espejo", "cubierta", "neumatico", "neumático", "ruleman", "rodamiento",
-        "corona", "piñon", "piñón", "kit transmision", "kit freno", "amortiguador"
+        "corona", "piñon", "piñón", "kit transmision", "kit freno", "amortiguador",
+        # NUEVOS TOKENS
+        "aire", "aceite", "agua", "gas", "gasolina", "nafta",
+        "delantero", "trasero", "derecho", "izquierdo",
+        "superior", "inferior", "interno", "externo",
+        "original", "alternativo", "generico", "genuino",
+        "liquido", "líquido", "refrigerante", "freno"
     ])
     vocab = {normalize_search_query(t) for t in base_tokens if t}
     return sorted(vocab)
@@ -510,7 +520,7 @@ def autocorrect_keywords(text: str):
             new_tokens.append(raw)
             continue
 
-        if len(base) <= 3:
+        if len(base) <= 2:  # Bajado de 3 a 2
             new_tokens.append(raw)
             continue
 
@@ -519,7 +529,8 @@ def autocorrect_keywords(text: str):
         except Exception:
             best = None
 
-        if best and best[1] >= 90 and best[0] != base:
+        # THRESHOLD BAJADO DE 90 A 78
+        if best and best[1] >= 78 and best[0] != base:
             corrected = best[0]
             new_tokens.append(corrected)
             corrections.append(f"{raw}→{corrected}")
@@ -654,7 +665,7 @@ def compute_cart_hash_from_items(items):
         return ""
 
 
-def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
+def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=PENDING_ACTION_TTL):
     if not phone:
         return
     try:
@@ -674,6 +685,17 @@ def save_pending_action(phone, action_type, action_data, context="", ttl_minutes
                 expires_at=excluded.expires_at""",
                 (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
             )
+        
+        # PROGRAMAR AUTO-LIMPIEZA
+        def clear_expired():
+            time.sleep(ttl_minutes * 60)
+            pending = get_pending_action(phone)
+            if pending and pending.get("action_data", {}).get("cart_hash") == cart_hash:
+                clear_pending_action(phone)
+                logger.info(f"Pending action expirada para {phone}")
+        
+        threading.Thread(target=clear_expired, daemon=True).start()
+        
     except Exception as e:
         logger.error(f"Error guardando pending_action: {e}")
 
@@ -1622,10 +1644,10 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
     """
-    Búsqueda semántica usando el índice FAISS global.
-    - Usa embeddings del catálogo precomputados
-    - Aplica filtro lexical (familia/marca/modelos/categoría) sobre los resultados
-    - k dinámico según haya/no haya familia detectada
+    Búsqueda semántica mejorada con:
+    - Cap absoluto en k
+    - Boost por familia detectada
+    - Filtrado lexical progresivo
     """
     catalog, index = get_catalog_and_index()
     if not catalog or not index or not query:
@@ -1644,7 +1666,13 @@ def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
 
     has_families = bool(parsed.get("families"))
     multiplier = 4 if has_families else 8
-    k_for_index = min(max(top_k * multiplier, top_k), len(catalog))
+    
+    # CAP ABSOLUTO
+    k_for_index = min(
+        max(top_k * multiplier, top_k),
+        MAX_FAISS_K,  # Nunca más de 200
+        len(catalog)
+    )
 
     try:
         D, I = index.search(q_vec, k_for_index)
@@ -1659,6 +1687,17 @@ def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
 
     if not raw_results:
         return []
+
+    # BOOST POR FAMILIA DETECTADA
+    detected_families = parsed.get("families") or []
+    if detected_families:
+        boosted_results = []
+        for p, score in raw_results:
+            p_family = normalize_search_query(p.get("family_name", ""))
+            if any(fam in p_family for fam in detected_families):
+                score *= 1.3  # Boost 30%
+            boosted_results.append((p, score))
+        raw_results = boosted_results
 
     products_only = [p for p, _ in raw_results]
     filtered_products = filter_catalog(products_only, parsed)
@@ -1684,6 +1723,7 @@ def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
                 "raw": parsed.get("raw", "")
             }
             filtered_products = filter_catalog(products_only, super_relaxed)
+        
         if filtered_products:
             score_by_id = {id(p): score for p, score in raw_results}
             results = [
@@ -2355,6 +2395,61 @@ NO inventes códigos ni productos, enfocate en el consejo técnico.
 """
 
 # ------------------------------------------------------------------
+# TEMPLATE PARA PRODUCTOS
+# ------------------------------------------------------------------
+def format_products_for_llm(products, max_products=15):
+    """
+    Formatea productos con estructura clara para el LLM
+    """
+    if not products:
+        return ""
+    
+    lines = ["[PRODUCTOS DISPONIBLES - SOLO PODÉS MENCIONAR ESTOS]"]
+    for i, p in enumerate(products[:max_products], 1):
+        lines.append(
+            f"{i}. {p['name']} (código {p['code']}) - {format_price(Decimal(str(p['price_ars'])))}"
+        )
+    
+    lines.append("\n⚠️ REGLA CRÍTICA: Solo mencioná productos de esta lista con su código exacto.")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# SCHEMA JSON ESTRUCTURADO
+# ------------------------------------------------------------------
+PRODUCT_RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "product_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Mensaje completo para el cliente"
+                },
+                "products_mentioned": {
+                    "type": "array",
+                    "description": "Productos citados en el mensaje",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "code": {"type": "string"},
+                            "name": {"type": "string"}
+                        },
+                        "required": ["code", "name"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            "required": ["message", "products_mentioned"],
+            "additionalProperties": False
+        }
+    }
+}
+
+# ------------------------------------------------------------------
 # GENERACIÓN DE RESPUESTAS
 # ------------------------------------------------------------------
 def build_execution_summary(ctx):
@@ -2417,7 +2512,36 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
 
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
-        msgs = build_full_history_prompt(phone, user_message, catalog_products, system_prompt)
+        if system_prompt is None:
+            system_prompt = CITATION_ENFORCED_PROMPT
+
+        msgs = [{"role": "system", "content": system_prompt}]
+
+        history = get_history_since(phone, days=7, limit=2000)
+        token_count = len(system_prompt.split())
+
+        temp_msgs = []
+        for h in reversed(history):
+            role = "assistant" if h["role"] == "assistant" else "user"
+            content = h["content"]
+            temp_msgs.append({"role": role, "content": content})
+            token_count += len(content.split())
+            if token_count > 120000:
+                break
+
+        for m in reversed(temp_msgs):
+            msgs.append(m)
+
+        # USAR TEMPLATE ESTRUCTURADO
+        if catalog_products:
+            products_text = format_products_for_llm(catalog_products, max_products=MAX_PRODUCTS_FOR_LLM)
+            msgs.append({
+                "role": "system",
+                "content": products_text
+            })
+
+        exec_summary = build_execution_summary(execution_context)
+        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BÚSQUEDA]\n{exec_summary}"})
 
         user_lower = user_message.lower()
         product_type = (
@@ -2435,33 +2559,52 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             "role": "system",
             "content": (
                 f"CLIENTE PIDIÓ: {product_type}\n\n"
-                "PRODUCTOS DISPONIBLES:\n" +
-                "\n".join([
-                    f"- {p['name']} ({p.get('code','')}) - {format_price(Decimal(str(p['price_ars'])))}"
-                    for p in catalog_products[:10]
-                ]) +
-                "\n\n⚠️ VALIDACIÓN CRÍTICA:\n"
-                f"1) Si NINGÚN producto de arriba es un/a {product_type}, NO LOS MENCIONES.\n"
+                "⚠️ VALIDACIÓN CRÍTICA:\n"
+                f"1) Si NINGÚN producto disponible es un/a {product_type}, NO LOS MENCIONES.\n"
                 f"2) En ese caso, decí: 'No tengo {product_type}s exactos, pero tengo estas alternativas reales del catálogo.'\n"
                 "3) Si SÍ hay productos que coinciden, listá solo ESOS.\n"
-                "4) SIEMPRE incluí el código entre paréntesis cuando menciones un producto."
+                "4) SIEMPRE incluí el código entre paréntesis cuando menciones un producto.\n"
+                "5) Respondé en JSON con formato: {\"message\": \"texto\", \"products_mentioned\": [{\"code\": \"...\", \"name\": \"...\"}]}"
             )
         })
 
-        exec_summary = build_execution_summary(execution_context)
-        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BÚSQUEDA]\n{exec_summary}"})
+        msgs.append({"role": "user", "content": user_message})
 
+        # FORZAR JSON ESTRUCTURADO
         with openai_sem:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.3,
                 max_tokens=500,
+                response_format=PRODUCT_RESPONSE_SCHEMA
             )
-        txt = (resp.choices[0].message.content or "").strip()
-        if not txt or len(txt) < 10:
+        
+        raw_response = (resp.choices[0].message.content or "").strip()
+        
+        try:
+            parsed = json.loads(raw_response)
+            message_text = parsed.get("message", "")
+            mentioned_products = parsed.get("products_mentioned", [])
+            
+            # VALIDAR QUE LOS CÓDIGOS MENCIONADOS EXISTAN
+            allowed_codes = {p.get("code") for p in catalog_products if p.get("code")}
+            for mentioned in mentioned_products:
+                if mentioned["code"] not in allowed_codes:
+                    logger.error(f"⚠️ LLM mencionó código inexistente: {mentioned['code']}")
+                    # FALLBACK
+                    product_list = "\n".join([
+                        f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                        for p in catalog_products[:5]
+                    ])
+                    return f"Dale, te muestro opciones reales del catálogo:\n\n{product_list}\n\n¿Cuál te sirve?"
+            
+            return message_text if message_text else "¿Me pasás más detalles así afino la búsqueda?"
+            
+        except json.JSONDecodeError:
+            logger.error(f"LLM no devolvió JSON válido: {raw_response[:200]}")
             return "Uy, tuve un problema. ¿Me repetís?"
-        return txt
+
     except Exception as e:
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
         return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
@@ -3023,10 +3166,14 @@ def health():
     catalog, index = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.13.0",
+        "version": "3.14.0",  # ACTUALIZADO
         "catalog_size": len(catalog) if catalog else 0,
-        "architecture": "claude_inspired_families_hybrid_intents_context_v2",
+        "architecture": "claude_inspired_families_hybrid_intents_context_v2_structured_json",  # ACTUALIZADO
         "features": [
+            "structured_json_responses",  # NUEVO
+            "family_boosting",  # NUEVO
+            "expanded_autocorrect",  # NUEVO
+            "faiss_absolute_cap",  # NUEVO
             "context_quality_check",
             "relevance_scoring",
             "forced_code_citation",
@@ -3063,29 +3210,25 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("=" * 60)
-    logger.info("🚀 Iniciando Fran 3.13.0 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0")
+    logger.info("🚀 Iniciando Fran 3.14.0 - JSON Estructurado + Family Boost + Autocorrect Mejorado")
     logger.info("=" * 60)
     logger.info(f"Puerto: {port}")
     logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
     logger.info(f"Tipo de cambio inicial: {get_exchange_rate()}")
     logger.info(f"Relevance min score: {RELEVANCE_MIN_SCORE}")
     logger.info(f"Quality thresholds: HIGH={QUALITY_HIGH_THRESHOLD}, MED={QUALITY_MEDIUM_THRESHOLD}")
+    logger.info(f"Max FAISS K: {MAX_FAISS_K}")
+    logger.info(f"Pending action TTL: {PENDING_ACTION_TTL} min")
     logger.info("=" * 60)
-    logger.info("Características nuevas en 3.13.0:")
-    logger.info("  ✅ INTENTOS 2.0 (prompt ampliado, más sinónimos argentinos)")
-    logger.info("  ✅ CONTEXTO 2.0 (pending_actions con cart_hash y ejecución real)")
-    logger.info("  ✅ Mensajes más humanos (no dice 'no encontré' si hay alternativas)")
-    logger.info("  ✅ Pedidos implícitos mejorados ('2 de todos', 'todos x5', etc.)")
-    logger.info("  ✅ Uso efectivo de pending_actions + snapshot de carrito")
-    logger.info("  ✅ Context Quality Check pre-LLM")
-    logger.info("  ✅ Relevance Scoring general (sin keywords hardcoded)")
-    logger.info("  ✅ Forced Code Citation en prompts")
-    logger.info("  ✅ Post-validation de códigos y nombres")
-    logger.info("  ✅ FAISS global reutilizado en semantic_search_v2")
-    logger.info("  ✅ Índice de familias (FAMILIES_INDEX)")
-    logger.info("  ✅ Fallback progresivo por familia + categoría")
-    logger.info("  ✅ k dinámico según haya/no haya familia en la query")
-    logger.info("  ✅ Checkout intents + sales phase tracker")
+    logger.info("🆕 Mejoras en 3.14.0:")
+    logger.info("  ✅ JSON estructurado obligatorio (previene alucinaciones)")
+    logger.info("  ✅ Boost 30% para productos de familia correcta")
+    logger.info("  ✅ Autocorrect threshold bajado (90% → 78%)")
+    logger.info("  ✅ Vocabulario autocorrect expandido (+12 términos)")
+    logger.info("  ✅ Cap absoluto FAISS (max 200 resultados)")
+    logger.info("  ✅ Auto-limpieza de pending actions (15 min)")
+    logger.info("  ✅ Cache fuzzy aumentado (5K → 10K)")
+    logger.info("  ✅ Logs verbosos → DEBUG (reduce noise)")
     logger.info("=" * 60)
 
     app.run(host="0.0.0.0", port=port, debug=False)
