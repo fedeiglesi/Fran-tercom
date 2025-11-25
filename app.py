@@ -442,7 +442,11 @@ def validate_mentioned_names(response_text: str, allowed_products: list) -> dict
 # ------------------------------------------------------------
 CATEGORY_MAP = {
     "amortiguador": ["amort", "amortiguador", "shock", "suspension", "suspensión"],
-    "bateria": ["bateria", "batería", "battery", "baterias", "baterías"],
+    "bateria": [
+        "bateria", "batería", "battery", "baterias", "baterías",
+        "ytx", "yb", "yt", "agm", "gel", "litio",
+        "12v", "14a", "16l", "fp"
+    ],
     "aceite": ["aceite", "oil", "lubricante"],
     "filtro": ["filtro", "filter", "filtros"],
     "cadena": ["cadena", "chain"],
@@ -463,6 +467,9 @@ MODEL_LIST = [
     "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
     "wave", "x3m", "xr", "xtz", "zb", "ztt"
 ]
+
+KNOWN_BRANDS = BRAND_LIST
+KNOWN_MODELS = MODEL_LIST
 
 
 def _build_autocorrect_vocab():
@@ -615,25 +622,28 @@ def detect_families_in_query(query: str):
 # ------------------------------------------------------------
 # QUERY PARSING
 # ------------------------------------------------------------
-def parse_query_v2(query: str) -> dict:
+def parse_query_v2(query: str, phone: str | None = None) -> dict:
     q = normalize_search_query(query)
     tokens = q.split()
     out = {
         "brands": [],
         "models": [],
         "category": None,
+        "categories": [],
         "families": [],
         "raw": q,
         "moto_brands": [],
         "moto_models": [],
         "displacement": None,
         "final_category": None,
+        "motos_detectadas": [],
     }
 
     for cat, variants in CATEGORY_MAP.items():
         if any(v in q for v in variants):
-            out["category"] = cat
-            break
+            out["categories"].append(cat)
+
+    out["category"] = out["categories"][0] if out["categories"] else None
 
     for b in BRAND_LIST:
         if b in q:
@@ -643,7 +653,28 @@ def parse_query_v2(query: str) -> dict:
         if m in q:
             out["models"].append(m)
 
+    for brand in KNOWN_BRANDS:
+        for model in KNOWN_MODELS:
+            if brand in q and model in q:
+                out["motos_detectadas"].append({
+                    "brand": brand,
+                    "model": model
+                })
+
+    if "esa moto" in q or "esa misma" in q:
+        ctx = get_moto_context(phone)
+        if ctx:
+            out["motos_detectadas"].append(ctx)
+
     out["families"] = detect_families_in_query(q)
+
+    if out["motos_detectadas"]:
+        out["moto_brands"] = list({m["brand"] for m in out["motos_detectadas"] if m.get("brand")})
+        out["moto_models"] = list({m["model"] for m in out["motos_detectadas"] if m.get("model")})
+
+    for m in out["motos_detectadas"]:
+        save_moto_context(phone, m.get("brand", ""), m.get("model", ""))
+
     return out
 
 
@@ -652,10 +683,11 @@ def filter_catalog(catalog, parsed):
         return []
     brands = set(parsed.get("brands") or [])
     models = set(parsed.get("models") or [])
-    cat = parsed.get("category")
+    cats = parsed.get("categories") or []
     families = set(parsed.get("families") or [])
     moto_brands = set(parsed.get("moto_brands") or [])
     moto_models = set(parsed.get("moto_models") or [])
+    motos_detectadas = parsed.get("motos_detectadas") or []
     displacement = parsed.get("displacement")
     final_category = parsed.get("final_category")
 
@@ -680,6 +712,18 @@ def filter_catalog(catalog, parsed):
             if not any(m in p_moto_model for m in moto_models):
                 return False
 
+        if motos_detectadas:
+            p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
+            p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
+            if not p_moto_brand or not p_moto_model:
+                return False
+            if not any(
+                normalize_search_query(m.get("brand", "")) in p_moto_brand and
+                normalize_search_query(m.get("model", "")) in p_moto_model
+                for m in motos_detectadas
+            ):
+                return False
+
         if families:
             p_family = normalize_search_query(p.get("family_name", ""))
             if not p_family:
@@ -687,10 +731,26 @@ def filter_catalog(catalog, parsed):
             if not any(f in p_family for f in families):
                 return False
 
-        if cat:
+        if cats:
             p_cat = normalize_search_query(p.get("category", ""))
-            if not any(v in p_cat for v in CATEGORY_MAP.get(cat, [cat])):
-                return False
+
+            # Batería tiene reglas especiales
+            if "bateria" in cats:
+                name_norm = normalize_search_query(p.get("name", ""))
+                if any(x in name_norm for x in ["ytx", "yb", "yt", "gel", "agm", "litio", "12v"]):
+                    pass
+                else:
+                    if not any(v in p_cat for v in CATEGORY_MAP.get("bateria", ["bateria"])):
+                        return False
+
+            # Otras categorías
+            other_cats = [c for c in cats if c != "bateria"]
+            if other_cats:
+                if not any(
+                    any(v in p_cat for v in CATEGORY_MAP.get(c, [c]))
+                    for c in other_cats
+                ):
+                    return False
 
         if final_category:
             p_final_cat = normalize_search_query(p.get("final_category", "") or p.get("category", ""))
@@ -928,6 +988,62 @@ def get_db_connection():
                 conn.close()
 
 
+def get_db():
+    try:
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"No se pudo preparar el directorio de DB: {e}")
+
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def save_moto_context(phone, brand, model):
+    if not phone or not brand or not model:
+        return
+    try:
+        conn = get_db()
+        conn.execute(
+            """
+                INSERT INTO moto_context (phone, brand, model, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(phone)
+                DO UPDATE SET brand=?, model=?, updated_at=CURRENT_TIMESTAMP
+            """,
+            (phone, brand, model, brand, model)
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Error guardando contexto de moto: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def get_moto_context(phone):
+    if not phone:
+        return None
+    try:
+        conn = get_db()
+        row = conn.execute("SELECT brand, model FROM moto_context WHERE phone=?", (phone,)).fetchone()
+        if not row:
+            return None
+        return {"brand": row[0], "model": row[1]}
+    except Exception as e:
+        logger.error(f"Error obteniendo contexto de moto: {e}")
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def init_db():
     with get_db_connection() as conn:
         c = conn.cursor()
@@ -1022,6 +1138,15 @@ def init_db():
             CREATE TABLE IF NOT EXISTS conversation_phase (
                 phone TEXT PRIMARY KEY,
                 phase TEXT,
+                updated_at TEXT
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS moto_context (
+                phone TEXT PRIMARY KEY,
+                brand TEXT,
+                model TEXT,
                 updated_at TEXT
             )
         """)
@@ -1750,12 +1875,12 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def hybrid_search(query: str, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list:
+def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list | dict:
     catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
     if not catalog or not query:
         return []
 
-    parsed = parse_query_v2(query)
+    parsed = parse_query_v2(query, phone=phone)
 
     if metadata_filters:
         def _norm_list(val):
@@ -1839,6 +1964,43 @@ def hybrid_search(query: str, top_k: int = MAX_SEARCH_RESULTS, metadata_filters:
     fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
 
     products_only = [p for p, _ in fused]
+
+    cats = parsed.get("categories") or []
+    motos = parsed.get("motos_detectadas") or []
+
+    if len(motos) > 1 and len(cats) > 1:
+        combined = {}
+        for m in motos:
+            for c in cats:
+                sub = parsed.copy()
+                sub["motos_detectadas"] = [m]
+                sub["categories"] = [c]
+                sub["category"] = c
+                sub_filtered = filter_catalog(products_only, sub)
+                key = f"{m['brand']} {m['model']} – {c}"
+                combined[key] = sub_filtered[:MAX_SEARCH_RESULTS]
+        return {"multi_moto_multi_cat": True, "results": combined}
+
+    if len(cats) > 1 and len(motos) <= 1:
+        multi_results = {}
+        for c in cats:
+            sub_parsed = parsed.copy()
+            sub_parsed["categories"] = [c]
+            sub_parsed["category"] = c
+            sub_filtered = filter_catalog(products_only, sub_parsed)
+            multi_results[c] = sub_filtered[:MAX_SEARCH_RESULTS]
+        return {"multisearch": True, "results": multi_results}
+
+    if len(motos) > 1:
+        results = {}
+        for m in motos:
+            sub_parsed = parsed.copy()
+            sub_parsed["motos_detectadas"] = [m]
+            sub_filtered = filter_catalog(products_only, sub_parsed)
+            key = f"{m['brand']} {m['model']}"
+            results[key] = sub_filtered[:MAX_SEARCH_RESULTS]
+        return {"multi_moto": True, "results": results}
+
     filtered_products = filter_catalog(products_only, parsed)
 
     def _score_for(product):
@@ -1929,7 +2091,7 @@ def process_bulk_sync(phone, raw_list):
         if corr:
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
-        matches = hybrid_search(corrected_name, top_k=3)
+        matches = hybrid_search(corrected_name, phone=phone, top_k=3)
         if matches:
             best, score = matches[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -2005,7 +2167,7 @@ def process_bulk_async(job):
             if corr:
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
-            matches = hybrid_search(corrected_name, top_k=3)
+            matches = hybrid_search(corrected_name, phone=phone, top_k=3)
             if matches:
                 best, score = matches[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -2753,6 +2915,37 @@ def format_search_results(products):
         lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   {price}")
     return "\n\n".join(lines)
 
+
+def format_multi_search_response(results: dict) -> str | None:
+    if results.get("multisearch"):
+        blocks = []
+        for cat, items in results["results"].items():
+            block = f"🔹 *{cat.upper()}*\n"
+            for p in items[:5]:
+                block += f"- {p.get('name', '')} ({p.get('code', '')}) - ${p.get('price_ars', '')}\n"
+            blocks.append(block)
+        return "📦 Acá tenés por categoría:\n\n" + "\n\n".join(blocks)
+
+    if results.get("multi_moto"):
+        blocks = []
+        for moto, items in results["results"].items():
+            block = f"🏍️ *{moto.upper()}*\n"
+            for p in items[:5]:
+                block += f"- {p.get('name', '')} ({p.get('code', '')}) - ${p.get('price_ars', '')}\n"
+            blocks.append(block)
+        return "📦 Acá tenés por moto:\n\n" + "\n\n".join(blocks)
+
+    if results.get("multi_moto_multi_cat"):
+        blocks = []
+        for combo, items in results["results"].items():
+            block = f"🔧 *{combo.upper()}*\n"
+            for p in items[:5]:
+                block += f"- {p.get('name', '')} ({p.get('code', '')}) - ${p.get('price_ars', '')}\n"
+            blocks.append(block)
+        return "📦 Resultados por moto y categoría:\n\n" + "\n\n".join(blocks)
+
+    return None
+
 # =========================================================
 # AGENTE PRINCIPAL – VERSIÓN 3.13.0
 # =========================================================
@@ -2948,7 +3141,21 @@ def run_agent(phone, user_message):
 
         execution_context["search_query"] = query_for_search
 
-        semantic_results = hybrid_search(query_for_search, top_k=MAX_SEARCH_RESULTS)
+        semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
+
+        if isinstance(semantic_results, dict):
+            execution_context["search_executed"] = True
+            total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
+            execution_context["products_found"] = total_found
+            reply = format_multi_search_response(semantic_results)
+            if reply:
+                save_message(phone, reply, "assistant")
+                log_interaction(phone, user_message, intent, total_found)
+                log_performance(phone, intent, time.time()-start_time, total_found)
+                update_sales_phase_from_intent(phone, intent)
+                return reply
+            semantic_results = []
+
         products = [p for p, _ in semantic_results]
 
         execution_context["search_executed"] = True
