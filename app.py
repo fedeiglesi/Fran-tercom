@@ -27,6 +27,7 @@ from openai import OpenAI, RateLimitError
 from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
+from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 from cachetools import TTLCache
 
@@ -132,7 +133,7 @@ RATE_WINDOW = 60
 message_dedup_cache = defaultdict(list)
 DEDUP_WINDOW = 5
 
-_catalog_and_index_cache = {"catalog": None, "index": None, "built_at": None}
+_catalog_and_index_cache = {"catalog": None, "index": None, "bm25": None, "bm25_corpus": None, "built_at": None}
 _catalog_lock = Lock()
 
 _embeddings_cache_lock = Lock()
@@ -156,6 +157,15 @@ def strip_accents(s):
         ).lower()
     except Exception:
         return str(s).lower()
+
+
+def _tokenize_text(text):
+    try:
+        normalized = strip_accents(text or "")
+        return re.findall(r"\w+", normalized)
+    except Exception as e:
+        logger.warning(f"Error tokenizando texto: {e}")
+        return (text or "").lower().split()
 
 
 def to_decimal_money(x):
@@ -1190,7 +1200,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
         price_ars = price_ars.quantize(Decimal("0.01"))
         price_usd = price_usd.quantize(Decimal("0.01"))
 
-        catalog, _idx = get_catalog_and_index()
+        catalog, _idx, _, _ = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
         if prod is None:
             logger.warning(f"Producto {code} no existe en catalogo")
@@ -1591,90 +1601,144 @@ def _build_faiss_index_from_catalog(catalog):
         return None, 0
 
 
+def _build_bm25_index_from_catalog(catalog):
+    try:
+        if not catalog:
+            return None, []
+
+        corpus = [c.get("search_text") or "" for c in catalog]
+        tokenized_corpus = [_tokenize_text(text) for text in corpus]
+
+        if not tokenized_corpus:
+            return None, []
+
+        bm25 = BM25Okapi(tokenized_corpus)
+        logger.info(f"Indice BM25 creado con {len(tokenized_corpus)} documentos")
+        return bm25, tokenized_corpus
+    except Exception as e:
+        logger.error(f"Error construyendo BM25: {e}", exc_info=True)
+        return None, []
+
+
 def get_catalog_and_index():
     with _catalog_lock:
         if _catalog_and_index_cache["catalog"] is not None:
-            return _catalog_and_index_cache["catalog"], _catalog_and_index_cache["index"]
+            return (
+                _catalog_and_index_cache["catalog"],
+                _catalog_and_index_cache["index"],
+                _catalog_and_index_cache.get("bm25"),
+                _catalog_and_index_cache.get("bm25_corpus") or [],
+            )
 
         catalog, index = load_faiss_index()
 
         if catalog and index:
+            bm25_index, tokenized_corpus = _build_bm25_index_from_catalog(catalog)
             _catalog_and_index_cache["catalog"] = catalog
             _catalog_and_index_cache["index"] = index
+            _catalog_and_index_cache["bm25"] = bm25_index
+            _catalog_and_index_cache["bm25_corpus"] = tokenized_corpus
             _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
             initialize_families_index(catalog)
-            return catalog, index
+            return catalog, index, bm25_index, tokenized_corpus
 
         catalog = load_catalog_enriched()
         index, _ = _build_faiss_index_from_catalog(catalog)
+        bm25_index, tokenized_corpus = _build_bm25_index_from_catalog(catalog)
 
         if index and catalog:
             save_faiss_index(index, catalog)
 
         _catalog_and_index_cache["catalog"] = catalog
         _catalog_and_index_cache["index"] = index
+        _catalog_and_index_cache["bm25"] = bm25_index
+        _catalog_and_index_cache["bm25_corpus"] = tokenized_corpus
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         initialize_families_index(catalog)
-        return catalog, index
+        return catalog, index, bm25_index, tokenized_corpus
 
 # ------------------------------------------------------------------
-# BÚSQUEDA SEMÁNTICA
+# BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
-    """
-    Búsqueda semántica usando el índice FAISS global.
-    - Usa embeddings del catálogo precomputados
-    - Aplica filtro lexical (familia/marca/modelos/categoría) sobre los resultados
-    - k dinámico según haya/no haya familia detectada
-    """
-    catalog, index = get_catalog_and_index()
-    if not catalog or not index or not query:
+def hybrid_search(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
+    catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
+    if not catalog or not query:
         return []
 
     parsed = parse_query_v2(query)
 
-    try:
-        emb = generate_embeddings_with_cache([query])[0]
-    except Exception as e:
-        logger.error(f"Error generando embedding de query: {e}")
+    bm25_results = []
+    if bm25_index:
+        try:
+            tokenized_query = _tokenize_text(query)
+            scores = bm25_index.get_scores(tokenized_query)
+            ranked_indices = np.argsort(scores)[::-1]
+            k_bm25 = min(max(top_k * 2, top_k), len(ranked_indices))
+            for rank, idx in enumerate(ranked_indices[:k_bm25], 1):
+                if 0 <= idx < len(catalog):
+                    bm25_results.append((catalog[idx], float(scores[idx]), rank))
+        except Exception as e:
+            logger.error(f"Error en búsqueda BM25: {e}", exc_info=True)
+    else:
+        logger.warning("BM25 no disponible, usando solo FAISS")
+
+    faiss_results = []
+    if index:
+        try:
+            emb = generate_embeddings_with_cache([query])[0]
+            q_vec = np.array([emb]).astype("float32")
+            faiss.normalize_L2(q_vec)
+
+            has_families = bool(parsed.get("families"))
+            multiplier = 4 if has_families else 8
+            k_for_index = min(max(top_k * multiplier, top_k), len(catalog))
+
+            D, I = index.search(q_vec, k_for_index)
+            for rank, (dist, idx) in enumerate(zip(D[0], I[0]), 1):
+                if 0 <= idx < len(catalog):
+                    faiss_results.append((catalog[idx], float(dist), rank))
+        except Exception as e:
+            logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
+    else:
+        logger.warning("Índice FAISS no disponible, usando solo BM25")
+
+    if not bm25_results and not faiss_results:
         return []
 
-    q_vec = np.array([emb]).astype("float32")
-    faiss.normalize_L2(q_vec)
+    k_rrf = 60
+    fused_scores = defaultdict(float)
+    product_lookup = {}
 
-    has_families = bool(parsed.get("families"))
-    multiplier = 4 if has_families else 8
-    k_for_index = min(max(top_k * multiplier, top_k), len(catalog))
+    def add_rrf_scores(results):
+        for product, _score, rank in results:
+            key = product.get("code") or product.get("name") or id(product)
+            if key not in product_lookup:
+                product_lookup[key] = product
+            fused_scores[key] += 1.0 / (k_rrf + rank)
 
-    try:
-        D, I = index.search(q_vec, k_for_index)
-    except Exception as e:
-        logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
-        return []
+    add_rrf_scores(bm25_results)
+    add_rrf_scores(faiss_results)
 
-    raw_results = []
-    for dist, idx in zip(D[0], I[0]):
-        if 0 <= idx < len(catalog):
-            raw_results.append((catalog[idx], float(dist)))
+    sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
+    max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
+    fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
 
-    if not raw_results:
-        return []
-
-    products_only = [p for p, _ in raw_results]
+    products_only = [p for p, _ in fused]
     filtered_products = filter_catalog(products_only, parsed)
 
+    def _score_for(product):
+        key = product.get("code") or product.get("name") or id(product)
+        return fused_scores.get(key, 0.0)
+
     if filtered_products:
-        score_by_id = {id(p): score for p, score in raw_results}
-        results = [
-            (p, score_by_id.get(id(p), 0.0))
-            for p in filtered_products
-        ]
+        results = [(p, _score_for(p)) for p in filtered_products]
     else:
         families = parsed.get("families") or []
         cat = parsed.get("category")
         brands = parsed.get("brands") or []
         models = parsed.get("models") or []
 
+        results = []
         if (brands or models) and (families or cat):
             super_relaxed = {
                 "families": families,
@@ -1684,14 +1748,11 @@ def semantic_search_v2(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
                 "raw": parsed.get("raw", "")
             }
             filtered_products = filter_catalog(products_only, super_relaxed)
-        if filtered_products:
-            score_by_id = {id(p): score for p, score in raw_results}
-            results = [
-                (p, score_by_id.get(id(p), 0.0))
-                for p in filtered_products
-            ]
-        else:
-            results = raw_results
+            if filtered_products:
+                results = [(p, _score_for(p)) for p in filtered_products]
+
+        if not results:
+            results = fused
 
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_k]
@@ -1753,7 +1814,7 @@ def process_bulk_sync(phone, raw_list):
         if corr:
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
-        matches = semantic_search_v2(corrected_name, top_k=3)
+        matches = hybrid_search(corrected_name, top_k=3)
         if matches:
             best, score = matches[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -1829,7 +1890,7 @@ def process_bulk_async(job):
             if corr:
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
-            matches = semantic_search_v2(corrected_name, top_k=3)
+            matches = hybrid_search(corrected_name, top_k=3)
             if matches:
                 best, score = matches[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
@@ -2593,6 +2654,8 @@ def run_agent(phone, user_message):
     intent = intent_data.get("intent", "unknown")
     raw_query_for_search = intent_data.get("query") or user_message
     current_phase = get_sales_phase(phone)
+    last_search_data = get_last_search(phone) or {}
+    last_search_query = (last_search_data.get("query") or "").strip()
 
     execution_context = {
         "intent_detected": intent,
@@ -2758,14 +2821,19 @@ def run_agent(phone, user_message):
     corrections = []
 
     if intent in {"product_search", "unknown"}:
-        query_for_search, corrections = autocorrect_keywords(raw_query_for_search)
+        if raw_query_for_search and len(raw_query_for_search.split()) < 4 and last_search_query:
+            query_for_search = f"{last_search_query} {raw_query_for_search}".strip()
+            execution_context["warnings"].append("query_refined_with_last_search")
+            logger.info(f"Query refinada con contexto previo: '{query_for_search}'")
+
+        query_for_search, corrections = autocorrect_keywords(query_for_search)
         if corrections:
             execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
             logger.info(f"Autocorrect aplicado: {', '.join(corrections)}")
 
         execution_context["search_query"] = query_for_search
 
-        semantic_results = semantic_search_v2(query_for_search, top_k=MAX_SEARCH_RESULTS)
+        semantic_results = hybrid_search(query_for_search, top_k=MAX_SEARCH_RESULTS)
         products = [p for p, _ in semantic_results]
 
         execution_context["search_executed"] = True
@@ -3020,7 +3088,7 @@ def whatsapp_webhook():
 # ------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    catalog, index = get_catalog_and_index()
+    catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
         "version": "3.13.0",
@@ -3032,6 +3100,7 @@ def health():
             "forced_code_citation",
             "post_validation",
             "faiss_global_index",
+            "bm25_index",
             "families_index",
             "progressive_family_fallback",
             "intent_detector_v2",
@@ -3045,12 +3114,11 @@ def health():
 # ------------------------------------------------------------------
 # ✅ Cargar índice al arrancar
 # ------------------------------------------------------------------
-catalog, index = load_faiss_index()
-if not (catalog and index):
-    catalog, index = get_catalog_and_index()
+catalog, index, bm25_index, bm25_corpus = get_catalog_and_index()
+if catalog and index:
+    logger.info("✅ Índices inicializados: FAISS=%s BM25=%s", len(catalog), "ok" if bm25_index else "error")
 else:
-    logger.info("✅ Índice FAISS encontrado en disco: %s productos", len(catalog))
-    initialize_families_index(catalog)
+    logger.error("❌ No se pudieron inicializar los índices al arranque")
 
 # ------------------------------------------------------------------
 # ✅ Inicializar DB
@@ -3081,7 +3149,7 @@ if __name__ == "__main__":
     logger.info("  ✅ Relevance Scoring general (sin keywords hardcoded)")
     logger.info("  ✅ Forced Code Citation en prompts")
     logger.info("  ✅ Post-validation de códigos y nombres")
-    logger.info("  ✅ FAISS global reutilizado en semantic_search_v2")
+    logger.info("  ✅ FAISS + BM25 con búsqueda híbrida (hybrid_search)")
     logger.info("  ✅ Índice de familias (FAMILIES_INDEX)")
     logger.info("  ✅ Fallback progresivo por familia + categoría")
     logger.info("  ✅ k dinámico según haya/no haya familia en la query")
