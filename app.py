@@ -69,6 +69,9 @@ if not OPENAI_API_KEY:
     raise RuntimeError("Falta OPENAI_API_KEY")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
+# Usar modelo más barato para reasoning
+MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
+MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -2762,45 +2765,85 @@ ENTRADA que recibirás:
 
 TU TAREA (paso a paso):
 
-1. ENTENDER EL PEDIDO:
-   - ¿Qué busca exactamente? (producto específico, categoría, asesoramiento)
-   - ¿Menciona marca/modelo de moto? Si no, ¿podés inferirlo de memoria_viva?
-   - ¿Es un pedido claro o falta información?
+1. INTERPRETAR EL PEDIDO (con expansión semántica):
+   
+   a) SINÓNIMOS Y JERGA ARGENTINA:
+      - "gomas" / "cubiertas" / "cauchos" → buscar NEUMÁTICOS
+      - "amortiguadores" / "shocks" → buscar SUSPENSIÓN
+      - "bujías" / "candelas" → buscar BUJÍAS
+      - "batería" / "acumulador" → buscar BATERÍAS
+      - "filtro" puede ser: filtro de aceite, filtro de aire, filtro de nafta
+      - Si el usuario usa jerga, normalizá al término técnico del catálogo
+   
+   b) CONTEXTO IMPLÍCITO:
+      - Si dice solo una categoría ("cubiertas", "espejos") pero en memoria_viva 
+        hay una moto reciente (ej: "fz16"), ASUMIR que es para esa moto
+      - Si dice "y [producto]?" está pidiendo otro producto para la MISMA moto
+   
+   c) REFERENCIAS A PRODUCTOS ANTERIORES:
+      - "los tres" / "esos tres" → primeros 3 de memoria_viva.allowed_products_snapshot
+      - "los que me mostraste" → todos de memoria_viva.allowed_products_snapshot
+      - "el primero" / "el segundo" → producto en esa posición del snapshot
+      - "el más barato" / "el más caro" → ordenar por precio
+      - "todos" / "todos esos" → todos los productos del último mensaje
 
-2. EVALUAR PRODUCTOS DISPONIBLES:
+2. CONSTRUIR QUERY DE BÚSQUEDA ENRIQUECIDA:
+   
+   Si el mensaje original es ambiguo o incompleto, construí una query mejorada:
+   
+   Ejemplos:
+   - Usuario: "cubiertas"
+     memoria_viva.most_recent_bike: "yamaha fz16"
+     → new_query: "neumaticos yamaha fz16"
+   
+   - Usuario: "gomas para la moto"
+     memoria_viva.most_recent_bike: "honda wave 110"
+     → new_query: "neumaticos honda wave 110"
+   
+   - Usuario: "y espejos?"
+     memoria_viva.last_search_query: "filtros yamaha fz16"
+     → new_query: "espejos yamaha fz16"
+
+3. EVALUAR PRODUCTOS DISPONIBLES:
    - Revisá productos_permitidos uno por uno
    - Para CADA producto relevante, decidí:
      * ¿Coincide con lo que busca? (score 0-100)
      * ¿Qué cantidad tiene sentido? (default: 1)
      * ¿Por qué lo recomendarías? (1 frase)
 
-3. TOMAR DECISIÓN:
+4. TOMAR DECISIÓN:
+   
    a) SI encontraste productos que encajan bien (score > 70):
       → status: "OK"
       → products_decision: [lista de productos seleccionados con qty y razón]
-   
-   b) SI productos son dudosos (score 50-70):
+      → extracted_entities: {términos normalizados}
+     
+   b) SI el usuario hace referencia a productos anteriores:
+      → status: "OK"
+      → products_decision: [productos de memoria_viva.allowed_products_snapshot]
+      → reason: "Usuario solicitó productos de búsqueda anterior"
+     
+   c) SI productos son dudosos (score 50-70):
       → status: "OK" (igual mostrá opciones pero avisá en "reason")
       → products_decision: [los mejores que tenés]
-   
-   c) SI necesitás refinar búsqueda (productos irrelevantes):
+     
+   d) SI necesitás refinar búsqueda (productos irrelevantes):
       → status: "NEED_REQUERY"
-      → new_query: query mejorada (ej: si dijo "filtro honda" y no hay matches,
-         buscá "filtro aceite honda wave" usando memoria_viva)
-   
-   d) SI falta info crítica (no sabés marca/modelo/categoría):
+      → new_query: query mejorada usando sinónimos + contexto de memoria_viva
+     
+   e) SI falta info crítica (no sabés marca/modelo/categoría):
       → status: "NEED_CLARIFICATION"
       → message_to_user_if_clarification: pregunta específica
-
-4. ACCIONES ADICIONALES:
-   - Si detectás nueva moto mencionada, agregá a pending_actions
-   - Si el cliente confirma algo implícito ("dale", "sí") y hay pending_action,
-     marcalo para ejecutar
 
 FORMATO DE SALIDA (JSON puro, sin markdown):
 {
   "status": "OK|NEED_REQUERY|NEED_CLARIFICATION",
   "reason": "string explicando la decisión interna",
+  "semantic_expansion": {
+    "original_terms": ["gomas"],
+    "normalized_terms": ["neumaticos", "cubiertas"],
+    "context_added": "yamaha fz16"
+  },
   "products_decision": [
     {
       "code": "1234/56789-012",
@@ -2813,26 +2856,124 @@ FORMATO DE SALIDA (JSON puro, sin markdown):
   "new_query": "query refinada (solo si NEED_REQUERY)",
   "message_to_user_if_clarification": "pregunta (solo si NEED_CLARIFICATION)",
   "extracted_entities": {
-    "brand": "honda|yamaha|...",
-    "model": "wave|titan|...",
-    "category": "filtro|aceite|...",
-    "displacement_cc": "110|125|..."
+    "brand": "yamaha",
+    "model": "fz16",
+    "category": "neumaticos",
+    "original_category": "gomas",
+    "displacement_cc": "150"
+  },
+  "reference_resolution": {
+    "type": "previous_search|implicit_quantity|none",
+    "resolved_to": "3 productos de búsqueda anterior de espejos"
   },
   "pending_actions": [
-    {"type": "save_moto_context", "brand": "honda", "model": "wave"}
+    {"type": "save_moto_context", "brand": "yamaha", "model": "fz16"}
   ],
   "memory_updates": {
-    "most_recent_bike": "Honda Wave 110",
-    "search_pattern": "busca filtros regularmente"
+    "most_recent_bike": "Yamaha FZ16",
+    "search_pattern": "busca repuestos regularmente"
   }
 }
 
-REGLAS CRÍTICAS:
-- NUNCA inventes códigos que no estén en productos_permitidos
-- Si un producto tiene score < 60, NO lo incluyas
-- Si todos los productos son score < 70, mejor NEED_CLARIFICATION
-- Usá memoria_viva para resolver ambigüedades
-- Sé conservador: mejor pedir clarificación que mostrar productos incorrectos
+EJEMPLOS COMPLETOS:
+
+Ejemplo 1 - Sinónimo:
+mensaje_usuario: "tenes gomas para una fz16?"
+memoria_viva: {most_recent_bike: ""}
+productos_permitidos: [neumaticos yamaha fz16...]
+
+Respuesta:
+{
+  "status": "NEED_REQUERY",
+  "reason": "Usuario usó 'gomas' (sinónimo de neumáticos). Busco con término normalizado.",
+  "semantic_expansion": {
+    "original_terms": ["gomas"],
+    "normalized_terms": ["neumaticos", "cubiertas"],
+    "context_added": "yamaha fz16"
+  },
+  "new_query": "neumaticos yamaha fz16",
+  "extracted_entities": {
+    "brand": "yamaha",
+    "model": "fz16",
+    "category": "neumaticos",
+    "original_category": "gomas"
+  }
+}
+
+Ejemplo 2 - Contexto implícito:
+mensaje_usuario: "y espejos?"
+memoria_viva: {
+  most_recent_bike: "yamaha fz16",
+  last_search_query: "cubiertas fz16"
+}
+productos_permitidos: [espejos yamaha fz16...]
+
+Respuesta:
+{
+  "status": "NEED_REQUERY",
+  "reason": "Usuario pidió otra categoría ('espejos') para la misma moto del contexto",
+  "semantic_expansion": {
+    "original_terms": ["espejos"],
+    "normalized_terms": ["espejos", "retrovisores"],
+    "context_added": "yamaha fz16"
+  },
+  "new_query": "espejos yamaha fz16",
+  "extracted_entities": {
+    "brand": "yamaha",
+    "model": "fz16",
+    "category": "espejos"
+  }
+}
+
+Ejemplo 3 - Referencia a productos anteriores:
+mensaje_usuario: "sumas los tres al carrito"
+memoria_viva: {
+  allowed_products_snapshot: [
+    {code: "1234/00001-001", name: "Espejo izq FZ16", price: 5000},
+    {code: "1234/00002-002", name: "Espejo der FZ16", price: 5000},
+    {code: "1234/00003-003", name: "Soporte espejo", price: 2500}
+  ]
+}
+
+Respuesta:
+{
+  "status": "OK",
+  "reason": "Usuario solicitó agregar los 3 productos mostrados anteriormente",
+  "reference_resolution": {
+    "type": "implicit_quantity",
+    "resolved_to": "primeros 3 productos de búsqueda anterior"
+  },
+  "products_decision": [
+    {
+      "code": "1234/00001-001",
+      "name": "Espejo izq FZ16",
+      "qty": 1,
+      "why": "Usuario pidió 'los tres' refiriéndose a la búsqueda anterior",
+      "confidence_score": 100
+    },
+    {
+      "code": "1234/00002-002",
+      "name": "Espejo der FZ16",
+      "qty": 1,
+      "why": "Segundo producto de la lista anterior",
+      "confidence_score": 100
+    },
+    {
+      "code": "1234/00003-003",
+      "name": "Soporte espejo",
+      "qty": 1,
+      "why": "Tercer producto de la lista anterior",
+      "confidence_score": 100
+    }
+  ],
+  "pending_actions": [
+    {
+      "type": "add_to_cart",
+      "products": ["1234/00001-001", "1234/00002-002", "1234/00003-003"],
+      "qty_each": 1
+    }
+  ]
+}
 """
 
 TECH_SYSTEM_PROMPT = f"""
@@ -2923,9 +3064,9 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
     """
     Construye memoria con inferencias adicionales: infiere moto habitual y patrones de compra.
     """
-
     memory = build_live_memory(phone, user_message, intent_data, productos_filtrados)
 
+    # Inferir moto habitual desde historial si no hay una reciente
     if not memory.get("most_recent_bike"):
         for pattern in memory.get("habitual_queries", []):
             parsed = parse_query_v2(pattern, phone)
@@ -2938,6 +3079,7 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
                 if memory["most_recent_bike"]:
                     break
 
+    # Agregar patrón de compra si hay carrito
     if memory.get("cart_state"):
         categories = [item.get("category", "") for item in memory["cart_state"]]
         brands = [item.get("brand", "") for item in memory["cart_state"] if item.get("brand")]
@@ -2951,6 +3093,36 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
             "avg_order_size": len(memory["cart_state"]),
             "frequent_brands": sorted(set(brands)),
         }
+
+    # ← AGREGAR: Snapshot de productos ANTES de este mensaje
+    last_search = get_last_search(phone)
+    if last_search and last_search.get("products"):
+        # Solo si es reciente (< 10 min)
+        metadata = last_search.get("metadata", {}) or {}
+        timestamp = metadata.get("timestamp")
+        age = 999
+        if timestamp:
+            try:
+                parsed_ts = datetime.fromisoformat(timestamp)
+                age = (datetime.now() - parsed_ts).total_seconds() / 60
+            except Exception:
+                age = 999
+        if age < 10:
+            memory["allowed_products_snapshot"] = [
+                {
+                    "code": p.get("code"),
+                    "name": p.get("name"),
+                    "price": float(to_decimal_money(p.get("price_ars", 0))),
+                    "category": p.get("category", ""),
+                    "brand": p.get("brand", ""),
+                    "model": p.get("model", ""),
+                }
+                for p in last_search["products"][:10]  # máximo 10 para no saturar el contexto
+            ]
+        else:
+            memory["allowed_products_snapshot"] = []
+    else:
+        memory["allowed_products_snapshot"] = []
 
     return memory
 
@@ -2990,15 +3162,31 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
             str(p.get("code")): p for p in (productos_permitidos or []) if p.get("code")
         }
 
+        # ← NUEVO: Manejar referencias a productos anteriores
+        reference_resolution = parsed_plan.get("reference_resolution", {})
+        if reference_resolution.get("type") in ["previous_search", "implicit_quantity"]:
+            # El LLM ya resolvió la referencia en products_decision
+            # Solo validamos que esos códigos existen
+            logger.info(f"Resolviendo referencia: {reference_resolution.get('resolved_to')}")
+
         productos_seleccionados = []
         for decision in parsed_plan.get("products_decision", []):
             code = decision.get("code")
             if not code:
                 continue
 
+            # Buscar primero en productos_permitidos
             producto = productos_permitidos_map.get(str(code))
+            
+            # ← NUEVO: Si no está en productos_permitidos, buscar en catálogo global
+            # (esto pasa cuando el LLM usa allowed_products_snapshot)
             if not producto:
-                continue
+                catalog, _, _, _ = get_catalog_and_index()
+                producto = next((p for p in catalog if p.get("code") == code), None)
+                
+                if not producto:
+                    logger.warning(f"Producto {code} no encontrado en catálogo")
+                    continue
 
             try:
                 qty_sugerida = max(1, int(decision.get("qty", 1)))
@@ -3009,21 +3197,43 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
                 **producto,
                 "qty_sugerida": qty_sugerida,
                 "razon": decision.get("why", ""),
-                "decision_score": decision.get("score"),
+                "decision_score": decision.get("confidence_score"),
             })
 
+        # Ejecutar pending_actions
         if parsed_plan.get("pending_actions"):
             for action in parsed_plan.get("pending_actions", []):
                 action_type = action.get("type")
+                
                 if action_type == "save_moto_context":
                     save_moto_context(phone, action.get("brand", ""), action.get("model", ""))
+                
+                # ← NUEVO: Manejar add_to_cart directo
+                elif action_type == "add_to_cart":
+                    products_to_add = action.get("products", [])
+                    qty_each = action.get("qty_each", 1)
+                    
+                    for code in products_to_add:
+                        catalog, _, _, _ = get_catalog_and_index()
+                        p = next((prod for prod in catalog if prod.get("code") == code), None)
+                        if p:
+                            cart_add(
+                                phone,
+                                code,
+                                qty_each,
+                                p.get("name", ""),
+                                to_decimal_money(p.get("price_ars", 0)),
+                                to_decimal_money(p.get("price_usd", 0))
+                            )
 
         return {
             "productos_finales": productos_seleccionados,
             "metadata": {
-                "brand": parsed_plan.get("brand"),
-                "model": parsed_plan.get("model"),
-                "category": parsed_plan.get("category"),
+                "brand": parsed_plan.get("extracted_entities", {}).get("brand"),
+                "model": parsed_plan.get("extracted_entities", {}).get("model"),
+                "category": parsed_plan.get("extracted_entities", {}).get("category"),
+                "semantic_expansion": parsed_plan.get("semantic_expansion"),
+                "reference_resolution": reference_resolution,
             },
         }
     except Exception as e:
@@ -3069,7 +3279,7 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
 
         with openai_sem:
             resp = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=MODEL_REASONING,
                 messages=mensajes,
                 temperature=0.15,
                 max_tokens=600,
@@ -3107,7 +3317,7 @@ def responder_con_llm(system_prompt_cliente, razonamiento_interno):
 
         with openai_sem:
             resp = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=MODEL_RESPONSE,
                 messages=mensajes,
                 temperature=0.35,
                 max_tokens=600,
