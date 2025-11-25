@@ -19,6 +19,7 @@ from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock, Semaphore
 from queue import Queue, Empty
+from pathlib import Path
 
 import requests
 from flask import Flask, request, Response, jsonify
@@ -44,6 +45,7 @@ REQUESTS_HEADERS = {
 # =========================================================
 
 CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/refs/heads/Fran-3.13.2/catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
+LOCAL_CSV_FALLBACK = Path("catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv")
 CATALOG_URL = (os.environ.get("CATALOG_URL") or CSV_URL).strip()
 
 print(f"[Fran] Catálogo cargado desde: {CATALOG_URL}")
@@ -1483,13 +1485,25 @@ def cart_totals(phone):
 @lru_cache(maxsize=1)
 def _load_raw_csv():
     try:
-        r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
-        r.raise_for_status()
-        r.encoding = "utf-8"
-        return r.text
+        if CATALOG_URL.startswith("http"):
+            r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
+            r.raise_for_status()
+            r.encoding = "utf-8"
+            return r.text
+
+        local_path = Path(CATALOG_URL.replace("file://", ""))
+        if local_path.exists():
+            return local_path.read_text(encoding="utf-8")
+
+        logger.warning(f"Ruta de catálogo inválida: {CATALOG_URL}")
     except Exception as e:
         logger.error(f"Error descargando CSV: {e}")
-        return ""
+
+    if LOCAL_CSV_FALLBACK.exists():
+        logger.info("Usando catálogo local de respaldo")
+        return LOCAL_CSV_FALLBACK.read_text(encoding="utf-8")
+
+    return ""
 
 
 def _extract_column(header_row, key_variants):
