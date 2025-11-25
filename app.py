@@ -1,14 +1,13 @@
 # =========================================================
-# Fran 3.13.0 – Bot Mayorista Inteligente
+# Fran 3.14 – Bot Mayorista Inteligente
 # =========================================================
-# Basado en Fran 3.12 (estructura completa que pasó tests),
+# Basado en Fran 3.12/3.13 (estructura completa que pasó tests),
 # con mejoras:
-# - INTENTOS 2.0 (prompt ampliado, más sinónimos)
-# - CONTEXTO 2.0 (pending_actions realmente ejecutadas)
-# - Mensajes más humanos (no dice "no encontré" si hay alternativas)
-# - Pedidos implícitos mejorados ("2 de todos", "todos x5", etc.)
-# - Uso efectivo de pending_actions + snapshot de carrito
-# - Mantiene arquitectura FAISS + familias + quality check
+# - Doble llamada al LLM: razonamiento interno + respuesta final
+# - Orquestador único (orquestar_fran) para todo el flujo de conversación
+# - Plan interno estructurado y validación de búsqueda con reintento guiado
+# - Se mantiene toda la infraestructura previa (FAISS+BM25, familias,
+#   pending actions, fases, post-validaciones, chunks, etc.)
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -2692,6 +2691,19 @@ Si el cliente pidió X y NO está en tu lista → decí "No tengo X exacto, pero
 Sos vendedor que SABE de motos, ENTIENDE a la gente, CITA productos reales.
 """
 
+INTERNAL_REASONING_PROMPT = """
+Sos el cerebro interno de Fran (no hablas con el cliente). Necesitás generar un PLAN INTERNO estructurado en JSON.
+Entradas: historial relevante, query parseada, correcciones, contexto de catálogo, productos permitidos y restricciones del negocio.
+
+REGLAS:
+- Nunca respondas al cliente, solo devolvé un plan interno.
+- Validá si la búsqueda responde al pedido; si no, propone una nueva query de búsqueda en el campo "nueva_query_sugerida" y marcá "necesita_rebusqueda": true.
+- Incluí interpretación precisa, intención detectada, marca, modelo, cilindrada, categorías, códigos OEM si aparecen, productos candidatos y cantidades.
+- Explicá cómo manejar pedidos ambiguos ("dos de cada", "para otra moto", mezclas de productos) en el campo "resolucion_confusiones".
+- Señalá reglas críticas a aplicar (citación de código, filtros, límites de precios) en "reglas_aplicables".
+- Usá siempre JSON con campos: "intencion", "interpretacion", "marca", "modelo", "categoria", "productos_recomendados", "dudas", "validaciones", "resolucion_confusiones", "conclusion", "necesita_rebusqueda", "nueva_query_sugerida".
+"""
+
 TECH_SYSTEM_PROMPT = f"""
 Sos Fran, mecánico experto y vendedor premium de TERCOM.
 
@@ -2709,6 +2721,86 @@ NO inventes códigos ni productos, enfocate en el consejo técnico.
 # ------------------------------------------------------------------
 # GENERACIÓN DE RESPUESTAS
 # ------------------------------------------------------------------
+def _safe_json_parse(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            cleaned = text[text.find("{"):text.rfind("}") + 1]
+            return json.loads(cleaned)
+        except Exception:
+            return {}
+
+
+def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
+    try:
+        productos_compactos = [
+            {
+                "code": p.get("code"),
+                "name": p.get("name"),
+                "price": float(to_decimal_money(p.get("price_ars", 0))),
+                "brand": p.get("brand", ""),
+                "model": p.get("model", ""),
+            }
+            for p in (productos_filtrados or [])
+        ]
+
+        mensajes = [
+            {"role": "system", "content": system_prompt_interno},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "contexto": contexto,
+                        "productos_permitidos": productos_compactos,
+                        "historial_relevante": contexto.get("historial", []),
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=mensajes,
+                temperature=0.2,
+                max_tokens=450,
+            )
+
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.error(f"pensar_con_llm error: {e}")
+        return "{}"
+
+
+def responder_con_llm(system_prompt_cliente, razonamiento_interno):
+    try:
+        mensajes = [
+            {"role": "system", "content": system_prompt_cliente},
+            {
+                "role": "user",
+                "content": (
+                    "Generá la respuesta final para el cliente en WhatsApp usando este plan interno. "
+                    "NO muestres el plan ni reglas.\n\nPLAN INTERNO:\n"
+                    + razonamiento_interno
+                ),
+            },
+        ]
+
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=mensajes,
+                temperature=0.35,
+                max_tokens=600,
+            )
+
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.error(f"responder_con_llm error: {e}")
+        return "Uy, tuve un problema. ¿Me repetís?"
+
 def build_execution_summary(ctx):
     lines = []
     lines.append(f"Intent detectado: {ctx['intent_detected']}")
@@ -2769,51 +2861,43 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
 
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
-        msgs = build_full_history_prompt(phone, user_message, catalog_products, system_prompt)
+        history = get_history_since(phone, days=1, limit=12)
+        contexto = {
+            "mensaje_usuario": user_message,
+            "intent": execution_context.get("intent_detected", "unknown"),
+            "search_query": execution_context.get("search_query"),
+            "warnings": execution_context.get("warnings", []),
+            "historial": [{"role": h["role"], "content": h["content"]} for h in history[-8:]],
+            "metadata_catalogo": {"productos_total": len(catalog_products or [])},
+            "ultimo_contexto": execution_context,
+        }
 
-        user_lower = user_message.lower()
-        product_type = (
-            "cubierta" if any(k in user_lower for k in ("cubierta","neumatico","neumático","llanta","tire"))
-            else "batería" if any(k in user_lower for k in ("bateria","batería","battery","baterias","baterías"))
-            else "filtro" if any(k in user_lower for k in ("filtro","filter","filtros"))
-            else "cadena" if any(k in user_lower for k in ("cadena","chain"))
-            else "aceite" if any(k in user_lower for k in ("aceite","oil"))
-            else "bujía" if any(k in user_lower for k in ("bujia","bujía","spark"))
-            else "amortiguador" if any(k in user_lower for k in ("amort","amortiguador","shock","suspension","suspensión"))
-            else "repuesto"
+        plan_interno = pensar_con_llm(
+            system_prompt or INTERNAL_REASONING_PROMPT,
+            contexto,
+            catalog_products or [],
         )
 
-        msgs.insert(1, {
-            "role": "system",
-            "content": (
-                f"CLIENTE PIDIÓ: {product_type}\n\n"
-                "PRODUCTOS DISPONIBLES:\n" +
-                "\n".join([
-                    f"- {p['name']} ({p.get('code','')}) - {format_price(Decimal(str(p['price_ars'])))}"
-                    for p in catalog_products[:10]
-                ]) +
-                "\n\n⚠️ VALIDACIÓN CRÍTICA:\n"
-                f"1) Si NINGÚN producto de arriba es un/a {product_type}, NO LOS MENCIONES.\n"
-                f"2) En ese caso, decí: 'No tengo {product_type}s exactos, pero tengo estas alternativas reales del catálogo.'\n"
-                "3) Si SÍ hay productos que coinciden, listá solo ESOS.\n"
-                "4) SIEMPRE incluí el código entre paréntesis cuando menciones un producto."
-            )
-        })
+        parsed_plan = _safe_json_parse(plan_interno) if plan_interno else {}
 
-        exec_summary = build_execution_summary(execution_context)
-        msgs.insert(1, {"role": "system", "content": f"[RESULTADO DE BÚSQUEDA]\n{exec_summary}"})
+        if parsed_plan.get("necesita_rebusqueda") and parsed_plan.get("nueva_query_sugerida"):
+            nueva_query = parsed_plan.get("nueva_query_sugerida")
+            try:
+                semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+                if isinstance(semantic_results, dict):
+                    semantic_results = []
+                catalog_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+                contexto["search_query"] = nueva_query
+                plan_interno = pensar_con_llm(
+                    system_prompt or INTERNAL_REASONING_PROMPT,
+                    contexto,
+                    catalog_products or [],
+                )
+            except Exception as e:
+                logger.error(f"Re-búsqueda fallida: {e}")
 
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=msgs,
-                temperature=0.3,
-                max_tokens=500,
-            )
-        txt = (resp.choices[0].message.content or "").strip()
-        if not txt or len(txt) < 10:
-            return "Uy, tuve un problema. ¿Me repetís?"
-        return txt
+        respuesta = responder_con_llm(system_prompt or CITATION_ENFORCED_PROMPT, plan_interno)
+        return respuesta or "Uy, tuve un problema. ¿Me repetís?"
     except Exception as e:
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
         return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
@@ -2961,10 +3045,11 @@ def format_multi_search_response(results: dict) -> str | None:
     return None
 
 # =========================================================
-# AGENTE PRINCIPAL – VERSIÓN 3.13.0
+# ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
 # =========================================================
-def run_agent(phone, user_message):
+def orquestar_fran(mensaje_usuario, phone):
     start_time = time.time()
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
     save_message(phone, user_message, "user")
 
     if not rate_limit_check(phone):
@@ -3321,6 +3406,11 @@ def run_agent(phone, user_message):
     update_sales_phase_from_intent(phone, intent)
     return reply
 
+
+def run_agent(phone, user_message):
+    """Compatibilidad hacia atrás con el nombre anterior."""
+    return orquestar_fran(user_message, phone)
+
 # ------------------------------------------------------------------
 # MULTI-MENSAJE
 # ------------------------------------------------------------------
@@ -3395,7 +3485,7 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        reply = run_agent(from_number, message_body)
+        reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
@@ -3427,7 +3517,7 @@ def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.13.0",
+        "version": "3.14",
         "catalog_size": len(catalog) if catalog else 0,
         "architecture": "claude_inspired_families_hybrid_intents_context_v2",
         "features": [
@@ -3467,7 +3557,7 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("=" * 60)
-    logger.info("🚀 Iniciando Fran 3.13.0 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0")
+    logger.info("🚀 Iniciando Fran 3.14 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0 + doble LLM")
     logger.info("=" * 60)
     logger.info(f"Puerto: {port}")
     logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
@@ -3475,7 +3565,10 @@ if __name__ == "__main__":
     logger.info(f"Relevance min score: {RELEVANCE_MIN_SCORE}")
     logger.info(f"Quality thresholds: HIGH={QUALITY_HIGH_THRESHOLD}, MED={QUALITY_MEDIUM_THRESHOLD}")
     logger.info("=" * 60)
-    logger.info("Características nuevas en 3.13.0:")
+    logger.info("Características nuevas en 3.14:")
+    logger.info("  ✅ Doble llamada LLM (plan interno + respuesta final)")
+    logger.info("  ✅ Orquestador unificado orquestar_fran")
+    logger.info("  ✅ Validación de búsqueda con reintento sugerido por LLM")
     logger.info("  ✅ INTENTOS 2.0 (prompt ampliado, más sinónimos argentinos)")
     logger.info("  ✅ CONTEXTO 2.0 (pending_actions con cart_hash y ejecución real)")
     logger.info("  ✅ Mensajes más humanos (no dice 'no encontré' si hay alternativas)")
