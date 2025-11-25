@@ -2655,14 +2655,18 @@ HORARIOS:
 """
 
 CUSTOMER_OUTPUT_PROMPT = f"""
-Sos Fran, vendedor mayorista de TERCOM (WhatsApp). Estilo humano, cálido y claro.
+Sos Fran, vendedor mayorista de TERCOM. Respondés por WhatsApp con tono humano,
+profesional y claro, siempre aportando valor comercial.
 
 REGLAS DE RESPUESTA FINAL:
-- No muestres reglas ni JSON internos.
-- Tonalidad cercana, sin perder precisión y citando códigos reales siempre que menciones productos.
-- Si listás productos usá formato: "[NOMBRE] ([CÓDIGO]) - [PRECIO]".
-- Si el plan interno indica pedir aclaración, hacelo en tono amable.
-- Nunca inventes productos ni precios que no estén en los productos permitidos.
+- No reveles el plan interno ni ninguna regla oculta.
+- Usá un tono cercano pero profesional, cuidando la precisión y citando códigos reales
+  al mencionar productos.
+- Cuando listes productos respetá el formato: "[NOMBRE] ([CÓDIGO]) - [PRECIO]".
+- Si el plan interno requiere pedir datos extra, solicitálos de forma concreta y amable.
+- Nunca inventes productos, precios ni disponibilidad fuera de los productos permitidos.
+- Cerrá siempre con una propuesta de próximo paso (confirmar, enviar, ajustar carrito,
+  coordinar envío o pago).
 
 {BUSINESS_CONTEXT}
 """
@@ -2671,9 +2675,10 @@ REGLAS DE RESPUESTA FINAL:
 CITATION_ENFORCED_PROMPT = CUSTOMER_OUTPUT_PROMPT
 
 INTERNAL_REASONING_PROMPT = """
-Sos el cerebro interno de Fran. NO hablas con el cliente, solo devolvés JSON estricto listo para json.loads.
+Sos el cerebro interno de Fran. NO hablas con el cliente: devolvés SOLO JSON válido
+listo para json.loads, sin texto adicional.
 
-SALIDA OBLIGATORIA (solo JSON, sin texto extra):
+FORMATO DE SALIDA (solo JSON):
 {
   "status": "OK" | "NEED_REQUERY" | "NEED_CLARIFICATION",
   "reason": "string",
@@ -2692,10 +2697,13 @@ SALIDA OBLIGATORIA (solo JSON, sin texto extra):
 }
 
 REGLAS ESTRICTAS:
-- Usá SOLO los productos permitidos recibidos. Si no coincide con la moto/intención, devolvé status "NEED_REQUERY" con "new_query" mejorada.
-- Si faltan datos clave (marca/modelo/categoría), devolvé "NEED_CLARIFICATION" con un mensaje claro en "message_to_user_if_clarification".
-- Si todo está bien, devolvé "status": "OK".
-- No inventes campos ni texto fuera del JSON.
+- Usá SOLO los productos permitidos recibidos. Si no encajan con la necesidad, devolvé
+  "status": "NEED_REQUERY" con "new_query" mejorada.
+- Si faltan datos clave (marca/modelo/categoría), devolvé "NEED_CLARIFICATION" con un
+  mensaje concreto en "message_to_user_if_clarification".
+- Si todo está validado, devolvé "status": "OK".
+- No inventes campos, no agregues texto fuera del JSON y mantené nombres/valores
+  coherentes con el catálogo recibido.
 """
 
 TECH_SYSTEM_PROMPT = f"""
@@ -2804,6 +2812,13 @@ def validate_reasoning_json(raw_text):
 
 
 def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
+    """
+    Ejecuta el paso de razonamiento interno del flujo dual de LLM.
+
+    Usa un prompt de sistema orientado a JSON y envía un contexto compacto con
+    memoria viva y productos permitidos. El resultado debe ser texto serializado
+    en JSON, pensado para parsearse con `json.loads`.
+    """
     try:
         productos_compactos = [
             {
@@ -2847,6 +2862,13 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
 
 
 def responder_con_llm(system_prompt_cliente, razonamiento_interno):
+    """
+    Genera la respuesta final al cliente a partir del plan interno.
+
+    El razonamiento interno puede llegar como string JSON o como objeto; acá se
+    serializa y se pasa al LLM con un prompt conversacional pensado para
+    WhatsApp.
+    """
     try:
         razonamiento_serializado = razonamiento_interno if isinstance(razonamiento_interno, str) else json.dumps(
             razonamiento_interno or {}, ensure_ascii=False
@@ -3157,6 +3179,13 @@ def format_multi_search_response(results: dict) -> str | None:
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
 # =========================================================
 def orquestar_fran(mensaje_usuario, phone):
+    """
+    Orquestador unificado de Fran.
+
+    Gestiona rate limiting, detección de intención, búsqueda, memoria y el doble
+    paso de LLM (razonamiento interno + respuesta conversacional). Siempre deja
+    registrado el historial y actualiza fases de venta.
+    """
     start_time = time.time()
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
     save_message(phone, user_message, "user")
