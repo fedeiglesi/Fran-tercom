@@ -1056,11 +1056,25 @@ def get_last_search(phone):
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT products_json, query, metadata FROM last_search WHERE phone=?", (phone,))
+            cur.execute("SELECT products_json, query, metadata, timestamp FROM last_search WHERE phone=?", (phone,))
             row = cur.fetchone()
             if not row:
                 return None
-            return {"products": json.loads(row[0]), "query": row[1], "metadata": json.loads(row[2]) if row[2] else {}}
+
+            timestamp = datetime.fromisoformat(row[3])
+            age_minutes = (datetime.now() - timestamp).total_seconds() / 60
+
+            # Si pasaron más de 10 minutos, no usar ese contexto
+            if age_minutes > 10:
+                logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
+                return None
+
+            return {
+                "products": json.loads(row[0]),
+                "query": row[1],
+                "metadata": json.loads(row[2]) if row[2] else {},
+                "age_minutes": age_minutes
+            }
     except Exception as e:
         logger.error(f"get_last_search error: {e}")
         return None
