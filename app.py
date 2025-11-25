@@ -2946,8 +2946,8 @@ def run_agent(phone, user_message):
                     for p in allowed_products[:5]
                 ])
                 reply = (
-                    f"Dale, te muestro opciones reales del catálogo:\n\n{product_list}\n\n"
-                    "¿Cuál te sirve?"
+                    f"Dale, te paso opciones reales del catálogo para no pifiar:\n\n{product_list}\n\n"
+                    "¿Te sirve alguno? Si buscás otra cosa decime marca/modelo y te mando alternativas."
                 )
             else:
                 reply = "Encontré productos pero necesito más info. ¿Me pasás marca/modelo específico?"
@@ -2962,7 +2962,7 @@ def run_agent(phone, user_message):
                 ])
                 reply = (
                     f"Mirá, para no mezclar, te paso directamente lo que tengo en catálogo:\n\n{product_list}\n\n"
-                    "¿Cuál te sirve?"
+                    "¿Te sirve alguno? Si estás buscando otra variante avisame marca/modelo y te paso otras opciones."
                 )
         elif code_validation.get("warning") == "no_citations":
             logger.info("LLM no citó códigos (puede ser respuesta general válida)")
