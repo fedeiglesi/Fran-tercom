@@ -1355,6 +1355,7 @@ def load_catalog_enriched():
 
         idx_code = _extract_column(header, ["code", "codigo", "id"])
         idx_name = _extract_column(header, ["description", "descripcion", "producto", "nombre", "name"])
+        idx_name_normalized = _extract_column(header, ["descripcion_normalizada", "description_normalized", "normalized_name"])
         idx_usd = _extract_column(header, ["price_importado", "precio_importado", "usd", "dolar", "precio en dolares", "price_usd"])
         idx_ars = _extract_column(header, ["price_nacional", "precio_nacional", "ars", "pesos", "precio en pesos", "price_ars"])
         idx_brand = _extract_column(header, ["marca_final", "marca", "brand"])
@@ -1367,6 +1368,7 @@ def load_catalog_enriched():
         idx_family_name = _extract_column(header, ["familia_nombre", "familia", "family", "familia_final"])
         idx_family_code = _extract_column(header, ["familia_codigo", "codigo_familia", "family_code"])
         idx_provider_name = _extract_column(header, ["proveedor_nombre", "proveedor", "provider", "proveedor_final"])
+        idx_displacement = _extract_column(header, ["cilindrada", "cc", "engine_cc"])
 
         exchange = get_exchange_rate()
         catalog = []
@@ -1377,6 +1379,11 @@ def load_catalog_enriched():
             try:
                 code = line[idx_code].strip() if (idx_code is not None and idx_code < len(line)) else ""
                 name = line[idx_name].strip() if (idx_name is not None and idx_name < len(line)) else ""
+                normalized_name = (
+                    line[idx_name_normalized].strip()
+                    if (idx_name_normalized is not None and idx_name_normalized < len(line))
+                    else ""
+                )
 
                 price_usd = to_decimal_money(line[idx_usd]) if (idx_usd is not None and idx_usd < len(line)) else Decimal("0")
                 price_ars = to_decimal_money(line[idx_ars]) if (idx_ars is not None and idx_ars < len(line)) else Decimal("0")
@@ -1394,9 +1401,10 @@ def load_catalog_enriched():
                 family_name = line[idx_family_name].strip() if (idx_family_name is not None and idx_family_name < len(line)) else ""
                 family_code = line[idx_family_code].strip() if (idx_family_code is not None and idx_family_code < len(line)) else ""
                 provider_name = line[idx_provider_name].strip() if (idx_provider_name is not None and idx_provider_name < len(line)) else ""
+                displacement = line[idx_displacement].strip() if (idx_displacement is not None and idx_displacement < len(line)) else ""
 
                 search_text_parts = [
-                    name,
+                    normalized_name or name,
                     f"familia {family_name}" if family_name else "",
                     f"marca {brand}" if brand else "",
                     f"modelo {model}" if model else "",
@@ -1406,6 +1414,7 @@ def load_catalog_enriched():
                     f"tambien llamado {alt_names}" if alt_names else "",
                     f"palabras clave {keywords}" if keywords else "",
                     f"proveedor {provider_name}" if provider_name else "",
+                    f"cilindrada {displacement}" if displacement else "",
                 ]
                 search_text = " ".join([p for p in search_text_parts if p]).strip()
 
@@ -1414,7 +1423,8 @@ def load_catalog_enriched():
 
                 catalog.append({
                     "code": code,
-                    "name": name,
+                    "name": normalized_name or name,
+                    "raw_name": name,
                     "price_usd": float(price_usd),
                     "price_ars": float(price_ars),
                     "brand": brand,
@@ -1427,6 +1437,7 @@ def load_catalog_enriched():
                     "family_name": family_name,
                     "family_code": family_code,
                     "provider_name": provider_name,
+                    "displacement": displacement,
                     "search_text": search_text or name,
                 })
             except Exception as e:
