@@ -618,7 +618,17 @@ def detect_families_in_query(query: str):
 def parse_query_v2(query: str) -> dict:
     q = normalize_search_query(query)
     tokens = q.split()
-    out = {"brands": [], "models": [], "category": None, "families": [], "raw": q}
+    out = {
+        "brands": [],
+        "models": [],
+        "category": None,
+        "families": [],
+        "raw": q,
+        "moto_brands": [],
+        "moto_models": [],
+        "displacement": None,
+        "final_category": None,
+    }
 
     for cat, variants in CATEGORY_MAP.items():
         if any(v in q for v in variants):
@@ -644,6 +654,10 @@ def filter_catalog(catalog, parsed):
     models = set(parsed.get("models") or [])
     cat = parsed.get("category")
     families = set(parsed.get("families") or [])
+    moto_brands = set(parsed.get("moto_brands") or [])
+    moto_models = set(parsed.get("moto_models") or [])
+    displacement = parsed.get("displacement")
+    final_category = parsed.get("final_category")
 
     def _match(p):
         if brands:
@@ -651,9 +665,19 @@ def filter_catalog(catalog, parsed):
             if not any(b in p_brand for b in brands):
                 return False
 
+        if moto_brands:
+            p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
+            if not any(b in p_moto_brand for b in moto_brands):
+                return False
+
         if models:
             p_model = normalize_search_query(p.get("model", ""))
             if not any(m in p_model for m in models):
+                return False
+
+        if moto_models:
+            p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
+            if not any(m in p_moto_model for m in moto_models):
                 return False
 
         if families:
@@ -666,6 +690,20 @@ def filter_catalog(catalog, parsed):
         if cat:
             p_cat = normalize_search_query(p.get("category", ""))
             if not any(v in p_cat for v in CATEGORY_MAP.get(cat, [cat])):
+                return False
+
+        if final_category:
+            p_final_cat = normalize_search_query(p.get("final_category", "") or p.get("category", ""))
+            if not p_final_cat:
+                return False
+            if final_category not in p_final_cat:
+                return False
+
+        if displacement:
+            p_disp = normalize_search_query(p.get("displacement", ""))
+            if not p_disp:
+                return False
+            if displacement not in p_disp:
                 return False
 
         return True
@@ -1358,9 +1396,12 @@ def load_catalog_enriched():
         idx_name_normalized = _extract_column(header, ["descripcion_normalizada", "description_normalized", "normalized_name"])
         idx_usd = _extract_column(header, ["price_importado", "precio_importado", "usd", "dolar", "precio en dolares", "price_usd"])
         idx_ars = _extract_column(header, ["price_nacional", "precio_nacional", "ars", "pesos", "precio en pesos", "price_ars"])
-        idx_brand = _extract_column(header, ["marca_final", "marca", "brand"])
-        idx_model = _extract_column(header, ["modelo_final", "modelo", "model"])
-        idx_category = _extract_column(header, ["categoria_nueva", "categoria", "category", "rubro"])
+        idx_brand = _extract_column(header, ["marca_final", "marca", "brand", "marca_moto"])
+        idx_moto_brand = _extract_column(header, ["marca_moto", "marca moto"])
+        idx_model = _extract_column(header, ["modelo_final", "modelo", "model", "modelo_moto"])
+        idx_moto_model = _extract_column(header, ["modelo_moto", "modelo moto"])
+        idx_category = _extract_column(header, ["categoria_nueva", "categoria", "category", "rubro", "categoria_final"])
+        idx_final_category = _extract_column(header, ["categoria_final", "categoria final"])
         idx_keywords = _extract_column(header, ["keywords", "palabras clave", "sinonimos"])
         idx_oem = _extract_column(header, ["oem", "codigo oem", "original"])
         idx_alt = _extract_column(header, ["alt_names", "nombres alternativos", "alias"])
@@ -1392,8 +1433,11 @@ def load_catalog_enriched():
                     price_ars = (price_usd * exchange).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
                 brand = line[idx_brand].strip() if (idx_brand is not None and idx_brand < len(line)) else ""
+                moto_brand = line[idx_moto_brand].strip() if (idx_moto_brand is not None and idx_moto_brand < len(line)) else ""
                 model = line[idx_model].strip() if (idx_model is not None and idx_model < len(line)) else ""
+                moto_model = line[idx_moto_model].strip() if (idx_moto_model is not None and idx_moto_model < len(line)) else ""
                 category = line[idx_category].strip() if (idx_category is not None and idx_category < len(line)) else ""
+                final_category = line[idx_final_category].strip() if (idx_final_category is not None and idx_final_category < len(line)) else ""
                 keywords = line[idx_keywords].strip() if (idx_keywords is not None and idx_keywords < len(line)) else ""
                 oem = line[idx_oem].strip() if (idx_oem is not None and idx_oem < len(line)) else ""
                 alt_names = line[idx_alt].strip() if (idx_alt is not None and idx_alt < len(line)) else ""
@@ -1403,12 +1447,19 @@ def load_catalog_enriched():
                 provider_name = line[idx_provider_name].strip() if (idx_provider_name is not None and idx_provider_name < len(line)) else ""
                 displacement = line[idx_displacement].strip() if (idx_displacement is not None and idx_displacement < len(line)) else ""
 
+                effective_brand = brand or moto_brand
+                effective_model = model or moto_model
+                effective_category = category or final_category
+
                 search_text_parts = [
                     normalized_name or name,
                     f"familia {family_name}" if family_name else "",
-                    f"marca {brand}" if brand else "",
-                    f"modelo {model}" if model else "",
-                    f"categoria {category}" if category else "",
+                    f"marca {effective_brand}" if effective_brand else "",
+                    f"modelo {effective_model}" if effective_model else "",
+                    f"categoria {effective_category}" if effective_category else "",
+                    f"marca moto {moto_brand}" if moto_brand else "",
+                    f"modelo moto {moto_model}" if moto_model else "",
+                    f"categoria final {final_category}" if final_category else "",
                     f"aplica a {vehicle_type}" if vehicle_type else "",
                     f"equivalente oem {oem}" if oem else "",
                     f"tambien llamado {alt_names}" if alt_names else "",
@@ -1427,9 +1478,12 @@ def load_catalog_enriched():
                     "raw_name": name,
                     "price_usd": float(price_usd),
                     "price_ars": float(price_ars),
-                    "brand": brand,
-                    "model": model,
-                    "category": category,
+                    "brand": effective_brand,
+                    "moto_brand": moto_brand,
+                    "model": effective_model,
+                    "moto_model": moto_model,
+                    "category": effective_category,
+                    "final_category": final_category,
                     "keywords": keywords,
                     "oem": oem,
                     "alt_names": alt_names,
@@ -1696,12 +1750,37 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def hybrid_search(query: str, top_k: int = MAX_SEARCH_RESULTS) -> list:
+def hybrid_search(query: str, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list:
     catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
     if not catalog or not query:
         return []
 
     parsed = parse_query_v2(query)
+
+    if metadata_filters:
+        def _norm_list(val):
+            if val is None:
+                return []
+            if isinstance(val, (list, tuple, set)):
+                seq = val
+            else:
+                seq = [val]
+            return [normalize_search_query(str(v)) for v in seq if str(v).strip()]
+
+        def _norm_str(val):
+            if val is None:
+                return None
+            s = str(val).strip()
+            return normalize_search_query(s) if s else None
+
+        meta = metadata_filters or {}
+        parsed["final_category"] = _norm_str(meta.get("categoria_final") or meta.get("final_category") or parsed.get("final_category"))
+        parsed["category"] = _norm_str(meta.get("categoria") or meta.get("category") or parsed.get("category")) or parsed.get("category")
+        parsed["moto_brands"] = _norm_list(meta.get("marca_moto") or meta.get("moto_brand") or meta.get("moto_brands") or parsed.get("moto_brands"))
+        parsed["moto_models"] = _norm_list(meta.get("modelo_moto") or meta.get("moto_model") or meta.get("moto_models") or parsed.get("moto_models"))
+        displacement_val = _norm_str(meta.get("cilindrada") or meta.get("displacement") or parsed.get("displacement"))
+        if displacement_val:
+            parsed["displacement"] = displacement_val
 
     bm25_results = []
     if bm25_index:
