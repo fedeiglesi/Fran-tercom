@@ -2654,54 +2654,48 @@ HORARIOS:
 - Sab: 9-13hs
 """
 
-CITATION_ENFORCED_PROMPT = f"""
-Sos Fran, vendedor mayorista de TERCOM (motopartes, Argentina).
+CUSTOMER_OUTPUT_PROMPT = f"""
+Sos Fran, vendedor mayorista de TERCOM (WhatsApp). Estilo humano, cálido y claro.
 
-=== REGLA DE CITACIÓN OBLIGATORIA ===
-NUNCA menciones un producto sin su código completo.
-
-FORMATO OBLIGATORIO:
-"Tengo [NOMBRE PRODUCTO] (código [CÓDIGO]) - [PRECIO]"
-
-Ejemplos CORRECTOS:
-✅ "Tengo ACEITE YAMALUBE 10W40 (1234/56789-012) - $15.000"
-✅ "Te sirve BATERÍA YUASA YTX9 (5678/12345-678) - $45.000"
-
-Ejemplos INCORRECTOS:
-❌ "Tengo aceite Yamalube" (falta código)
-❌ "Hay varias baterías Yuasa" (no específica cuál)
-❌ "Tenemos filtros de aire" (no lista productos concretos)
-
-Si no tenés el código de un producto, NO LO MENCIONES.
-
-=== BREVEDAD EXTREMA ===
-LIMITE: 5 líneas MAX (salvo listados de productos)
-
-PLANTILLA:
-Línea 1: Entender qué busca
-Líneas 2-3: Productos con códigos y precios
-Línea 4-5: Pregunta de cierre
-
-=== GROUNDING ESTRICTO ===
-SOLO podés mencionar productos que están en [TOP N PRODUCTOS].
-Si el cliente pidió X y NO está en tu lista → decí "No tengo X exacto, pero tengo estas alternativas:"
+REGLAS DE RESPUESTA FINAL:
+- No muestres reglas ni JSON internos.
+- Tonalidad cercana, sin perder precisión y citando códigos reales siempre que menciones productos.
+- Si listás productos usá formato: "[NOMBRE] ([CÓDIGO]) - [PRECIO]".
+- Si el plan interno indica pedir aclaración, hacelo en tono amable.
+- Nunca inventes productos ni precios que no estén en los productos permitidos.
 
 {BUSINESS_CONTEXT}
-
-Sos vendedor que SABE de motos, ENTIENDE a la gente, CITA productos reales.
 """
 
-INTERNAL_REASONING_PROMPT = """
-Sos el cerebro interno de Fran (no hablas con el cliente). Necesitás generar un PLAN INTERNO estructurado en JSON.
-Entradas: historial relevante, query parseada, correcciones, contexto de catálogo, productos permitidos y restricciones del negocio.
+# Compatibilidad hacia atrás
+CITATION_ENFORCED_PROMPT = CUSTOMER_OUTPUT_PROMPT
 
-REGLAS:
-- Nunca respondas al cliente, solo devolvé un plan interno.
-- Validá si la búsqueda responde al pedido; si no, propone una nueva query de búsqueda en el campo "nueva_query_sugerida" y marcá "necesita_rebusqueda": true.
-- Incluí interpretación precisa, intención detectada, marca, modelo, cilindrada, categorías, códigos OEM si aparecen, productos candidatos y cantidades.
-- Explicá cómo manejar pedidos ambiguos ("dos de cada", "para otra moto", mezclas de productos) en el campo "resolucion_confusiones".
-- Señalá reglas críticas a aplicar (citación de código, filtros, límites de precios) en "reglas_aplicables".
-- Usá siempre JSON con campos: "intencion", "interpretacion", "marca", "modelo", "categoria", "productos_recomendados", "dudas", "validaciones", "resolucion_confusiones", "conclusion", "necesita_rebusqueda", "nueva_query_sugerida".
+INTERNAL_REASONING_PROMPT = """
+Sos el cerebro interno de Fran. NO hablas con el cliente, solo devolvés JSON estricto listo para json.loads.
+
+SALIDA OBLIGATORIA (solo JSON, sin texto extra):
+{
+  "status": "OK" | "NEED_REQUERY" | "NEED_CLARIFICATION",
+  "reason": "string",
+  "products_decision": [{"code": str, "name": str, "qty": int, "why": str}],
+  "new_query": "string | null",
+  "message_to_user_if_clarification": "string",
+  "intent": "string",
+  "brand": "string",
+  "model": "string",
+  "category": "string",
+  "displacement_cc": "string",
+  "pending_actions": list,
+  "cart_state": object,
+  "history_summary": "string",
+  "most_recent_bike": "string"
+}
+
+REGLAS ESTRICTAS:
+- Usá SOLO los productos permitidos recibidos. Si no coincide con la moto/intención, devolvé status "NEED_REQUERY" con "new_query" mejorada.
+- Si faltan datos clave (marca/modelo/categoría), devolvé "NEED_CLARIFICATION" con un mensaje claro en "message_to_user_if_clarification".
+- Si todo está bien, devolvé "status": "OK".
+- No inventes campos ni texto fuera del JSON.
 """
 
 TECH_SYSTEM_PROMPT = f"""
@@ -2732,6 +2726,83 @@ def _safe_json_parse(text):
             return {}
 
 
+def build_live_memory(phone, user_message, intent_data, productos_filtrados):
+    history = get_history_since(phone, days=14, limit=400)
+    search_history = get_search_history(phone, limit=5)
+    last_search = get_last_search(phone) or {}
+    cart_items = cart_get(phone)
+
+    last_messages = []
+    for h in history[-10:]:
+        prefix = "Yo" if h["role"] == "user" else "Fran"
+        last_messages.append(f"{prefix}: {h['content'][:220]}")
+
+    moto_habits = []
+    for record in search_history:
+        q = record.get("query", "")
+        if q:
+            moto_habits.append(q[:80])
+
+    cart_summary = [
+        {
+            "code": code,
+            "qty": qty,
+            "name": name,
+            "price": float(to_decimal_money(price)),
+        }
+        for code, qty, name, price in (cart_items or [])
+    ]
+
+    last_catalog_context = last_search.get("products", [])[:5]
+    most_recent_bike = ""
+    if last_catalog_context:
+        moto = last_catalog_context[0]
+        most_recent_bike = f"{moto.get('brand', '')} {moto.get('model', '')}".strip()
+
+    memory = {
+        "history_summary": " \n".join(last_messages[-8:]),
+        "habitual_queries": moto_habits,
+        "last_search_query": last_search.get("query", ""),
+        "cart_state": cart_summary,
+        "pending_action": get_pending_action(phone),
+        "most_recent_bike": most_recent_bike,
+        "intent_detected": intent_data.get("intent", "unknown"),
+        "allowed_products_snapshot": [
+            {
+                "code": p.get("code"),
+                "name": p.get("name"),
+                "brand": p.get("brand", ""),
+                "model": p.get("model", ""),
+                "price": float(to_decimal_money(p.get("price_ars", 0))),
+            }
+            for p in (productos_filtrados or [])[:10]
+        ],
+    }
+
+    return memory
+
+
+def validate_reasoning_json(raw_text):
+    parsed = _safe_json_parse(raw_text or "")
+    if not isinstance(parsed, dict):
+        return None
+
+    status = parsed.get("status")
+    if status not in {"OK", "NEED_REQUERY", "NEED_CLARIFICATION"}:
+        return None
+
+    if status == "NEED_REQUERY" and not parsed.get("new_query"):
+        return None
+
+    if status == "NEED_CLARIFICATION" and not parsed.get("message_to_user_if_clarification"):
+        return None
+
+    if not isinstance(parsed.get("products_decision", []), list):
+        parsed["products_decision"] = []
+
+    return parsed
+
+
 def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
     try:
         productos_compactos = [
@@ -2754,6 +2825,7 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
                         "contexto": contexto,
                         "productos_permitidos": productos_compactos,
                         "historial_relevante": contexto.get("historial", []),
+                        "recordatorio": "DEVOLVÉ SOLO JSON, SIN TEXTO ADICIONAL",
                     },
                     ensure_ascii=False,
                 ),
@@ -2764,8 +2836,8 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=mensajes,
-                temperature=0.2,
-                max_tokens=450,
+                temperature=0.15,
+                max_tokens=600,
             )
 
         return (resp.choices[0].message.content or "").strip()
@@ -2776,6 +2848,9 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
 
 def responder_con_llm(system_prompt_cliente, razonamiento_interno):
     try:
+        razonamiento_serializado = razonamiento_interno if isinstance(razonamiento_interno, str) else json.dumps(
+            razonamiento_interno or {}, ensure_ascii=False
+        )
         mensajes = [
             {"role": "system", "content": system_prompt_cliente},
             {
@@ -2783,7 +2858,7 @@ def responder_con_llm(system_prompt_cliente, razonamiento_interno):
                 "content": (
                     "Generá la respuesta final para el cliente en WhatsApp usando este plan interno. "
                     "NO muestres el plan ni reglas.\n\nPLAN INTERNO:\n"
-                    + razonamiento_interno
+                    + razonamiento_serializado
                 ),
             },
         ]
@@ -2862,45 +2937,79 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
+        intent_info = execution_context.get("intent_details", {"intent": execution_context.get("intent_detected", "unknown")})
+        memory = build_live_memory(phone, user_message, intent_info, catalog_products)
         contexto = {
             "mensaje_usuario": user_message,
-            "intent": execution_context.get("intent_detected", "unknown"),
+            "intent": intent_info.get("intent", execution_context.get("intent_detected", "unknown")),
             "search_query": execution_context.get("search_query"),
             "warnings": execution_context.get("warnings", []),
             "historial": [{"role": h["role"], "content": h["content"]} for h in history[-8:]],
             "metadata_catalogo": {"productos_total": len(catalog_products or [])},
             "ultimo_contexto": execution_context,
+            "memoria_viva": memory,
+            "pending_actions": memory.get("pending_action"),
+            "cart_state": memory.get("cart_state", []),
+            "most_recent_bike": memory.get("most_recent_bike", ""),
         }
 
+        productos_permitidos = catalog_products or []
         plan_interno = pensar_con_llm(
             system_prompt or INTERNAL_REASONING_PROMPT,
             contexto,
-            catalog_products or [],
+            productos_permitidos,
         )
 
-        parsed_plan = _safe_json_parse(plan_interno) if plan_interno else {}
+        parsed_plan = validate_reasoning_json(plan_interno)
 
-        if parsed_plan.get("necesita_rebusqueda") and parsed_plan.get("nueva_query_sugerida"):
-            nueva_query = parsed_plan.get("nueva_query_sugerida")
+        requery_done = False
+        while parsed_plan and parsed_plan.get("status") == "NEED_REQUERY" and not requery_done:
+            requery_done = True
+            nueva_query = parsed_plan.get("new_query")
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
                 if isinstance(semantic_results, dict):
                     semantic_results = []
-                catalog_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
-                contexto["search_query"] = nueva_query
+                productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+                execution_context["search_query"] = nueva_query
+                memory = build_live_memory(phone, user_message, intent_info, productos_permitidos)
+                contexto.update({
+                    "search_query": nueva_query,
+                    "memoria_viva": memory,
+                    "metadata_catalogo": {"productos_total": len(productos_permitidos)},
+                    "cart_state": memory.get("cart_state", []),
+                })
                 plan_interno = pensar_con_llm(
                     system_prompt or INTERNAL_REASONING_PROMPT,
                     contexto,
-                    catalog_products or [],
+                    productos_permitidos,
                 )
+                parsed_plan = validate_reasoning_json(plan_interno)
             except Exception as e:
                 logger.error(f"Re-búsqueda fallida: {e}")
+                parsed_plan = None
 
-        respuesta = responder_con_llm(system_prompt or CITATION_ENFORCED_PROMPT, plan_interno)
+        if not parsed_plan:
+            logger.warning("Fallback: razonamiento inválido, usando catálogo real")
+            if productos_permitidos:
+                listado = format_search_results(productos_permitidos[:5])
+                return (
+                    "Te dejo opciones reales del catálogo mientras confirmo bien tu pedido:\n\n"
+                    f"{listado}\n\n"
+                    "¿Alguna te sirve o querés que refine por marca/modelo/categoría?"
+                )
+            return "Necesito un dato más para ayudarte: marca, modelo o categoría de la moto."
+
+        status = parsed_plan.get("status")
+        if status == "NEED_CLARIFICATION":
+            return parsed_plan.get("message_to_user_if_clarification") or "Pasame marca/modelo/año así lo busco bien."
+
+        razonamiento_final = json.dumps(parsed_plan, ensure_ascii=False)
+        respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
         return respuesta or "Uy, tuve un problema. ¿Me repetís?"
     except Exception as e:
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
-        return "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
+        return "Estoy ajustando el sistema, ¿me repetís el pedido con marca y modelo?"
 
 
 def build_tech_expert_answer(phone, user_message):
@@ -3066,6 +3175,7 @@ def orquestar_fran(mensaje_usuario, phone):
 
     execution_context = {
         "intent_detected": intent,
+        "intent_details": intent_data,
         "search_query": raw_query_for_search,
         "search_executed": False,
         "products_found": 0,
