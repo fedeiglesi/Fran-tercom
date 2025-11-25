@@ -487,6 +487,9 @@ AUTOCORRECT_VOCAB = _build_autocorrect_vocab()
 _BRANDS_NORMALIZED = {normalize_search_query(b) for b in BRAND_LIST}
 _MODELS_NORMALIZED = {normalize_search_query(m) for m in MODEL_LIST}
 
+_BRAND_NORMALIZED_MAP = {normalize_search_query(b): b for b in BRAND_LIST}
+_MODEL_NORMALIZED_MAP = {normalize_search_query(m): m for m in MODEL_LIST}
+
 
 def _looks_like_code_or_number(token: str) -> bool:
     if not token:
@@ -522,6 +525,28 @@ def autocorrect_keywords(text: str):
 
         if len(base) <= 3:
             new_tokens.append(raw)
+            continue
+
+        # Correcciones específicas para marcas/modelos mal tipeados (p.ej. "gonda" → "honda")
+        brand_suggestion = None
+        model_suggestion = None
+        try:
+            brand_suggestion = process.extractOne(base, _BRANDS_NORMALIZED, scorer=fuzz.ratio)
+            model_suggestion = process.extractOne(base, _MODELS_NORMALIZED, scorer=fuzz.ratio)
+        except Exception:
+            brand_suggestion = None
+            model_suggestion = None
+
+        if brand_suggestion and brand_suggestion[1] >= 82:
+            corrected = _BRAND_NORMALIZED_MAP.get(brand_suggestion[0], brand_suggestion[0])
+            new_tokens.append(corrected)
+            corrections.append(f"{raw}→{corrected}")
+            continue
+
+        if model_suggestion and model_suggestion[1] >= 85:
+            corrected = _MODEL_NORMALIZED_MAP.get(model_suggestion[0], model_suggestion[0])
+            new_tokens.append(corrected)
+            corrections.append(f"{raw}→{corrected}")
             continue
 
         try:
