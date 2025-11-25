@@ -438,6 +438,41 @@ def validate_mentioned_names(response_text: str, allowed_products: list) -> dict
 
     return {"valid": True}
 
+
+def validate_and_fix_response(reply: str, allowed_products: list, phone: str, execution_context: dict) -> str:
+    """
+    Valida la respuesta y la regenera si tiene alucinaciones.
+    """
+    code_validation = validate_response_codes(reply, allowed_products)
+    name_validation = validate_mentioned_names(reply, allowed_products)
+
+    execution_context["validation"] = {
+        "codes": code_validation,
+        "names": name_validation
+    }
+
+    if not code_validation.get("valid") or not name_validation.get("valid"):
+        logger.warning("Respuesta con alucinaciones detectadas, regenerando...")
+
+        execution_context["regenerated"] = execution_context.get("regenerated", 0) + 1
+        save_message(phone, reply, "assistant_faulty")
+
+        if allowed_products[:5]:
+            product_list = "\n".join([
+                f"• {p['name']} (código {p['code']}) - {format_price(p['price_ars'])}"
+                for p in allowed_products[:5]
+            ])
+
+            return (
+                f"Mirá, te paso lo que tengo en catálogo para lo que buscás:\n\n"
+                f"{product_list}\n\n"
+                f"¿Alguno te sirve? Si necesitás otra cosa decime marca/modelo específico."
+            )
+
+        return "No encontré coincidencias exactas. Dame más detalles (marca/modelo/año) y te busco opciones precisas."
+
+    return reply
+
 # ------------------------------------------------------------
 # AUTOCORRECTOR
 # ------------------------------------------------------------
@@ -3644,38 +3679,7 @@ def orquestar_fran(mensaje_usuario, phone):
     # ------------------------------------------------------
     if products:
         allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
-        code_validation = validate_response_codes(reply, allowed_products)
-        name_validation = validate_mentioned_names(reply, allowed_products)
-
-        if not code_validation["valid"]:
-            logger.error(f"⚠️ LLM alucinó códigos: {code_validation.get('hallucinated_codes', [])}")
-
-            if allowed_products[:5]:
-                product_list = "\n".join([
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in allowed_products[:5]
-                ])
-                reply = (
-                    f"Dale, te paso opciones reales del catálogo para no pifiar:\n\n{product_list}\n\n"
-                    "¿Te sirve alguno? Si buscás otra cosa decime marca/modelo y te mando alternativas."
-                )
-            else:
-                reply = "Encontré productos pero necesito más info. ¿Me pasás marca/modelo específico?"
-
-        elif not name_validation["valid"]:
-            logger.warning(f"⚠️ LLM mencionó productos dudosos: {name_validation.get('hallucinated_names', [])}")
-
-            if allowed_products[:5]:
-                product_list = "\n".join([
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in allowed_products[:5]
-                ])
-                reply = (
-                    f"Mirá, para no mezclar, te paso directamente lo que tengo en catálogo:\n\n{product_list}\n\n"
-                    "¿Te sirve alguno? Si estás buscando otra variante avisame marca/modelo y te paso otras opciones."
-                )
-        elif code_validation.get("warning") == "no_citations":
-            logger.info("LLM no citó códigos (puede ser respuesta general válida)")
+        reply = validate_and_fix_response(reply, allowed_products, phone, execution_context)
 
     # ------------------------------------------------------
     # Enviar listados largos por chunks
