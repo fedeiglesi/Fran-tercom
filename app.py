@@ -13,7 +13,7 @@
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from collections import defaultdict
+from collections import defaultdict, Counter
 from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock, Semaphore
@@ -2919,6 +2919,42 @@ def build_live_memory(phone, user_message, intent_data, productos_filtrados):
     return memory
 
 
+def build_enriched_context(phone, user_message, intent_data, productos_filtrados):
+    """
+    Construye memoria con inferencias adicionales: infiere moto habitual y patrones de compra.
+    """
+
+    memory = build_live_memory(phone, user_message, intent_data, productos_filtrados)
+
+    if not memory.get("most_recent_bike"):
+        for pattern in memory.get("habitual_queries", []):
+            parsed = parse_query_v2(pattern, phone)
+            motos_detectadas = parsed.get("motos_detectadas") or []
+            if motos_detectadas:
+                moto = motos_detectadas[0]
+                brand = moto.get("brand", "").strip()
+                model = moto.get("model", "").strip()
+                memory["most_recent_bike"] = f"{brand} {model}".strip()
+                if memory["most_recent_bike"]:
+                    break
+
+    if memory.get("cart_state"):
+        categories = [item.get("category", "") for item in memory["cart_state"]]
+        brands = [item.get("brand", "") for item in memory["cart_state"] if item.get("brand")]
+        main_category = None
+        if categories:
+            counts = Counter([c for c in categories if c])
+            if counts:
+                main_category = counts.most_common(1)[0][0]
+        memory["purchase_pattern"] = {
+            "main_category": main_category,
+            "avg_order_size": len(memory["cart_state"]),
+            "frequent_brands": sorted(set(brands)),
+        }
+
+    return memory
+
+
 def validate_reasoning_json(raw_text):
     parsed = _safe_json_parse(raw_text or "")
     if not isinstance(parsed, dict):
@@ -3144,7 +3180,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
     try:
         history = get_history_since(phone, days=1, limit=12)
         intent_info = execution_context.get("intent_details", {"intent": execution_context.get("intent_detected", "unknown")})
-        memory = build_live_memory(phone, user_message, intent_info, catalog_products)
+        memory = build_enriched_context(phone, user_message, intent_info, catalog_products)
         contexto = {
             "mensaje_usuario": user_message,
             "intent": intent_info.get("intent", execution_context.get("intent_detected", "unknown")),
@@ -3178,7 +3214,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                     semantic_results = []
                 productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
                 execution_context["search_query"] = nueva_query
-                memory = build_live_memory(phone, user_message, intent_info, productos_permitidos)
+                memory = build_enriched_context(phone, user_message, intent_info, productos_permitidos)
                 contexto.update({
                     "search_query": nueva_query,
                     "memoria_viva": memory,
