@@ -2811,6 +2811,61 @@ def validate_reasoning_json(raw_text):
     return parsed
 
 
+def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
+    """
+    Convierte el plan JSON en acciones concretas usando sólo productos permitidos.
+    Ejecuta side-effects como guardar contexto de moto y devuelve un snapshot
+    seguro para el segundo paso de LLM.
+    """
+    try:
+        if not parsed_plan or parsed_plan.get("status") != "OK":
+            return None
+
+        productos_permitidos_map = {
+            str(p.get("code")): p for p in (productos_permitidos or []) if p.get("code")
+        }
+
+        productos_seleccionados = []
+        for decision in parsed_plan.get("products_decision", []):
+            code = decision.get("code")
+            if not code:
+                continue
+
+            producto = productos_permitidos_map.get(str(code))
+            if not producto:
+                continue
+
+            try:
+                qty_sugerida = max(1, int(decision.get("qty", 1)))
+            except Exception:
+                qty_sugerida = 1
+
+            productos_seleccionados.append({
+                **producto,
+                "qty_sugerida": qty_sugerida,
+                "razon": decision.get("why", ""),
+                "decision_score": decision.get("score"),
+            })
+
+        if parsed_plan.get("pending_actions"):
+            for action in parsed_plan.get("pending_actions", []):
+                action_type = action.get("type")
+                if action_type == "save_moto_context":
+                    save_moto_context(phone, action.get("brand", ""), action.get("model", ""))
+
+        return {
+            "productos_finales": productos_seleccionados,
+            "metadata": {
+                "brand": parsed_plan.get("brand"),
+                "model": parsed_plan.get("model"),
+                "category": parsed_plan.get("category"),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error ejecutando plan interno: {e}")
+        return None
+
+
 def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
     """
     Ejecuta el paso de razonamiento interno del flujo dual de LLM.
@@ -3026,7 +3081,8 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         if status == "NEED_CLARIFICATION":
             return parsed_plan.get("message_to_user_if_clarification") or "Pasame marca/modelo/año así lo busco bien."
 
-        razonamiento_final = json.dumps(parsed_plan, ensure_ascii=False)
+        plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, productos_permitidos)
+        razonamiento_final = json.dumps({**parsed_plan, **(plan_ejecutado or {})}, ensure_ascii=False)
         respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
         return respuesta or "Uy, tuve un problema. ¿Me repetís?"
     except Exception as e:
