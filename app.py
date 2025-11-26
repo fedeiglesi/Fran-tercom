@@ -29,7 +29,7 @@ import faiss
 import numpy as np
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
-from cachetools import TTLCache
+from cachetools import LRUCache
 
 load_dotenv()
 app = Flask(__name__)
@@ -144,7 +144,7 @@ _catalog_lock = Lock()
 _embeddings_cache_lock = Lock()
 
 # Cache de fuzzy matching para post-validation
-_fuzzy_match_cache = TTLCache(maxsize=5000, ttl=3600)
+_fuzzy_match_cache = LRUCache(maxsize=20000)
 
 # Índice de familias (global)
 FAMILIES_INDEX = []
@@ -458,6 +458,9 @@ def validate_and_fix_response(reply: str, allowed_products: list, phone: str, ex
     if not code_validation.get("valid") or not name_validation.get("valid"):
         logger.warning("Respuesta con alucinaciones detectadas, regenerando...")
 
+        if execution_context.get("regenerated", 0) >= 2:
+            return "Tuve problemas validando la respuesta. Repetíme el pedido para que no te pase algo incorrecto."
+
         execution_context["regenerated"] = execution_context.get("regenerated", 0) + 1
         save_message(phone, reply, "assistant_faulty")
 
@@ -536,6 +539,11 @@ _MODELS_NORMALIZED = {normalize_search_query(m) for m in MODEL_LIST}
 
 _BRAND_NORMALIZED_MAP = {normalize_search_query(b): b for b in BRAND_LIST}
 _MODEL_NORMALIZED_MAP = {normalize_search_query(m): m for m in MODEL_LIST}
+_CATEGORY_VARIANT_TOKENS = {
+    normalize_search_query(v)
+    for variants in CATEGORY_MAP.values()
+    for v in variants
+}
 
 
 def _looks_like_code_or_number(token: str) -> bool:
@@ -570,6 +578,10 @@ def autocorrect_keywords(text: str):
             new_tokens.append(raw)
             continue
 
+        if base in _CATEGORY_VARIANT_TOKENS:
+            new_tokens.append(raw)
+            continue
+
         if len(base) <= 3:
             new_tokens.append(raw)
             continue
@@ -601,7 +613,7 @@ def autocorrect_keywords(text: str):
         except Exception:
             best = None
 
-        if best and best[1] >= 90 and best[0] != base:
+        if best and best[1] >= 94 and best[0] != base:
             corrected = best[0]
             new_tokens.append(corrected)
             corrections.append(f"{raw}→{corrected}")
@@ -634,9 +646,7 @@ def detect_families_in_query(query: str):
         if not fam_name_norm:
             continue
 
-        fam_words = [w for w in fam_name_norm.split() if len(w) >= 3]
-        if not fam_words:
-            continue
+        fam_words = [w for w in fam_name_norm.split() if w]
 
         if not any(w in q_norm for w in fam_words):
             continue
@@ -821,7 +831,8 @@ def compute_cart_hash_from_items(items):
     try:
         simple = sorted([(i[0], int(i[1])) for i in items if len(i) >= 2])
         snapshot = json.dumps(simple, ensure_ascii=False)
-        return hashlib.md5(snapshot.encode()).hexdigest()
+        cart_hash = hashlib.md5(f"{snapshot}_{datetime.now().isoformat()}".encode()).hexdigest()
+        return cart_hash
     except Exception as e:
         logger.error(f"Error computando cart_hash: {e}")
         return ""
@@ -952,6 +963,15 @@ def apply_add_each_quantity_pending(phone, pending):
         qty_each = int(data.get("qty", 1) or 1)
         products = data.get("products") or []
         pending_hash = data.get("cart_hash") or ""
+        created_at_raw = pending.get("created_at")
+
+        if created_at_raw:
+            try:
+                created_dt = datetime.fromisoformat(created_at_raw)
+                if datetime.now() - created_dt > timedelta(minutes=5):
+                    return "Tu carrito cambió desde que armé esa lista, repetíme el pedido así no le pifio"
+            except Exception as e:
+                logger.error(f"Error validando antigüedad de pending_action: {e}", exc_info=True)
 
         if not products or qty_each <= 0:
             return "No tengo lista la selección anterior, repetíme el pedido."
@@ -1061,8 +1081,8 @@ def save_moto_context(phone, brand, model):
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error cerrando conexión de moto_context: {e}", exc_info=True)
 
 
 def get_moto_context(phone):
@@ -1080,8 +1100,8 @@ def get_moto_context(phone):
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Error cerrando conexión tras leer moto_context: {e}", exc_info=True)
 
 
 def init_db():
@@ -1163,6 +1183,18 @@ def init_db():
         """)
 
         c.execute("""
+            CREATE TABLE IF NOT EXISTS quality_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                query TEXT,
+                avg_score REAL,
+                max_score REAL,
+                relevant_count INTEGER,
+                created_at TEXT
+            )
+        """)
+
+        c.execute("""
             CREATE TABLE IF NOT EXISTS pending_actions (
                 phone TEXT PRIMARY KEY,
                 action_type TEXT,
@@ -1218,6 +1250,29 @@ def log_performance(phone, intent, duration, results_count):
             )
     except Exception as e:
         logger.error(f"Error logging metrics: {e}")
+
+
+def log_quality_metrics(phone, query, avg_score, max_score, relevant_count):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO quality_metrics (phone, query, avg_score, max_score, relevant_count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    phone,
+                    (query or "")[:200],
+                    float(avg_score),
+                    float(max_score),
+                    int(relevant_count),
+                    datetime.now().isoformat(),
+                )
+            )
+    except Exception as e:
+        logger.error(f"Error guardando métricas de calidad: {e}")
 
 # ------------------------------------------------------------------
 # TIPO DE CAMBIO
@@ -1809,6 +1864,7 @@ def generate_embeddings_with_cache(texts):
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
             batch = 256
             max_retries = 3
+            updated_cache = False
 
             for i in range(0, len(texts_to_embed), batch):
                 chunk = texts_to_embed[i:i + batch]
@@ -1824,6 +1880,7 @@ def generate_embeddings_with_cache(texts):
 
                         for text, vec in zip(chunk, chunk_vectors):
                             cache[text] = vec
+                            updated_cache = True
 
                         break
                     except RateLimitError as e:
@@ -1835,6 +1892,7 @@ def generate_embeddings_with_cache(texts):
                             logger.error(f"RateLimitError persistente: {e}")
                             raise
 
+            if updated_cache:
                 try:
                     with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
                         pickle.dump(cache, f)
@@ -2035,6 +2093,11 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     motos = parsed.get("motos_detectadas") or []
 
     if len(motos) > 1 and len(cats) > 1:
+        if len(motos) * len(cats) > 6:
+            return {
+                "error": "too_many_combinations",
+                "message": "Hay muchas combinaciones de moto y categoría. Decime una sola moto o categoría para buscar mejor."
+            }
         combined = {}
         for m in motos:
             for c in cats:
@@ -2296,8 +2359,8 @@ def process_bulk_async(job):
         try:
             with get_db_connection() as conn:
                 conn.execute("UPDATE bulk_jobs SET status=? WHERE job_id=?", ("failed", job["job_id"]))
-        except:
-            pass
+        except Exception as e2:
+            logger.error(f"Error marcando bulk_job como failed: {e2}", exc_info=True)
 
 
 def bulk_worker():
@@ -2968,9 +3031,13 @@ TU TAREA (paso a paso):
       - Si el usuario usa jerga, normalizá al término técnico del catálogo
    
    b) CONTEXTO IMPLÍCITO:
-      - Si dice solo una categoría ("cubiertas", "espejos") pero en memoria_viva 
+      - Si dice solo una categoría ("cubiertas", "espejos") pero en memoria_viva
         hay una moto reciente (ej: "fz16"), ASUMIR que es para esa moto
       - Si dice "y [producto]?" está pidiendo otro producto para la MISMA moto
+
+   REGLA DE CONSISTENCIA:
+      - Usá SIEMPRE los mismos mapeos de sinónimos (gomas → neumaticos/cubiertas, etc.).
+      - Para referencias a productos anteriores, usá únicamente memoria_viva.allowed_products_snapshot en el orden recibido.
    
    c) REFERENCIAS A PRODUCTOS ANTERIORES:
       - "los tres" / "esos tres" → primeros 3 de memoria_viva.allowed_products_snapshot
@@ -3308,6 +3375,7 @@ Usá esta info para:
 2. Si el approach es "show_more_options", buscá más productos (top 10 en vez de top 3)
 3. Si el approach es "clarify_need", generá NEED_CLARIFICATION con pregunta específica
 4. Si el approach es "confirm_understanding", incluí en el plan una validación explícita
+5. Mantené consistencia con los ejemplos: sinónimos normalizados y referencias resueltas con allowed_products_snapshot.
 
 Ejemplo:
 Si meta_analysis dice:
@@ -3351,7 +3419,8 @@ def _safe_json_parse(text):
         try:
             cleaned = text[text.find("{"):text.rfind("}") + 1]
             return json.loads(cleaned)
-        except Exception:
+        except Exception as e:
+            logger.error(f"JSON parse falló: {e}, raw text: {text[:300]}")
             return {}
 
 
@@ -3435,7 +3504,10 @@ def build_user_profile_snapshot(phone: str, memory: dict) -> dict:
     return {k: v for k, v in profile.items() if v}
 
 
-def build_live_memory(phone, user_message, intent_data, productos_filtrados):
+def build_enriched_context(phone, user_message, intent_data, productos_filtrados):
+    """
+    Construye memoria con inferencias adicionales: infiere moto habitual y patrones de compra.
+    """
     history = get_history_since(phone, days=14, limit=400)
     search_history = get_search_history(phone, limit=5)
     last_search = get_last_search(phone) or {}
@@ -3484,18 +3556,9 @@ def build_live_memory(phone, user_message, intent_data, productos_filtrados):
                 "model": p.get("model", ""),
                 "price": float(to_decimal_money(p.get("price_ars", 0))),
             }
-            for p in (productos_filtrados or [])[:10]
+            for p in (productos_filtrados or [])[:5]
         ],
     }
-
-    return memory
-
-
-def build_enriched_context(phone, user_message, intent_data, productos_filtrados):
-    """
-    Construye memoria con inferencias adicionales: infiere moto habitual y patrones de compra.
-    """
-    memory = build_live_memory(phone, user_message, intent_data, productos_filtrados)
 
     # Inferir moto habitual desde historial si no hay una reciente
     if not memory.get("most_recent_bike"):
@@ -3548,7 +3611,7 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
                     "brand": p.get("brand", ""),
                     "model": p.get("model", ""),
                 }
-                for p in last_search["products"][:10]  # máximo 10 para no saturar el contexto
+                for p in last_search["products"][:5]  # máximo 5 para no saturar el contexto
             ]
         else:
             memory["allowed_products_snapshot"] = []
@@ -3593,10 +3656,12 @@ def generate_meta_cognition(mensaje_actual: str, history: list, contexto: dict) 
 def validate_reasoning_json(raw_text):
     parsed = _safe_json_parse(raw_text or "")
     if not isinstance(parsed, dict):
+        logger.error(f"JSON parse falló: contenido inválido, raw text: {str(raw_text)[:300]}")
         return None
 
     status = parsed.get("status")
     if status not in {"OK", "NEED_REQUERY", "NEED_CLARIFICATION"}:
+        logger.error(f"JSON de razonamiento con status inválido: {parsed}")
         return None
 
     if status == "NEED_REQUERY" and not parsed.get("new_query"):
@@ -3951,10 +4016,15 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             "meta_analysis": meta_analysis,
         }
 
+        fast_reply = None
         if USE_SALES_PROMPT_FLOW:
             fast_reply = run_sales_prompt_flow(phone, user_message, catalog_products, memory, meta_analysis)
             if fast_reply:
+                logger.info("generate_smart_ai_reply_v2: respuesta vía sales_prompt_flow")
                 return fast_reply
+            logger.info("generate_smart_ai_reply_v2: sales_prompt_flow vacío, uso doble LLM como fallback")
+        else:
+            logger.info("generate_smart_ai_reply_v2: sales_prompt_flow desactivado, uso doble LLM")
 
         productos_permitidos = catalog_products or []
         plan_interno = pensar_con_llm(
@@ -3965,9 +4035,10 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
 
         parsed_plan = validate_reasoning_json(plan_interno)
 
-        requery_done = False
-        while parsed_plan and parsed_plan.get("status") == "NEED_REQUERY" and not requery_done:
-            requery_done = True
+        max_requery_attempts = 2
+        requery_count = 0
+        while parsed_plan and parsed_plan.get("status") == "NEED_REQUERY" and requery_count < max_requery_attempts:
+            requery_count += 1
             nueva_query = parsed_plan.get("new_query")
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
@@ -4365,6 +4436,12 @@ def orquestar_fran(mensaje_usuario, phone):
         semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
 
         if isinstance(semantic_results, dict):
+            if semantic_results.get("error") == "too_many_combinations":
+                reply = semantic_results.get("message") or "Hay demasiadas combinaciones, pasame una sola moto o categoría."
+                save_message(phone, reply, "assistant")
+                log_interaction(phone, user_message, "too_many_combinations", 0)
+                log_performance(phone, intent, time.time()-start_time, 0)
+                return reply
             execution_context["search_executed"] = True
             total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
             execution_context["products_found"] = total_found
@@ -4417,6 +4494,14 @@ def orquestar_fran(mensaje_usuario, phone):
         execution_context["quality_assessment"] = quality_assessment
 
         logger.info(f"Quality assessment: {quality_assessment}")
+
+        log_quality_metrics(
+            phone,
+            query_for_search,
+            quality_assessment.get("avg_score", 0),
+            quality_assessment.get("max_score", 0),
+            quality_assessment.get("relevant_count", 0),
+        )
 
         if not quality_assessment["sufficient"]:
             if quality_assessment["action"] == "ask_clarification":
@@ -4523,7 +4608,7 @@ def send_long_message(phone, text, chunk_size=1600):
                 logger.info(f"Chunk {idx + 1}/{len(parts)} enviado: {message.sid}")
 
                 if idx < len(parts) - 1:
-                    time.sleep(0.8)
+                    time.sleep(1.1)
 
             except Exception as e:
                 logger.error(f"Error enviando chunk {idx + 1}: {e}")
@@ -4572,6 +4657,10 @@ def whatsapp_webhook():
         is_bulk, count = is_bulk_list_request(message_body)
         if is_bulk and count > INSTANT_THRESHOLD:
             job_id = create_bulk_job(from_number, message_body, count)
+            if not job_id:
+                resp = MessagingResponse()
+                resp.message("Tuve un problema procesando la lista, probá de nuevo")
+                return Response(str(resp), mimetype="text/xml")
             resp = MessagingResponse()
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
