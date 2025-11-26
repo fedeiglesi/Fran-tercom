@@ -24,3 +24,4 @@ requests==2.32.3
 python-dotenv==1.0.1
 
 cachetools==5.5.0
+pytest==8.3.2

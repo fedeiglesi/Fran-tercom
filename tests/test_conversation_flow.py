@@ -11,6 +11,24 @@ def patched_app(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent))
 
+    # Stub módulos pesados para que los tests no dependan de downloads externos
+    import types
+
+    class DummyLRUCache(dict):
+        def __init__(self, *args, **kwargs):  # noqa: D401
+            super().__init__()
+
+        def __getitem__(self, key):
+            return super().get(key)
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+
+    monkeypatch.setitem(sys.modules, "rank_bm25", types.SimpleNamespace(BM25Okapi=None))
+    monkeypatch.setitem(sys.modules, "dotenv", types.SimpleNamespace(load_dotenv=lambda: None))
+    monkeypatch.setitem(sys.modules, "dotenv.main", types.SimpleNamespace(load_dotenv=lambda: None))
+    monkeypatch.setitem(sys.modules, "cachetools", types.SimpleNamespace(LRUCache=DummyLRUCache))
+
     if "app" in sys.modules:
         del sys.modules["app"]
 

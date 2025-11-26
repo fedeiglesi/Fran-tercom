@@ -30,6 +30,9 @@ from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 from cachetools import LRUCache
 
+from fran.clients import HttpClient, LLMClient
+from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+
 load_dotenv()
 app = Flask(__name__)
 
@@ -344,6 +347,17 @@ twilio_rest_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) if twil
 twilio_validator = RequestValidator(TWILIO_AUTH_TOKEN) if (RequestValidator and TWILIO_AUTH_TOKEN) else None
 
 client = OpenAI(api_key=OPENAI_API_KEY)
+http_client = HttpClient(
+    timeout=REQUESTS_TIMEOUT,
+    headers=REQUESTS_HEADERS,
+    logger=logger,
+    breaker=CircuitBreaker(failure_threshold=3, recovery_time=120),
+)
+llm_client = LLMClient(
+    client,
+    logger=logger,
+    breaker=CircuitBreaker(failure_threshold=2, recovery_time=90),
+)
 cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
@@ -494,7 +508,7 @@ REGLAS:
 
     try:
         with openai_sem:
-            resp = client.chat.completions.create(
+            resp = llm_client.completion(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -1665,16 +1679,22 @@ def get_exchange_rate():
             if age < EXCHANGE_CACHE_TTL:
                 return exchange_cache["rate"]
 
-        try:
-            res = requests.get(EXCHANGE_API_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
-            res.raise_for_status()
-            venta = res.json().get("venta", None)
-            rate = to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
+    def _fetch_rate():
+        response = http_client.get(requests, EXCHANGE_API_URL)
+        response.raise_for_status()
+        venta = response.json().get("venta", None)
+        return to_decimal_money(venta) if venta is not None else DEFAULT_EXCHANGE
+
+    try:
+        with track_step("exchange.rate"):
+            rate = _fetch_rate()
+        with exchange_lock:
             exchange_cache["rate"] = rate
-            exchange_cache["timestamp"] = now
-            return rate
-        except Exception as e:
-            logger.warning(f"Fallo tasa cambio: {e}")
+            exchange_cache["timestamp"] = datetime.now().timestamp()
+        return rate
+    except Exception as e:
+        logger.warning(f"Fallo tasa cambio: {e}")
+        with exchange_lock:
             if exchange_cache["rate"] is None:
                 exchange_cache["rate"] = DEFAULT_EXCHANGE
             return exchange_cache["rate"]
@@ -3273,7 +3293,7 @@ def run_sales_analysis_llm(conversacion_completa, productos_disponibles, context
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 
-    resp = client.chat.completions.create(
+    resp = llm_client.completion(
         model=MODEL_REASONING,
         messages=messages,
         temperature=0,
@@ -3365,7 +3385,7 @@ def run_planning_unificado(
         ]
 
         with openai_sem:
-            resp = client.chat.completions.create(
+            resp = llm_client.completion(
                 model=MODEL_REASONING,
                 messages=messages,
                 temperature=0.25,
@@ -3576,7 +3596,7 @@ def run_customer_output_llm(plan, productos_finales, customer_state, primer_mens
     ]
 
     with openai_sem:
-        resp = client.chat.completions.create(
+        resp = llm_client.completion(
             model=MODEL_OUTPUT,
             messages=messages,
             temperature=0.4,
@@ -3971,7 +3991,7 @@ def pensar_con_llm(system_prompt_interno, contexto, productos_filtrados):
         ]
 
         with openai_sem:
-            resp = client.chat.completions.create(
+            resp = llm_client.completion(
                 model=MODEL_REASONING,
                 messages=mensajes,
                 temperature=0.15,
@@ -4009,7 +4029,7 @@ def responder_con_llm(system_prompt_cliente, razonamiento_interno):
         ]
 
         with openai_sem:
-            resp = client.chat.completions.create(
+            resp = llm_client.completion(
                 model=MODEL_RESPONSE,
                 messages=mensajes,
                 temperature=0.35,
@@ -4228,7 +4248,7 @@ def build_tech_expert_answer(phone, user_message):
         })
 
         with openai_sem:
-            resp = client.chat.completions.create(
+            resp = llm_client.completion(
                 model=MODEL_NAME,
                 messages=msgs,
                 temperature=0.4,
