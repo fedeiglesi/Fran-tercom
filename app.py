@@ -106,6 +106,207 @@ MAX_ITEMS = 150
 BULK_TIMEOUT = 240
 MAX_BULK_ITEMS = 150
 
+# ============================================================
+# TEMPLATE SCHEMAS - FRAN 3.15
+# ============================================================
+
+QUERY_UNDERSTANDING_SCHEMA = {
+    "task": "understand_query",
+    "description": """
+    Sos un experto en motos argentinas. Analiza el mensaje del cliente y normaliza errores.
+    
+    MARCAS COMUNES (pueden estar mal escritas):
+    - Honda, Yamaha, Zanella, Motomel, Corven, Gilera, Guerrero, Bajaj, Keeway
+    
+    CATEGORÍAS COMUNES:
+    - Batería (ytx, gel, litio), Amortiguador, Filtro, Aceite, Cadena, Bujía, Pastillas
+    
+    CORRECCIONES TÍPICAS:
+    - "gonda" → "Honda"
+    - "iamaha" → "Yamaha" 
+    - "sanella" → "Zanella"
+    - "bateria" → "batería"
+    """,
+    "output_schema": {
+        "type": "object",
+        "required": ["normalized_query", "entities", "intent", "confidence"],
+        "properties": {
+            "original_query": {
+                "type": "string",
+                "description": "Query original del usuario"
+            },
+            "normalized_query": {
+                "type": "string", 
+                "description": "Query corregida y lista para búsqueda"
+            },
+            "entities": {
+                "type": "object",
+                "properties": {
+                    "brand": {
+                        "type": "string",
+                        "description": "Marca de moto detectada (nombre correcto)"
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Modelo de moto detectado (nombre correcto)"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Categoría de repuesto detectada"
+                    }
+                }
+            },
+            "corrections": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Lista de correcciones aplicadas (ej: 'gonda→Honda')"
+            },
+            "intent": {
+                "type": "string",
+                "enum": ["product_search", "cart_action", "greeting", "tech_question", "order_flow"],
+                "description": "Intención detectada"
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Confianza en la normalización (0.0-1.0)"
+            },
+            "needs_clarification": {
+                "type": "boolean",
+                "description": "True si falta info crítica"
+            },
+            "clarification_question": {
+                "type": "string",
+                "description": "Pregunta para el cliente si needs_clarification=true"
+            }
+        }
+    }
+}
+
+PRODUCT_SELECTION_SCHEMA = {
+    "task": "select_products",
+    "description": """
+    Elegí los mejores productos de la lista para el cliente.
+    
+    REGLAS CRÍTICAS:
+    - SOLO productos de allowed_products (NO inventes códigos)
+    - Prioriza compatibilidad exacta de marca/modelo
+    - Si hay múltiples opciones, explicá diferencias clave
+    - Máximo 5 productos (3 si es primer mensaje)
+    """,
+    "output_schema": {
+        "type": "object",
+        "required": ["selected_products", "analysis", "action"],
+        "properties": {
+            "selected_products": {
+                "type": "array",
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "required": ["code", "reason", "rank"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Código TERCOM del producto"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Por qué elegiste este producto (1 línea)"
+                        },
+                        "rank": {
+                            "type": "string",
+                            "enum": ["primary", "alternative"],
+                            "description": "Recomendación principal o alternativa"
+                        },
+                        "compatibility": {
+                            "type": "number",
+                            "description": "Score de compatibilidad 0.0-1.0"
+                        }
+                    }
+                }
+            },
+            "analysis": {
+                "type": "object",
+                "properties": {
+                    "customer_type": {
+                        "type": "string",
+                        "enum": ["nuevo", "recurrente", "comparador", "urgente"],
+                        "description": "Tipo de cliente detectado"
+                    },
+                    "interest_level": {
+                        "type": "string",
+                        "enum": ["bajo", "medio", "alto"],
+                        "description": "Nivel de interés de compra"
+                    },
+                    "key_arguments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Argumentos comerciales (precio, calidad, marca)"
+                    }
+                }
+            },
+            "action": {
+                "type": "string",
+                "enum": ["show_products", "ask_clarification", "suggest_alternatives"],
+                "description": "Acción recomendada"
+            },
+            "clarification_needed": {
+                "type": "string",
+                "description": "Si action=ask_clarification, qué preguntar"
+            }
+        }
+    }
+}
+
+RESPONSE_GENERATION_SCHEMA = {
+    "task": "generate_response",
+    "description": """
+    Generá la respuesta final para WhatsApp como Fran.
+    
+    ESTILO:
+    - Humano, directo, sin corporativismo
+    - Máximo 3-4 líneas
+    - Siempre citá código TERCOM entre paréntesis
+    - Nunca digas "soy Fran" o "soy un asistente"
+    
+    ESTRUCTURA:
+    1. Confirmación breve de lo que buscó
+    2. Productos con código (máx 3 en el mensaje)
+    3. Call-to-action suave
+    """,
+    "output_schema": {
+        "type": "object",
+        "required": ["message", "products_cited"],
+        "properties": {
+            "message": {
+                "type": "string",
+                "description": "Texto final para WhatsApp (máx 350 caracteres)"
+            },
+            "products_cited": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Códigos TERCOM mencionados en el mensaje"
+            },
+            "tone": {
+                "type": "string",
+                "enum": ["friendly", "expert", "urgent", "advisory"],
+                "description": "Tono usado en el mensaje"
+            },
+            "next_expected_action": {
+                "type": "string",
+                "description": "Qué esperás que haga el cliente ahora"
+            }
+        }
+    }
+}
+
+TEMPLATES = {
+    "query_understanding": QUERY_UNDERSTANDING_SCHEMA,
+    "product_selection": PRODUCT_SELECTION_SCHEMA,
+    "response_generation": RESPONSE_GENERATION_SCHEMA
+}
+
 # ------------------------------------------------------------
 # TWILIO
 # ------------------------------------------------------------
@@ -148,6 +349,166 @@ _fuzzy_match_cache = LRUCache(maxsize=20000)
 
 # Índice de familias (global)
 FAMILIES_INDEX = []
+
+TEMPLATE_FALLBACKS = {
+    "query_understanding": {
+        "original_query": "",
+        "normalized_query": "",
+        "entities": {},
+        "corrections": [],
+        "intent": "product_search",
+        "confidence": 0.5,
+        "needs_clarification": False,
+        "clarification_question": ""
+    },
+    "product_selection": {
+        "selected_products": [],
+        "analysis": {
+            "customer_type": "nuevo",
+            "interest_level": "medio",
+            "key_arguments": []
+        },
+        "action": "ask_clarification",
+        "clarification_needed": "Tuve un problema técnico, ¿me repetís qué necesitás?"
+    },
+    "response_generation": {
+        "message": "Disculpá, tuve un problema. ¿Me repetís qué estabas buscando?",
+        "products_cited": [],
+        "tone": "friendly",
+        "next_expected_action": "retry"
+    }
+}
+
+
+def validate_schema(data: dict, schema: dict) -> bool:
+    if data is None:
+        raise ValueError("Schema validation failed: data is None")
+
+    if not isinstance(schema, dict):
+        raise ValueError("Schema validation failed: invalid schema")
+
+    if schema.get("type") == "object":
+        if not isinstance(data, dict):
+            raise ValueError("Schema validation failed: expected object")
+        for key in schema.get("required", []):
+            if key not in data:
+                raise ValueError(f"Schema validation failed: missing '{key}'")
+
+        properties = schema.get("properties", {})
+        for key, value in data.items():
+            if key not in properties:
+                continue
+            expected = properties[key]
+            expected_type = expected.get("type")
+            if expected_type == "object" and value is not None:
+                validate_schema(value, expected)
+            elif expected_type == "array" and value is not None:
+                if not isinstance(value, list):
+                    raise ValueError(f"Schema validation failed: '{key}' should be array")
+                item_schema = expected.get("items")
+                if item_schema:
+                    for item in value:
+                        if item_schema.get("type") == "object" and isinstance(item, dict):
+                            validate_schema(item, item_schema)
+                        elif item_schema.get("type") == "string" and not isinstance(item, str):
+                            raise ValueError(f"Schema validation failed: '{key}' items should be string")
+            elif expected_type == "string" and value is not None and not isinstance(value, str):
+                raise ValueError(f"Schema validation failed: '{key}' should be string")
+            elif expected_type == "number" and value is not None and not isinstance(value, (int, float)):
+                raise ValueError(f"Schema validation failed: '{key}' should be number")
+            elif expected_type == "boolean" and not isinstance(value, bool):
+                raise ValueError(f"Schema validation failed: '{key}' should be boolean")
+
+            enum_values = expected.get("enum")
+            if enum_values and value not in enum_values:
+                raise ValueError(f"Schema validation failed: '{key}' not in enum")
+
+    return True
+
+
+def log_template_execution(template_name: str, input_data: dict, output_data: dict, duration: float):
+    """Log de ejecución de templates para debugging"""
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO template_logs 
+                   (phone, template_name, input_json, output_json, duration_ms, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    input_data.get("phone"),
+                    template_name,
+                    json.dumps(input_data, ensure_ascii=False),
+                    json.dumps(output_data, ensure_ascii=False),
+                    int(duration * 1000),
+                    datetime.now().isoformat()
+                )
+            )
+    except Exception as e:
+        logger.error(f"Error logging template execution: {e}")
+
+
+def complete_template(template_name: str, context: dict, model: str = MODEL_REASONING) -> dict:
+    """
+    Completa un template usando el LLM con structured output.
+    """
+    template = TEMPLATES.get(template_name)
+    if not template:
+        raise ValueError(f"Template '{template_name}' no encontrado")
+
+    system_prompt = f"""
+{template['description']}
+
+Tu respuesta DEBE seguir este JSON schema EXACTO:
+{json.dumps(template['output_schema'], indent=2)}
+
+REGLAS:
+- Devolvé SOLO JSON válido
+- NO agregues explicaciones fuera del JSON
+- Respetá todos los campos required
+"""
+
+    user_prompt = json.dumps(context, ensure_ascii=False)
+    start_time = time.time()
+
+    try:
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+
+        result = json.loads(resp.choices[0].message.content)
+        validate_schema(result, template["output_schema"])
+        log_template_execution(template_name, context, result, time.time() - start_time)
+        return result
+
+    except Exception as e:
+        logger.error(f"Template completion failed: {e}", exc_info=True)
+        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+        try:
+            log_template_execution(template_name, context, fallback, time.time() - start_time)
+        except Exception:
+            pass
+        return fallback
+
+
+def should_use_v315(phone: str) -> bool:
+    """
+    Decidir si usar Fran 3.15 o 3.14 (rollout gradual)
+    """
+    if os.environ.get("USE_FRAN_315", "false").lower() == "true":
+        return True
+
+    beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
+    if beta_phones and phone in beta_phones:
+        return True
+
+    return int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100 < 50
 
 # ------------------------------------------------------------
 # UTILS
@@ -1205,6 +1566,19 @@ def init_db():
                 updated_at TEXT
             )
         """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS template_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                template_name TEXT,
+                input_json TEXT,
+                output_json TEXT,
+                duration_ms INTEGER,
+                created_at TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_template_logs_phone_created ON template_logs(phone, created_at DESC)")
 
 # ------------------------------------------------------------------
 # ANALYTICS
@@ -3959,6 +4333,215 @@ def format_multi_search_response(results: dict) -> str | None:
     return None
 
 # =========================================================
+# ORQUESTADOR FRAN – VERSIÓN 3.15 (templates estructurados)
+# =========================================================
+def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
+    """
+    Orquestador con templates estructurados para comprensión, selección y respuesta.
+    """
+    start_time = time.time()
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+
+    if not rate_limit_check(phone):
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    save_message(phone, user_message, "user")
+
+    logger.info(f"[STEP 1] Understanding query: {user_message}")
+
+    understanding = complete_template(
+        "query_understanding",
+        {
+            "phone": phone,
+            "user_message": user_message,
+            "conversation_history": get_history_since(phone, days=1, limit=5),
+            "last_search_query": (get_last_search(phone) or {}).get("query", "")
+        },
+    )
+
+    if understanding.get("needs_clarification"):
+        reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
+        save_message(phone, reply, "assistant")
+        return reply
+
+    normalized_query = understanding.get("normalized_query") or user_message
+    intent = understanding.get("intent") or "product_search"
+
+    logger.info(
+        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+    )
+
+    # ============================================
+    # STEP 2: SEARCH
+    # ============================================
+    logger.info(f"[STEP 2] Searching products...")
+
+    semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+
+    if isinstance(semantic_results, dict):
+        if semantic_results.get("error") == "too_many_combinations":
+            reply = semantic_results.get("message", "Pasame una sola moto o categoría.")
+            save_message(phone, reply, "assistant")
+            return reply
+
+        reply = format_multi_search_response(semantic_results)
+        if reply:
+            save_message(phone, reply, "assistant")
+            return reply
+        semantic_results = []
+
+    products = [p for p, _ in semantic_results]
+
+    filtered_products = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+    quality = assess_context_quality(normalized_query, filtered_products)
+
+    if not quality["sufficient"]:
+        if quality["action"] == "ask_clarification":
+            reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
+        else:
+            top_products = quality.get("top_products", [])[:3]
+            suggestions = "\n".join(
+                [
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in top_products
+                ]
+            )
+            reply = (
+                "No encontré coincidencia perfecta. Tengo:\n\n"
+                f"{suggestions}\n\n"
+                "¿Te sirve alguna o dame más detalles?"
+            )
+
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
+        log_performance(phone, "low_quality", time.time() - start_time, len(filtered_products))
+        return reply
+
+    save_last_search(
+        phone,
+        [
+            {
+                "code": p["code"],
+                "name": p.get("name", ""),
+                "price_ars": p.get("price_ars"),
+                "price_usd": p.get("price_usd"),
+                "qty": 1,
+            }
+            for p in filtered_products[:MAX_ITEMS]
+        ],
+        normalized_query,
+    )
+
+    logger.info(f"[STEP 2] Found {len(filtered_products)} relevant products | Quality: {quality.get('confidence')}")
+
+    # ============================================
+    # STEP 3: PRODUCT SELECTION (LLM)
+    # ============================================
+    logger.info(f"[STEP 3] Selecting best products...")
+
+    selection = complete_template(
+        "product_selection",
+        {
+            "phone": phone,
+            "normalized_query": normalized_query,
+            "original_query": user_message,
+            "entities": understanding.get("entities", {}),
+            "intent": intent,
+            "allowed_products": [
+                {
+                    "code": p.get("code", ""),
+                    "name": p.get("name", ""),
+                    "price_ars": float(p.get("price_ars", 0)),
+                    "brand": p.get("brand", ""),
+                    "model": p.get("model", ""),
+                    "category": p.get("category", ""),
+                }
+                for p in filtered_products[:MAX_PRODUCTS_FOR_LLM]
+            ],
+            "conversation_context": {
+                "cart_items": len(cart_get(phone)),
+                "sales_phase": get_sales_phase(phone),
+                "is_first_message": len(get_history_since(phone, days=1, limit=5)) <= 1,
+            },
+        },
+    )
+
+    if selection.get("action") == "ask_clarification":
+        reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
+        save_message(phone, reply, "assistant")
+        return reply
+
+    selected_products = selection.get("selected_products", [])
+
+    logger.info(
+        f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
+    )
+
+    # ============================================
+    # STEP 4: RESPONSE GENERATION (LLM)
+    # ============================================
+    logger.info(f"[STEP 4] Generating response...")
+
+    response = complete_template(
+        "response_generation",
+        {
+            "phone": phone,
+            "selected_products": selected_products,
+            "customer_analysis": selection.get("analysis", {}),
+            "query_context": {
+                "original": user_message,
+                "normalized": normalized_query,
+                "corrections": understanding.get("corrections", []),
+            },
+            "conversation_state": {
+                "sales_phase": get_sales_phase(phone),
+                "cart_total": format_price(cart_totals(phone)[0]),
+            },
+        },
+    )
+
+    reply = response.get("message", "")
+    products_cited = response.get("products_cited", [])
+
+    # ============================================
+    # STEP 5: POST-VALIDATION
+    # ============================================
+    logger.info(f"[STEP 5] Validating response...")
+
+    allowed_codes = {p.get("code") for p in filtered_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    hallucinated = set(products_cited) - allowed_codes
+
+    if hallucinated:
+        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
+        reply = format_search_results(filtered_products[:5])
+        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
+
+    if len(filtered_products) > MAX_PRODUCTS_FOR_LLM:
+        remaining_products = filtered_products[MAX_PRODUCTS_FOR_LLM:]
+        if remaining_products:
+            chunks = [
+                remaining_products[i : i + PRODUCTS_PER_CHUNK]
+                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
+            ]
+
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
+                chunk_text += format_search_results(chunk)
+                time.sleep(0.5)
+                send_long_message(phone, chunk_text)
+
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, intent, len(selected_products))
+    log_performance(phone, intent, time.time() - start_time, len(filtered_products))
+    update_sales_phase_from_intent(phone, intent)
+
+    logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
+
+    return reply
+
+# =========================================================
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
 # =========================================================
 def orquestar_fran(mensaje_usuario, phone):
@@ -4210,7 +4793,10 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        reply = orquestar_fran(message_body, from_number)
+        if should_use_v315(from_number):
+            reply = orquestar_fran_v315(message_body, from_number)
+        else:
+            reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
