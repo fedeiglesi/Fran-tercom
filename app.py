@@ -72,6 +72,7 @@ MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
 MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
+MODEL_OUTPUT = os.environ.get("MODEL_OUTPUT", MODEL_RESPONSE)
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -2680,52 +2681,46 @@ HORARIOS:
 """
 
 CUSTOMER_OUTPUT_PROMPT = f"""
-Sos Fran, vendedor mayorista de motopartes en TERCOM (Argentina).
+Eres el módulo de salida del sistema Fran. Tu objetivo es generar una respuesta
+clara, útil, humana, segura y enfocada en ventas. Nunca inventes productos.
+Nunca menciones que eres un modelo ni hagas frases genéricas como:
+"Soy Fran de TERCOM" o "Estoy aquí para ayudarte".
 
-ESTILO DE COMUNICACIÓN:
-- Tono: Profesional pero cercano, como un vendedor experto de confianza
-- Vocabulario: Argentino natural (usá "che", "dale", "mirá") sin sonar forzado
-- Brevedad: Mensajes concretos, máximo 4-5 líneas antes de listar productos
-- Proactividad: Siempre cerrá con una acción concreta para el cliente
-- Ajuste dinámico: Adaptá el tono y la empatía según el plan interno y el estado emocional del cliente.
+REGLAS GENERALES:
+- Mantén un tono humano, profesional y cálido.
+- Limita la respuesta a lo relevante.
+- No repitas información innecesaria.
+- Usa sales_analysis.tono_sugerido para ajustar estilo.
+- Usa meta_razonamiento para manejar dudas o riesgos.
+- Jamás menciones allowed_products, reasoning, JSONs, etc.
+- No promociones productos no presentes en productos_finales.
+- Respeta el embudo propuesto en el plan.
 
-ESTRUCTURA DE RESPUESTA (seguí este orden):
+SALUDO INICIAL (cuando primer_mensaje es true):
+- No digas "soy Fran".
+- No digas "soy un asistente".
+- Saludá de forma natural y breve.
+- Integra sales_analysis y meta_razonamiento para empatía y riesgos.
+- Pedí lo mínimo necesario para avanzar (moto, pieza o código).
+- No devuelvas más de 2 líneas en este saludo inicial.
+- Ejemplos válidos:
+  "Buenas! Decime qué moto tenés y te paso lo que mejor va."
+  "Hola! ¿Qué estás buscando hoy?"
+  "Contame qué pieza necesitás y te paso opciones rápidas."
 
-1. APERTURA (1 línea):
-   - Si encontraste lo que busca: "Dale, acá tengo lo que necesitás"
-   - Si hay opciones: "Mirá, tengo estas opciones que te pueden servir"
-   - Si falta info: "Para buscarte lo justo necesito un dato más"
+EN RESPUESTAS NORMALES:
+- Usa productos_finales para armar opciones ordenadas.
+- Aplica señales de cierre si sales_analysis indica alto interés.
+- Si meta_razonamiento.accion_sugerida = pedir_aclaracion:
+    pedir una aclaración puntual.
+- Si el plan propone acciones (carrito, cantidades, familias):
+    ejecutar internamente y comunicarlo de forma breve y amable.
+- Si el cliente pide algo imposible o fuera del catálogo:
+    ofrecer alternativas seguras de productos_finales.
 
-2. PRODUCTOS (si aplica):
-   - Formato ESTRICTO: [NOMBRE] (código [CÓDIGO]) - [PRECIO]
-   - Máximo 5 productos en respuesta inicial
-   - Si hay más, avisá: "Tengo X más, avisame si querés que te los pase"
-   - NUNCA inventes códigos o precios
-
-3. CONSEJO (opcional, 1 línea):
-   - Si tiene sentido, agregá tip rápido: "El sintético te dura el doble"
-   - Solo si aporta valor comercial
-
-4. CIERRE CON ACCIÓN:
-   - Propuesta concreta: "¿Los agregamos al carrito?"
-   - O pregunta específica: "¿Es para 110cc o 125cc?"
-   - O siguiente paso: "Confirmo stock y te paso el total"
-
-REGLAS DE PRODUCTOS:
-- Usá SOLO los productos del plan interno (productos_finales / productos_elegidos) y citá siempre el código
-- Precios siempre con formato: $X.XXX (punto como separador de miles)
-- Si un producto no tiene código en el plan, NO lo menciones
-
-MANEJO DE CASOS ESPECIALES:
-- Cliente confuso o frustrado: reconocé el problema en 1 frase y mostrale que vas a solucionarlo con el tono pedido
-- Sin stock exacto: Ofrecé alternativas equivalentes
-- Productos dudosos: Aclaralo: "Puede ser que busques X, si no avisame"
-- Ajustá el tono usando sales_analysis.tono_sugerido y meta_razonamiento (más cautela si la confianza es baja)
-
-PLAN INTERNO:
-- Recibirás un JSON con {{real_intent, query_interpretada, productos_elegidos, razonamiento, sales_analysis, requery, meta_razonamiento, productos_finales}}.
-- Usá sales_analysis para priorizar argumentos y tono, pero NO lo muestres.
-- No inventes productos ni atributos; seguí estrictamente los códigos y allowed_products enviados.
+FORMATO:
+- No más de 2–4 renglones por respuesta.
+- Priorizar claridad sobre detalles técnicos.
 
 {BUSINESS_CONTEXT}
 """
@@ -3164,33 +3159,28 @@ def build_customer_output_context(
     }
 
 
-def run_customer_output_llm(user_message: str, plan: dict, allowed_products: list, phone: str) -> str:
-    """
-    Llama al modelo de salida (texto para el cliente) usando el contexto enriquecido.
-    """
-    contexto = build_customer_output_context(user_message, plan, allowed_products, phone)
+def run_customer_output_llm(plan, productos_finales, customer_state, primer_mensaje):
+    payload = {
+        "plan": plan,
+        "productos_finales": productos_finales,
+        "customer_state": customer_state,
+        "primer_mensaje": primer_mensaje,
+    }
 
     messages = [
-        {
-            "role": "system",
-            "content": CUSTOMER_OUTPUT_PROMPT.strip(),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(contexto, ensure_ascii=False),
-        },
+        {"role": "system", "content": CUSTOMER_OUTPUT_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
 
     with openai_sem:
         resp = client.chat.completions.create(
-            model=MODEL_RESPONSE,
+            model=MODEL_OUTPUT,
             messages=messages,
             temperature=0.4,
-            max_tokens=800,
+            max_tokens=300,
         )
 
-    reply = resp.choices[0].message.content or ""
-    return reply.strip()
+    return resp.choices[0].message.content
 
 # ------------------------------------------------------------------
 # GENERACIÓN DE RESPUESTAS
@@ -3452,6 +3442,17 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
         if not parsed_plan:
             return None
 
+        def confirmar_accion_humana(texto):
+            frases = [
+                "Listo, ya lo guardé.",
+                "Perfecto, te lo dejo preparado.",
+                "Genial, lo actualicé.",
+                "Ok, lo tengo anotado.",
+            ]
+            return random.choice(frases) + " " + texto
+
+        mensajes_internos = []
+
         productos_permitidos_map = {
             str(p.get("code")): p for p in (productos_permitidos or []) if p.get("code")
         }
@@ -3481,9 +3482,11 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
 
         for action in parsed_plan.get("actions_to_execute", []) or []:
             action_type = action.get("type")
+            acciones_realizadas = False
 
             if action_type == "save_moto_context":
                 save_moto_context(phone, action.get("brand", ""), action.get("model", ""))
+                acciones_realizadas = True
 
             elif action_type == "add_to_cart":
                 products_to_add = action.get("products", [])
@@ -3500,6 +3503,19 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
                             to_decimal_money(producto.get("price_ars", 0)),
                             to_decimal_money(producto.get("price_usd", 0))
                         )
+                        acciones_realizadas = True
+
+            if acciones_realizadas:
+                mensajes_internos.append(confirmar_accion_humana("Si necesitás algo más avisame."))
+
+        if parsed_plan.get("products_strategy", {}).get("sugerir_opcion_unica"):
+            mensajes_internos.append("Recomendado como mejor opción por relación calidad/precio.")
+
+        if not productos_seleccionados and not parsed_plan.get("query_interpretada"):
+            mensajes_internos.append(random.choice([
+                "¿Para qué modelo lo necesitás?",
+                "Decime año y cilindrada y te paso exacto.",
+            ]))
 
         return {
             "productos_finales": productos_seleccionados,
@@ -3508,6 +3524,7 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
             },
             "customer_state": parsed_plan.get("customer_state", {}),
             "response_tone": parsed_plan.get("response_tone"),
+            "mensajes_internos": mensajes_internos,
         }
     except Exception as e:
         logger.error(f"Error ejecutando plan interno: {e}")
@@ -3662,7 +3679,10 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
+        if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
+            history = history[:-1]
         short_history = history[-8:]
+        primer_mensaje = len(short_history) == 0
         memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), catalog_products)
         contexto_prev = {
             "mensaje_usuario": user_message,
@@ -3765,8 +3785,18 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             return {"reply": clarification, "plan": parsed_plan, "execution": None}
 
         plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, productos_permitidos)
-        razonamiento_final = json.dumps({**parsed_plan, **(plan_ejecutado or {})}, ensure_ascii=False)
-        respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
+        if plan_ejecutado and plan_ejecutado.get("mensajes_internos"):
+            parsed_plan["mensajes_internos"] = plan_ejecutado.get("mensajes_internos")
+
+        productos_finales = (plan_ejecutado or {}).get("productos_finales") or []
+        customer_state = (plan_ejecutado or {}).get("customer_state") or {}
+
+        respuesta = (run_customer_output_llm(
+            plan=parsed_plan,
+            productos_finales=productos_finales,
+            customer_state=customer_state,
+            primer_mensaje=primer_mensaje,
+        ) or "").strip()
         return {
             "reply": respuesta or "Uy, tuve un problema. ¿Me repetís?",
             "plan": parsed_plan,
