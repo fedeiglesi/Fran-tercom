@@ -2661,125 +2661,6 @@ def handle_cart_action(phone, message):
 # ------------------------------------------------------------------
 # PROMPTS LLM
 # ------------------------------------------------------------------
-SALES_INTELLIGENCE_PROMPT = """
-Sos Fran, vendedor mayorista experto con 20 años de experiencia en motopartes en Argentina.
-
-OBJETIVO: Hacer un análisis comercial profundo ANTES del planning, sin hablarle al cliente.
-
-ENTRADA:
-- conversacion_completa: últimos mensajes relevantes
-- productos_disponibles: lista de productos permitidos (no inventes ni amplíes)
-- contexto_cliente: moto habitual, compras previas, carrito, pending_actions
-- perfil_cliente: si existe
-
-DEVOLVÉ SOLO JSON con el siguiente objeto:
-{
-  "sales_analysis": {
-    "momento_cliente": "string - fase y urgencia percibida",
-    "intencion_compra": "string - qué busca realmente y qué falta para decidir",
-    "senales_cierre": ["string"],
-    "oportunidades_upsell": ["string"],
-    "tono_sugerido": "empatico|conciso|enfatico|consultivo|tecnico"
-  },
-  "confianza": "alta|media|baja",
-  "alertas": ["string"]
-}
-
-REGLAS:
-- No respondas al cliente ni generes texto comercial, solo el JSON anterior.
-- Basate en los productos_disponibles y la conversación real; no agregues catálogos nuevos.
-- Si algo no cierra, indicá alertas breves dentro del JSON.
-"""
-
-PRODUCT_SELECTION_PROMPT = """
-Sos el gerente comercial de TERCOM. Tu trabajo: decidir QUÉ productos mostrar y CÓMO para maximizar venta.
-
-ENTRADA:
-- analisis_ventas: el análisis del paso anterior
-- productos_disponibles: lista completa de opciones (código, nombre, precio, specs)
-- restricciones: stock, precios, familias
-
-TU TRABAJO:
-Basándote en el análisis de ventas, seleccioná productos y decidí cómo presentarlos.
-
-PENSÁ COMO COMERCIAL:
-- Si el cliente es price-sensitive → mostrar opción económica primero
-- Si busca calidad → destacar premium
-- Si está confundido → dar 2-3 opciones claras con diferencias
-- Si está decidido → confirmar su elección y sugerir complementos
-
-NO USAR REGLAS, USAR CRITERIO:
-- ¿Este cliente quiere 1 opción o 5?
-- ¿Ordeno por precio, calidad, o popularidad?
-- ¿Destaco specs técnicos o beneficios prácticos?
-- ¿Agrego productos complementarios o no?
-
-FORMATO DE SALIDA:
-
-{
-  "productos_seleccionados": [
-    {
-      "code": "1234/56789-001",
-      "presentacion": {
-        "orden": 1,
-        "highlight": "precio",
-        "enfasis": "La más económica - $15.200",
-        "beneficio_clave": "Te dura 12.000km fácil",
-        "specs_mostrar": ["medida", "marca"],
-        "agregar_social_proof": false
-      },
-      "razon_seleccion": "Cliente busca opción económica"
-    }
-  ],
-  
-  "cross_sell": {
-    "sugerir": true/false,
-    "productos": ["codigo"],
-    "momento": "ahora|despues_de_confirmar",
-    "como_presentar": "string - ej: 'Aprovechá y llevate el aceite que va con eso'"
-  },
-  
-  "estructura_oferta": {
-    "tipo": "lista|comparacion|recomendacion_unica|paquete",
-    "razon": "string - por qué esta estructura"
-  }
-}
-"""
-
-SALES_RESPONSE_PROMPT = """
-Sos Fran, vendedor de TERCOM. Escribí el mensaje de WhatsApp perfecto para cerrar esta venta.
-
-ENTRADA:
-- analisis_ventas: análisis del cliente
-- productos_seleccionados: qué productos y cómo presentarlos
-- perfil_cliente: personalidad y preferencias (si existe)
-- conversacion_previa: contexto
-
-TU TRABAJO:
-Escribir el mensaje de venta PERFECTO para ESTE cliente en ESTE momento.
-
-REGLAS DE ORO:
-1. Escribí como hablarías naturalmente (sos argentino, mayorista, experto)
-2. Adaptate al cliente (su tono, su urgencia, su nivel técnico)
-3. SIEMPRE incluí call-to-action claro
-4. Asumí la venta (lenguaje assumptivo)
-5. Sé breve si el cliente es conciso, detallado si aprecia explicaciones
-
-NO HAGAS:
-- Listas genéricas de productos sin contexto
-- "Espero que te sirva" / "Cualquier cosa avisame" (pasivo)
-- Bombardear con specs si no las pidió
-- Sonar como robot o chatbot
-
-SÍ HACE:
-- Confirmar que entendiste
-- Presentar productos con VALOR (no solo precio)
-- Cerrar con pregunta/afirmación que asume compra
-- Usar lenguaje del cliente (si dice "che" vos también)
-
-NO PIENSES EN REGLAS, PENSÁ: ¿Qué diría el mejor vendedor de motopartes que conocés?
-"""
-
 BUSINESS_CONTEXT = """
 TERCOM - Mayorista Motopartes Argentina
 
@@ -2806,7 +2687,7 @@ ESTILO DE COMUNICACIÓN:
 - Vocabulario: Argentino natural (usá "che", "dale", "mirá") sin sonar forzado
 - Brevedad: Mensajes concretos, máximo 4-5 líneas antes de listar productos
 - Proactividad: Siempre cerrá con una acción concreta para el cliente
-- Ajuste dinámico: Adaptá el tono y la empatía según el plan interno (response_tone) y el estado emocional del cliente.
+- Ajuste dinámico: Adaptá el tono y la empatía según el plan interno y el estado emocional del cliente.
 
 ESTRUCTURA DE RESPUESTA (seguí este orden):
 
@@ -2831,21 +2712,20 @@ ESTRUCTURA DE RESPUESTA (seguí este orden):
    - O siguiente paso: "Confirmo stock y te paso el total"
 
 REGLAS DE PRODUCTOS:
-- Si el plan interno te pasó products_decision, usá SOLO esos
-- Siempre citá código entre paréntesis: (código XXXX/XXXXX-XXX)
+- Usá SOLO los productos del plan interno (productos_finales / productos_elegidos) y citá siempre el código
 - Precios siempre con formato: $X.XXX (punto como separador de miles)
 - Si un producto no tiene código en el plan, NO lo menciones
 
 MANEJO DE CASOS ESPECIALES:
-- Cliente confuso o frustrado: reconocé el problema en 1 frase y mostrale que vas a solucionarlo con el tono pedido (ej: empathetic)
+- Cliente confuso o frustrado: reconocé el problema en 1 frase y mostrale que vas a solucionarlo con el tono pedido
 - Sin stock exacto: Ofrecé alternativas equivalentes
 - Productos dudosos: Aclaralo: "Puede ser que busques X, si no avisame"
-- Usa siempre el response_tone del plan interno y el customer_state.emotion (ej: si emotion=frustrated → tono empático y breve)
+- Ajustá el tono usando sales_analysis.tono_sugerido y meta_razonamiento (más cautela si la confianza es baja)
 
 PLAN INTERNO:
-- Recibirás un JSON con {customer_state, real_intent, actions_to_execute, products_strategy, response_tone}.
-- Incluye sales_analysis y meta_razonamiento: usalos para ajustar tono, cierre y seguridad, pero NO los muestres.
-- NO muestres el plan, solo usalo para redactar.
+- Recibirás un JSON con {{real_intent, query_interpretada, productos_elegidos, razonamiento, sales_analysis, requery, meta_razonamiento, productos_finales}}.
+- Usá sales_analysis para priorizar argumentos y tono, pero NO lo muestres.
+- No inventes productos ni atributos; seguí estrictamente los códigos y allowed_products enviados.
 
 {BUSINESS_CONTEXT}
 """
@@ -2854,75 +2734,63 @@ PLAN INTERNO:
 CITATION_ENFORCED_PROMPT = CUSTOMER_OUTPUT_PROMPT
 
 PLANNING_UNIFIED_PROMPT = f"""
-Sos el cerebro único de planificación de Fran. En UNA sola respuesta debés: detectar intención real, leer el estado emocional, decidir acciones y proponer la respuesta_tone adecuada.
+Sos el cerebro único de planificación de Fran 3.14.1. En UNA sola respuesta generás el plan completo (incluido el análisis comercial) sin saltarte el embudo ni allowed_products.
 
 ENTRADA (JSON):
-- contexto: incluye mensaje_usuario, historial_relevante (últimos mensajes), memoria_viva (moto habitual, allowed_products_snapshot, carrito, pending_action), warnings, search_query, metadata_catalogo.
-- productos_permitidos: lista de productos concretos (SOLO podés elegir de acá).
-- sales_analysis: insights comerciales previos (momento_cliente, intencion_compra, senales_cierre, oportunidades_upsell, tono_sugerido).
+- contexto: mensaje_usuario, historial_relevante, memoria_viva (moto habitual, allowed_products_snapshot, carrito, pending_action), warnings, search_query, metadata_catalogo.
+- productos_permitidos: lista concreta de productos (solo podés usar estos códigos).
 
-OBJETIVOS:
-1) Detectar intención real (real_intent) sin pasos extra.
-2) Analizar estado del cliente → customer_state: {"emotion": "satisfied|neutral|confused|frustrated", "sales_phase": "awareness|consideration|ready_to_buy|post_sale", "urgency": "low|medium|high"}.
-3) Ingerir sales_analysis para ajustar tono, urgencia y posibles upsells sin saltarte allowed_products.
-4) Planificar acciones → actions_to_execute: lista de objetos (ej: {"type": "add_to_cart", "products": ["code1"], "qty_each": 1}, {"type": "ask_clarification", "message": "..."}, {"type": "save_moto_context", "brand": "...", "model": "..."}).
-5) Estrategia de productos → products_strategy.products_decision con SOLO códigos de productos_permitidos. Incluí qty y por qué.
-6) Elegir response_tone coherente con customer_state y tono_sugerido del sales_analysis.
-7) Activar metacognición interna → meta_razonamiento con confianza, datos faltantes y la respuesta más segura.
+OBJETIVOS UNIFICADOS:
+1) Interpretar la intención real y resumir la consulta en query_interpretada.
+2) Seleccionar productos dentro de productos_permitidos y explicar por qué en productos_elegidos.
+3) Integrar el análisis comercial (sales_analysis) directamente acá: tipo de cliente, interés, señales de cierre, argumentos y tono.
+4) Detectar si hace falta re-query: solo un nivel, new_query seguro y acotado.
+5) Hacer meta-razonamiento para detectar riesgos de inventar o falta de datos y sugerir la acción más segura.
 
-GUÍAS DE RAZONAMIENTO (antes de decidir):
-- Normalizá jerga: gomas/cubiertas/cauchos → neumáticos; amortiguadores/shocks → suspensión; bujías/candelas → bujías; batería/acumulador → baterías; filtro puede ser aceite/aire/nafta.
-- Si hay moto en memoria_viva y el mensaje es genérico, asumí esa moto (ej: "cubiertas" + most_recent_bike="fz16" → query "neumaticos yamaha fz16").
-- Referencias a productos previos se resuelven SOLO con allowed_products_snapshot en orden. "los tres" = primeros 3; "el primero" = posición 1; "el más barato" = ordená por precio.
-- Evitá inventar: trabajá solo con productos_permitidos y snapshot. Si faltan datos, pedí aclaración.
-- Detectá mala interpretación/ruido/errores ortográficos. Si la consulta es incoherente o pobre, marcá status=NEED_REQUERY con new_query mejorada PERO limitada al motor FAISS/familias/filtros existentes y manteniendo MAX_PRODUCTS_FOR_LLM.
+REGLAS CRÍTICAS:
+- NUNCA inventes ni expandas productos fuera de productos_permitidos o allowed_products_snapshot.
+- Si la interpretación es dudosa, privilegiá pedir aclaración o requery antes que inventar.
+- Si proponés requery, mantené la búsqueda dentro de las categorías existentes y sin sumar productos nuevos.
+- No generes texto al cliente; solo devolvé el JSON.
 
-SALIDA OBLIGATORIA (JSON limpio, sin texto extra):
+GUÍAS RÁPIDAS:
+- Normalizá jerga (gomas/cubiertas→neumáticos; amortiguadores→suspensión; etc.).
+- Si hay moto en memoria_viva y el pedido es genérico, asumila de forma segura.
+- Referencias a "los primeros", "el más barato" se resuelven con allowed_products_snapshot en orden.
+- No uses más de los productos permitidos ni cambies códigos.
+
+SALIDA OBLIGATORIA (JSON puro):
 {{
-  "status": "OK|NEED_REQUERY|NEED_CLARIFICATION",
-  "real_intent": "product_search|cart_action|order_flow|payment|shipping|tech_expert|small_talk|unknown",
-  "customer_state": {{"emotion": "...", "sales_phase": "...", "urgency": "..."}},
-  "response_tone": "empathetic|concise|upbeat|technical|recovery",
-  "actions_to_execute": [{{"type": "...", ...}}],
-  "products_strategy": {{
-    "products_decision": [{{"code": "...", "qty": 1, "why": "..."}}],
-    "reference_resolution": "... opcional ..."
-  }},
-  "reason": "por qué decidiste esto",
-  "new_query": "solo si status=NEED_REQUERY",
-  "message_to_user_if_clarification": "solo si status=NEED_CLARIFICATION",
-  "meta_razonamiento": {{
-    "confianza": "alta|media|baja",
-    "datos_faltantes": ["string"],
-    "riesgos": ["string"],
-    "respuesta_mas_segura": "confirmar|aclarar|responder_con_productos"
-  }}
+"real_intent": "product_search|cart_action|order_flow|payment|shipping|tech_expert|small_talk|unknown",
+"query_interpretada": "...",
+"productos_elegidos": [{{"code": "...", "qty": 1, "por_que": "...", "rol": "principal|alternativa|complemento"}}],
+"razonamiento": "explicación breve de por qué se eligió esa estrategia",
+"sales_analysis": {{
+  "tipo_de_cliente": "...",
+  "nivel_de_interes": "alto|medio|bajo",
+  "senales_de_cierre": ["..."],
+  "producto_recomendado": "código dentro de productos_permitidos o ''",
+  "argumentos_clave": ["precio", "calidad", "disponibilidad", "compatibilidad", "ahorro_tiempo", "marca"],
+  "alternativas_seguras": ["códigos dentro de productos_permitidos"],
+  "tono_sugerido": "empathetic|concise|upbeat|technical|recovery",
+  "nivel_de_confianza": 0.0
+}},
+"requery": {{
+  "NEED_REQUERY": false,
+  "new_query": "",
+  "razon": "",
+  "tipo_de_error": "ortografía|ambigüedad|categoría incorrecta|compatibilidad|",
+  "nivel_de_confianza": 0.0
+}},
+"meta_razonamiento": {{
+  "confianza": 0.0,
+  "riesgos": "...",
+  "datos_faltantes": "...",
+  "accion_sugerida": "pedir_aclaracion|responder_con_cautela|requery"
+}}
 }}
 
-EJEMPLOS RÁPIDOS:
-1) Cliente frustrado porque vio pocas opciones:
-  - real_intent: product_search
-  - customer_state.emotion: frustrated
-  - status: NEED_REQUERY con new_query ampliada
-  - response_tone: empathetic
-
-2) Cliente confundido pidiendo aclaración:
-  - status: NEED_CLARIFICATION con pregunta concreta
-  - actions_to_execute: [{"type": "ask_clarification", "message": "¿Es para Honda Wave o Biz?"}]
-
-3) Cliente listo para comprar:
-  - real_intent: cart_action u order_flow
-  - products_decision: los pedidos explícitos o snapshot
-  - actions_to_execute: [{"type": "add_to_cart", "products": [codes], "qty_each": 1}]
-  - response_tone: concise|upbeat
-
-4) Cliente comparando opciones:
-  - real_intent: product_search
-  - products_decision: 2-3 productos variados
-  - reason: resaltá diferencias
-  - response_tone: advisory
-
-DEVOLVÉ SIEMPRE JSON PURO SIN TEXTO ADICIONAL.
+DEVOLVÉ SIEMPRE JSON LIMPIO SIN TEXTO EXTRA.
 """
 TECH_SYSTEM_PROMPT = f"""
 Sos Fran, mecánico experto y vendedor premium de TERCOM.
@@ -2974,75 +2842,6 @@ def normalize_product_for_llm(product: dict) -> dict:
         "model": product.get("model", ""),
         "category": product.get("category", ""),
     }
-
-
-def call_sales_json_llm(prompt: str, payload: dict, model: str = None, temperature: float = 0.35, max_tokens: int = 700):
-    model = model or MODEL_REASONING
-    try:
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-
-        raw = (resp.choices[0].message.content or "").strip()
-        parsed = _safe_json_parse(_extract_json_block(raw))
-        return parsed if isinstance(parsed, dict) else None
-    except Exception as e:
-        logger.error(f"call_sales_json_llm error: {e}")
-        return None
-
-
-def call_sales_text_llm(prompt: str, payload: dict, model: str = None, temperature: float = 0.35, max_tokens: int = 500):
-    model = model or MODEL_RESPONSE
-    try:
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-
-        return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.error(f"call_sales_text_llm error: {e}")
-        return ""
-
-
-def run_sales_intelligence(contexto: dict, productos_permitidos: list) -> dict:
-    """Ejecuta el análisis comercial avanzado dentro del mismo pipeline unificado."""
-    try:
-        payload = {
-            "conversacion_completa": contexto.get("historial", []),
-            "mensaje_usuario": contexto.get("mensaje_usuario"),
-            "productos_disponibles": [normalize_product_for_llm(p) for p in (productos_permitidos or [])[:MAX_PRODUCTS_FOR_LLM]],
-            "contexto_cliente": {
-                "most_recent_bike": contexto.get("most_recent_bike"),
-                "cart_state": contexto.get("cart_state", []),
-                "pending_actions": contexto.get("pending_actions"),
-            },
-            "perfil_cliente": contexto.get("memoria_viva", {}).get("perfil_cliente"),
-        }
-        analysis = call_sales_json_llm(
-            SALES_INTELLIGENCE_PROMPT,
-            payload,
-            temperature=0.15,
-            max_tokens=500,
-        )
-        if isinstance(analysis, dict):
-            return analysis.get("sales_analysis") or analysis
-    except Exception as e:
-        logger.error(f"run_sales_intelligence error: {e}")
-    return {}
 
 
 def build_user_profile_snapshot(phone: str, memory: dict) -> dict:
@@ -3176,57 +2975,81 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
 
     return memory
 
-def validate_reasoning_json(raw_text):
+def validate_reasoning_json(raw_text, allowed_products):
     parsed = _safe_json_parse(raw_text or "")
     if not isinstance(parsed, dict):
         logger.error(f"JSON parse falló: contenido inválido, raw text: {str(raw_text)[:300]}")
         return None
 
-    status = parsed.get("status") or "OK"
-    if status not in {"OK", "NEED_REQUERY", "NEED_CLARIFICATION"}:
-        logger.error(f"JSON de razonamiento con status inválido: {parsed}")
-        return None
+    allowed_codes = {str(p.get("code")) for p in (allowed_products or []) if p.get("code")}
 
-    if status == "NEED_REQUERY" and not parsed.get("new_query"):
-        return None
-
-    if status == "NEED_CLARIFICATION" and not parsed.get("message_to_user_if_clarification"):
-        return None
-
-    if status == "NEED_REQUERY":
-        parsed["new_query"] = (parsed.get("new_query") or "").strip()
-
-    products_strategy = parsed.get("products_strategy") or {}
-    decisions = products_strategy.get("products_decision")
-    if decisions is None:
-        decisions = parsed.get("products_decision", [])
-    if not isinstance(decisions, list):
-        decisions = []
-    parsed["products_strategy"] = {**products_strategy, "products_decision": decisions}
-    parsed["products_decision"] = decisions
-
-    actions = parsed.get("actions_to_execute") or parsed.get("pending_actions") or []
-    if not isinstance(actions, list):
-        actions = []
-    parsed["actions_to_execute"] = actions
-
-    customer_state = parsed.get("customer_state") or {}
-    parsed["customer_state"] = {
-        "emotion": customer_state.get("emotion", "neutral"),
-        "sales_phase": customer_state.get("sales_phase", "awareness"),
-        "urgency": customer_state.get("urgency", "medium"),
+    parsed_plan = {
+        "real_intent": (parsed.get("real_intent") or "unknown").strip(),
+        "query_interpretada": (parsed.get("query_interpretada") or "").strip(),
+        "razonamiento": (parsed.get("razonamiento") or parsed.get("reason", "")).strip(),
     }
-    parsed["response_tone"] = parsed.get("response_tone") or "concise"
+
+    sales_analysis = parsed.get("sales_analysis") or {}
+    alternativas_seguras = [
+        str(code)
+        for code in (sales_analysis.get("alternativas_seguras") or [])
+        if str(code) in allowed_codes
+    ]
+    producto_recomendado = sales_analysis.get("producto_recomendado")
+    if producto_recomendado and str(producto_recomendado) not in allowed_codes:
+        producto_recomendado = ""
+
+    parsed_plan["sales_analysis"] = {
+        "tipo_de_cliente": sales_analysis.get("tipo_de_cliente", ""),
+        "nivel_de_interes": sales_analysis.get("nivel_de_interes", "medio"),
+        "senales_de_cierre": sales_analysis.get("senales_de_cierre", []),
+        "producto_recomendado": producto_recomendado or "",
+        "argumentos_clave": sales_analysis.get("argumentos_clave", []),
+        "alternativas_seguras": alternativas_seguras,
+        "tono_sugerido": sales_analysis.get("tono_sugerido", "concise"),
+        "nivel_de_confianza": float(sales_analysis.get("nivel_de_confianza", 0.0) or 0.0),
+    }
+
+    productos_elegidos = []
+    for decision in parsed.get("productos_elegidos", []) or []:
+        code = str(decision.get("code", "")).strip()
+        if not code or code not in allowed_codes:
+            continue
+        try:
+            qty = max(1, int(decision.get("qty", 1)))
+        except Exception:
+            qty = 1
+        productos_elegidos.append({
+            "code": code,
+            "qty": qty,
+            "por_que": decision.get("por_que") or decision.get("why", ""),
+            "rol": decision.get("rol", "principal"),
+        })
+    parsed_plan["productos_elegidos"] = productos_elegidos
+
+    requery = parsed.get("requery") or {}
+    parsed_plan["requery"] = {
+        "NEED_REQUERY": bool(requery.get("NEED_REQUERY", False)),
+        "new_query": (requery.get("new_query") or "").strip(),
+        "razon": (requery.get("razon") or "").strip(),
+        "tipo_de_error": (requery.get("tipo_de_error") or "").strip(),
+        "nivel_de_confianza": float(requery.get("nivel_de_confianza", 0.0) or 0.0),
+    }
+    if parsed_plan["requery"]["NEED_REQUERY"] and not parsed_plan["requery"]["new_query"]:
+        logger.warning("Plan solicitó requery pero no propuso new_query")
+        return None
 
     meta = parsed.get("meta_razonamiento") or {}
-    parsed["meta_razonamiento"] = {
-        "confianza": meta.get("confianza", "media"),
-        "datos_faltantes": meta.get("datos_faltantes", []),
-        "riesgos": meta.get("riesgos", []),
-        "respuesta_mas_segura": meta.get("respuesta_mas_segura", "aclarar"),
+    parsed_plan["meta_razonamiento"] = {
+        "confianza": float(meta.get("confianza", 0.0) or 0.0),
+        "riesgos": meta.get("riesgos", ""),
+        "datos_faltantes": meta.get("datos_faltantes", ""),
+        "accion_sugerida": meta.get("accion_sugerida", "responder_con_cautela"),
     }
 
-    return parsed
+    tono_sugerido = parsed_plan["sales_analysis"].get("tono_sugerido") or "concise"
+    parsed_plan["response_tone"] = tono_sugerido
+    return parsed_plan
 
 
 def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
@@ -3236,41 +3059,23 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
     seguro para el segundo paso de LLM.
     """
     try:
-        if not parsed_plan or parsed_plan.get("status") != "OK":
+        if not parsed_plan:
             return None
 
         productos_permitidos_map = {
             str(p.get("code")): p for p in (productos_permitidos or []) if p.get("code")
         }
 
-        # ← NUEVO: Manejar referencias a productos anteriores
-        reference_resolution = parsed_plan.get("reference_resolution", {})
-        if reference_resolution.get("type") in ["previous_search", "implicit_quantity"]:
-            # El LLM ya resolvió la referencia en products_decision
-            # Solo validamos que esos códigos existen
-            logger.info(f"Resolviendo referencia: {reference_resolution.get('resolved_to')}")
-
-        strategy = parsed_plan.get("products_strategy", {})
-        reference_resolution = strategy.get("reference_resolution") or parsed_plan.get("reference_resolution", {})
-
         productos_seleccionados = []
-        for decision in strategy.get("products_decision", []):
+        for decision in parsed_plan.get("productos_elegidos", []) or []:
             code = decision.get("code")
             if not code:
                 continue
 
-            # Buscar primero en productos_permitidos
             producto = productos_permitidos_map.get(str(code))
-            
-            # ← NUEVO: Si no está en productos_permitidos, buscar en catálogo global
-            # (esto pasa cuando el LLM usa allowed_products_snapshot)
             if not producto:
-                catalog, _, _, _ = get_catalog_and_index()
-                producto = next((p for p in catalog if p.get("code") == code), None)
-                
-                if not producto:
-                    logger.warning(f"Producto {code} no encontrado en catálogo")
-                    continue
+                logger.warning(f"Producto {code} fuera de allowed_products, se descarta")
+                continue
 
             try:
                 qty_sugerida = max(1, int(decision.get("qty", 1)))
@@ -3280,8 +3085,8 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
             productos_seleccionados.append({
                 **producto,
                 "qty_sugerida": qty_sugerida,
-                "razon": decision.get("why", ""),
-                "decision_score": decision.get("confidence_score"),
+                "razon": decision.get("por_que", ""),
+                "rol": decision.get("rol", "principal"),
             })
 
         for action in parsed_plan.get("actions_to_execute", []) or []:
@@ -3295,26 +3100,21 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
                 qty_each = action.get("qty_each", 1)
 
                 for code in products_to_add:
-                    catalog, _, _, _ = get_catalog_and_index()
-                    p = next((prod for prod in catalog if prod.get("code") == code), None)
-                    if p:
+                    producto = productos_permitidos_map.get(str(code))
+                    if producto:
                         cart_add(
                             phone,
                             code,
                             qty_each,
-                            p.get("name", ""),
-                            to_decimal_money(p.get("price_ars", 0)),
-                            to_decimal_money(p.get("price_usd", 0))
+                            producto.get("name", ""),
+                            to_decimal_money(producto.get("price_ars", 0)),
+                            to_decimal_money(producto.get("price_usd", 0))
                         )
 
         return {
             "productos_finales": productos_seleccionados,
             "metadata": {
-                "brand": parsed_plan.get("extracted_entities", {}).get("brand"),
-                "model": parsed_plan.get("extracted_entities", {}).get("model"),
-                "category": parsed_plan.get("extracted_entities", {}).get("category"),
-                "semantic_expansion": parsed_plan.get("semantic_expansion"),
-                "reference_resolution": reference_resolution,
+                "reference_resolution": parsed_plan.get("reference_resolution"),
             },
             "customer_state": parsed_plan.get("customer_state", {}),
             "response_tone": parsed_plan.get("response_tone"),
@@ -3487,21 +3287,19 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         }
 
         productos_permitidos = catalog_products or []
-        sales_analysis = run_sales_intelligence(contexto, productos_permitidos)
-        contexto["sales_analysis"] = sales_analysis or {}
         plan_interno = pensar_con_llm(
             system_prompt or PLANNING_UNIFIED_PROMPT,
             contexto,
             productos_permitidos,
         )
 
-        parsed_plan = validate_reasoning_json(plan_interno)
+        parsed_plan = validate_reasoning_json(plan_interno, productos_permitidos)
 
-        max_requery_attempts = 2
+        max_requery_attempts = 1
         requery_count = 0
-        while parsed_plan and parsed_plan.get("status") == "NEED_REQUERY" and requery_count < max_requery_attempts:
+        while parsed_plan and parsed_plan.get("requery", {}).get("NEED_REQUERY") and requery_count < max_requery_attempts:
             requery_count += 1
-            nueva_query = parsed_plan.get("new_query")
+            nueva_query = parsed_plan.get("requery", {}).get("new_query")
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
                 if isinstance(semantic_results, dict):
@@ -3514,14 +3312,13 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                     "memoria_viva": memory,
                     "metadata_catalogo": {"productos_total": len(productos_permitidos)},
                     "cart_state": memory.get("cart_state", []),
-                    "sales_analysis": sales_analysis or {},
                 })
                 plan_interno = pensar_con_llm(
                     system_prompt or PLANNING_UNIFIED_PROMPT,
                     contexto,
                     productos_permitidos,
                 )
-                parsed_plan = validate_reasoning_json(plan_interno)
+                parsed_plan = validate_reasoning_json(plan_interno, productos_permitidos)
             except Exception as e:
                 logger.error(f"Re-búsqueda fallida: {e}")
                 parsed_plan = None
@@ -3540,12 +3337,12 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                 fallback_reply = "Necesito un dato más para ayudarte: marca, modelo o categoría de la moto."
             return {"reply": fallback_reply, "plan": None, "execution": None}
 
-        if parsed_plan.get("status") == "NEED_CLARIFICATION":
-            clarification = parsed_plan.get("message_to_user_if_clarification") or "Pasame marca/modelo/año así lo busco bien."
+        meta_accion = parsed_plan.get("meta_razonamiento", {}).get("accion_sugerida")
+        if meta_accion == "pedir_aclaracion" and not parsed_plan.get("productos_elegidos"):
+            clarification = "Necesito un dato más para afinar la búsqueda (marca/modelo/año o categoría específica)."
             return {"reply": clarification, "plan": parsed_plan, "execution": None}
 
         plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, productos_permitidos)
-        parsed_plan["sales_analysis"] = sales_analysis or {}
         razonamiento_final = json.dumps({**parsed_plan, **(plan_ejecutado or {})}, ensure_ascii=False)
         respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
         return {
@@ -3859,9 +3656,7 @@ def orquestar_fran(mensaje_usuario, phone):
     if execution_context["will_send_chunks"] and products:
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
-            chunk_text = f"
-━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━
-"
+            chunk_text = f"━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
             chunk_text += format_search_results(chunk)
             if idx > 1:
                 time.sleep(0.5)
