@@ -2990,6 +2990,165 @@ Respuesta:
 }
 """
 
+META_COGNITION_PROMPT = """
+Sos un experto en análisis de conversaciones comerciales B2B. Tu trabajo es entender la INTENCIÓN REAL del cliente.
+
+ENTRADA:
+- mensaje_actual: lo que acaba de escribir
+- historial_completo: últimos 10 mensajes (usuario + bot)
+- contexto: moto habitual, búsquedas previas, carrito
+
+TU TRABAJO:
+Analizá la conversación como un vendedor experto y respondé estas preguntas:
+
+1. ESTADO EMOCIONAL / SATISFACCIÓN:
+   - ¿Está satisfecho con lo que le mostramos antes?
+   - ¿Está confundido o frustrado?
+   - ¿Está explorando opciones o ya decidió?
+
+2. CONTINUIDAD:
+   - ¿Es un tema NUEVO o CONTINUACIÓN del anterior?
+   - Si es continuación: ¿está profundizando o cambiando de ángulo?
+   - Si es nuevo: ¿es para la misma moto o cambió de contexto?
+
+3. INTENCIÓN REAL:
+   - ¿Qué quiere LOGRAR con este mensaje?
+   - ¿Hay alguna frustración oculta? (ej: "me refería a..." = "no me entendiste")
+   - ¿Está listo para comprar o todavía investigando?
+
+4. NIVEL DE EXPERTISE:
+   - ¿Usa términos técnicos correctos o jerga/sinónimos?
+   - ¿Es mecánico/taller o usuario final?
+   - ¿Qué nivel de detalle necesita?
+
+FORMATO DE SALIDA (JSON):
+{
+  "satisfaction_level": "satisfied|neutral|confused|frustrated",
+  "conversation_flow": "new_topic|continuation_same|continuation_pivot|clarification",
+  "intent_type": "exploration|purchase_ready|technical_question|complaint",
+  "customer_profile": {
+    "expertise": "mechanic|enthusiast|casual_user",
+    "confidence": "high|medium|low",
+    "bike_context": "same_as_before|new_bike|unknown"
+  },
+  "hidden_signals": {
+    "frustration_detected": true/false,
+    "reason": "string explicando qué pasó",
+    "suggested_recovery": "string con cómo recuperar la conversación"
+  },
+  "recommended_approach": "show_more_options|clarify_need|confirm_understanding|proceed_with_last_context"
+}
+
+EJEMPLOS:
+
+Ejemplo 1 - Frustración oculta:
+historial: [
+  {bot: "Te paso esta cubierta para FZ16: [1 producto]"},
+  {user: "Me refería a gomas para la moto, cubiertas"}
+]
+
+Respuesta:
+{
+  "satisfaction_level": "confused",
+  "conversation_flow": "clarification",
+  "intent_type": "clarification",
+  "customer_profile": {
+    "expertise": "casual_user",
+    "confidence": "low",
+    "bike_context": "same_as_before"
+  },
+  "hidden_signals": {
+    "frustration_detected": true,
+    "reason": "Usuario usó sinónimo ('gomas') pero el bot solo mostró 1 producto. Dice 'me refería a' indicando que siente que no lo entendimos. En realidad SÍ le mostramos lo correcto, pero probablemente esperaba MÁS opciones.",
+    "suggested_recovery": "Reconocer que le mostramos lo correcto pero ofrecer MÁS variedad: 'Claro, esas son las cubiertas/gomas disponibles. Te paso más opciones con diferentes medidas y marcas'"
+  },
+  "recommended_approach": "show_more_options"
+}
+
+Ejemplo 2 - Continuación natural:
+historial: [
+  {bot: "Acá tenés 3 opciones de filtros para FZ16"},
+  {user: "y espejos?"}
+]
+
+Respuesta:
+{
+  "satisfaction_level": "satisfied",
+  "conversation_flow": "continuation_same",
+  "intent_type": "exploration",
+  "customer_profile": {
+    "expertise": "mechanic",
+    "confidence": "high",
+    "bike_context": "same_as_before"
+  },
+  "hidden_signals": {
+    "frustration_detected": false,
+    "reason": "Está armando pedido completo para FZ16, va por partes",
+    "suggested_recovery": null
+  },
+  "recommended_approach": "proceed_with_last_context"
+}
+
+Ejemplo 3 - Usuario listo para comprar:
+historial: [
+  {bot: "Te paso 3 espejos para FZ16: [lista]"},
+  {user: "Tenía, me sumas los tres al carrito?"}
+]
+
+Respuesta:
+{
+  "satisfaction_level": "satisfied",
+  "conversation_flow": "continuation_same",
+  "intent_type": "purchase_ready",
+  "customer_profile": {
+    "expertise": "mechanic",
+    "confidence": "high",
+    "bike_context": "same_as_before"
+  },
+  "hidden_signals": {
+    "frustration_detected": false,
+    "reason": "Está conforme con opciones, quiere avanzar a checkout",
+    "suggested_recovery": null
+  },
+  "recommended_approach": "confirm_cart_addition"
+}
+"""
+
+PLANNING_PROMPT_V2 = f"""
+{INTERNAL_REASONING_PROMPT}
+
+NUEVO: Recibirás también un análisis de meta-cognición:
+
+meta_analysis: {{
+  "satisfaction_level": "...",
+  "recommended_approach": "...",
+  "hidden_signals": {{...}}
+}}
+
+Usá esta info para:
+1. Si hay frustración detectada, seguí el "suggested_recovery"
+2. Si el approach es "show_more_options", buscá más productos (top 10 en vez de top 3)
+3. Si el approach es "clarify_need", generá NEED_CLARIFICATION con pregunta específica
+4. Si el approach es "confirm_understanding", incluí en el plan una validación explícita
+
+Ejemplo:
+Si meta_analysis dice:
+{{
+  "satisfaction_level": "confused",
+  "hidden_signals": {{
+    "suggested_recovery": "Mostrar más variedad de cubiertas"
+  }}
+}}
+
+Entonces tu plan debe:
+{{
+  "status": "NEED_REQUERY",
+  "new_query": "neumaticos yamaha fz16 todas las marcas",
+  "reason": "Usuario esperaba más opciones, amplío búsqueda",
+  "response_tone": "empathetic_recovery"
+}}
+"""
+
 TECH_SYSTEM_PROMPT = f"""
 Sos Fran, mecánico experto y vendedor premium de TERCOM.
 
@@ -3139,6 +3298,38 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
         memory["allowed_products_snapshot"] = []
 
     return memory
+
+
+def generate_meta_cognition(mensaje_actual: str, history: list, contexto: dict) -> dict:
+    try:
+        payload = {
+            "mensaje_actual": (mensaje_actual or "")[:600],
+            "historial_completo": history[-10:] if history else [],
+            "contexto": contexto or {},
+        }
+
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=MODEL_REASONING,
+                messages=[
+                    {"role": "system", "content": META_COGNITION_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.2,
+                max_tokens=300,
+            )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1:
+            raw = raw[start:end + 1]
+
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error(f"generate_meta_cognition error: {e}")
+        return {}
 
 
 def validate_reasoning_json(raw_text):
@@ -3405,6 +3596,16 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         history = get_history_since(phone, days=1, limit=12)
         intent_info = execution_context.get("intent_details", {"intent": execution_context.get("intent_detected", "unknown")})
         memory = build_enriched_context(phone, user_message, intent_info, catalog_products)
+        historial_compacto = [
+            {"role": h["role"], "content": h["content"][:400]}
+            for h in history[-10:]
+        ]
+        meta_context = {
+            "most_recent_bike": memory.get("most_recent_bike"),
+            "last_search_query": memory.get("last_search_query"),
+            "cart_state": memory.get("cart_state", []),
+        }
+        meta_analysis = generate_meta_cognition(user_message, historial_compacto, meta_context)
         contexto = {
             "mensaje_usuario": user_message,
             "intent": intent_info.get("intent", execution_context.get("intent_detected", "unknown")),
@@ -3417,11 +3618,12 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             "pending_actions": memory.get("pending_action"),
             "cart_state": memory.get("cart_state", []),
             "most_recent_bike": memory.get("most_recent_bike", ""),
+            "meta_analysis": meta_analysis,
         }
 
         productos_permitidos = catalog_products or []
         plan_interno = pensar_con_llm(
-            system_prompt or INTERNAL_REASONING_PROMPT,
+            system_prompt or PLANNING_PROMPT_V2,
             contexto,
             productos_permitidos,
         )
@@ -3444,9 +3646,10 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                     "memoria_viva": memory,
                     "metadata_catalogo": {"productos_total": len(productos_permitidos)},
                     "cart_state": memory.get("cart_state", []),
+                    "meta_analysis": meta_analysis,
                 })
                 plan_interno = pensar_con_llm(
-                    system_prompt or INTERNAL_REASONING_PROMPT,
+                    system_prompt or PLANNING_PROMPT_V2,
                     contexto,
                     productos_permitidos,
                 )
