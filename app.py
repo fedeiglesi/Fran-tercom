@@ -14,7 +14,6 @@ import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pi
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from collections import defaultdict, Counter
-from functools import lru_cache
 from contextlib import contextmanager
 from threading import Lock, Semaphore
 from queue import Queue, Empty
@@ -140,6 +139,7 @@ DEDUP_WINDOW = 5
 
 _catalog_and_index_cache = {"catalog": None, "index": None, "bm25": None, "bm25_corpus": None, "built_at": None}
 _catalog_lock = Lock()
+_raw_csv_cache = {"text": None}
 
 _embeddings_cache_lock = Lock()
 
@@ -1572,28 +1572,35 @@ def cart_totals(phone):
 # ------------------------------------------------------------------
 # CATÁLOGO + FAMILIAS
 # ------------------------------------------------------------------
-@lru_cache(maxsize=1)
 def _load_raw_csv():
+    if _raw_csv_cache.get("text"):
+        return _raw_csv_cache["text"]
+
+    text = ""
+
     try:
         if CATALOG_URL.startswith("http"):
             r = requests.get(CATALOG_URL, timeout=REQUESTS_TIMEOUT, headers=REQUESTS_HEADERS)
             r.raise_for_status()
             r.encoding = "utf-8"
-            return r.text
-
-        local_path = Path(CATALOG_URL.replace("file://", ""))
-        if local_path.exists():
-            return local_path.read_text(encoding="utf-8")
-
-        logger.warning(f"Ruta de catálogo inválida: {CATALOG_URL}")
+            text = r.text
+        else:
+            local_path = Path(CATALOG_URL.replace("file://", ""))
+            if local_path.exists():
+                text = local_path.read_text(encoding="utf-8")
+            else:
+                logger.warning(f"Ruta de catálogo inválida: {CATALOG_URL}")
     except Exception as e:
         logger.error(f"Error descargando CSV: {e}")
 
-    if LOCAL_CSV_FALLBACK.exists():
+    if not text and LOCAL_CSV_FALLBACK.exists():
         logger.info("Usando catálogo local de respaldo")
-        return LOCAL_CSV_FALLBACK.read_text(encoding="utf-8")
+        text = LOCAL_CSV_FALLBACK.read_text(encoding="utf-8")
 
-    return ""
+    if text:
+        _raw_csv_cache["text"] = text
+
+    return text
 
 
 def _extract_column(header_row, key_variants):
