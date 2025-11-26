@@ -72,7 +72,6 @@ MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
 MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
-USE_SALES_PROMPT_FLOW = (os.environ.get("USE_SALES_PROMPT_FLOW", "true").strip().lower() == "true")
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -456,27 +455,10 @@ def validate_and_fix_response(reply: str, allowed_products: list, phone: str, ex
     }
 
     if not code_validation.get("valid") or not name_validation.get("valid"):
-        logger.warning("Respuesta con alucinaciones detectadas, regenerando...")
-
-        if execution_context.get("regenerated", 0) >= 2:
-            return "Tuve problemas validando la respuesta. Repetíme el pedido para que no te pase algo incorrecto."
-
-        execution_context["regenerated"] = execution_context.get("regenerated", 0) + 1
-        save_message(phone, reply, "assistant_faulty")
-
-        if allowed_products[:5]:
-            product_list = "\n".join([
-                f"• {p['name']} (código {p['code']}) - {format_price(p['price_ars'])}"
-                for p in allowed_products[:5]
-            ])
-
-            return (
-                f"Mirá, te paso lo que tengo en catálogo para lo que buscás:\n\n"
-                f"{product_list}\n\n"
-                f"¿Alguno te sirve? Si necesitás otra cosa decime marca/modelo específico."
-            )
-
-        return "No encontré coincidencias exactas. Dame más detalles (marca/modelo/año) y te busco opciones precisas."
+        logger.warning("Respuesta con posibles alucinaciones detectadas; sugiero reintentar el razonamiento.")
+        execution_context["validation"]["needs_retry"] = True
+        note = "Detecté un código o nombre raro. ¿Me repetís marca/modelo o querés que lo vuelva a calcular?"
+        return f"{reply}\n\n_{note}_"
 
     return reply
 
@@ -2408,79 +2390,6 @@ TOTAL: {format_price(Decimal(str(total)))}
     except Exception as e:
         logger.error(f"Error enviando notificacion: {e}")
 
-# ------------------------------------------------------------------
-# INTENT DETECTOR 2.0
-# ------------------------------------------------------------------
-INTENT_SYSTEM_PROMPT = """
-Sos un clasificador de intenciones para un vendedor mayorista (WhatsApp).
-NO respondas al usuario. NO agregues explicaciones.
-Tu única salida será un JSON válido (UNA línea) con este esquema EXACTO:
-{"intent":"<uno de: small_talk|product_search|cart_action|order_flow|payment|shipping|tech_expert|view_cart|empty_cart|confirmation|negation|unknown>", "query":"<texto util para buscar o ''>"}
-
-Criterios estrictos (habla argentina):
-
-- "hola", "buen día", "buenas", "que tal", "cómo va", "gracias" → small_talk
-
-- Si aparece un código tipo 1234/56789-012 → product_search (query = código)
-- Pedidos de repuestos / precios / "tenés", "busco", "algo para", menciona marca-modelo → product_search
-
-- Verbos de carrito: "agregá", "sumame", "sacame", "bajame", "subilo", "ponelo", "agregame", "cargame" → cart_action
-- "ver carrito", "qué tengo", "mostrame el carrito" → view_cart
-- "vaciar", "limpia todo", "borra el carrito" → empty_cart
-
-- "listo, cómo sigo?", "qué opciones hay?", "ya estaría", "cerremos", "hacemos el pedido" → order_flow (checkout)
-- Pagos: "cómo pago", "transferencia", "efectivo", "tenés QR", "cheque", "pago" → payment
-- Envíos: "envío", "mandás moto", "retiro", "mensajero", "cuánto tarda" → shipping
-
-- Preguntas técnicas/mecánicas: "por qué", "qué conviene", "cuánto dura", "cada cuánto" → tech_expert
-
-- "sí", "dale", "ok", "perfecto", "vamos" → confirmation
-- "no", "cancelá", "dejalo", "me arrepentí" → negation
-
-- Cualquier otro caso → unknown
-
-La clave "query" solo debe contener texto útil para buscar en catálogo (aplica a product_search). Para otras intenciones usá "".
-
-IMPORTANTE: devolvé SIEMPRE un JSON de una sola línea.
-"""
-
-
-def detect_intent_llm(msg):
-    try:
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=MODEL_NAME,
-                temperature=0,
-                max_tokens=50,
-                messages=[
-                    {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-                    {"role": "user", "content": msg.strip()[:600]}
-                ]
-            )
-        raw = (resp.choices[0].message.content or "").strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1:
-            raw = raw[start:end+1]
-
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            return {"intent": "unknown", "query": ""}
-
-        intent = str(data.get("intent", "unknown")).strip()
-        query = str(data.get("query", "")).strip()
-
-        valid_intents = {
-            "small_talk", "product_search", "cart_action", "order_flow", "payment", "shipping",
-            "tech_expert", "view_cart", "empty_cart", "confirmation", "negation", "unknown"
-        }
-        if intent not in valid_intents:
-            intent = "unknown"
-
-        return {"intent": intent, "query": query or msg.strip()[:600]}
-    except Exception as e:
-        logger.error(f"detect_intent_llm error: {e}")
-        return {"intent": "unknown", "query": msg.strip()[:600]}
 
 # ------------------------------------------------------------------
 # PEDIDOS IMPLÍCITOS (MEJORADOS)
@@ -2955,6 +2864,7 @@ ESTILO DE COMUNICACIÓN:
 - Vocabulario: Argentino natural (usá "che", "dale", "mirá") sin sonar forzado
 - Brevedad: Mensajes concretos, máximo 4-5 líneas antes de listar productos
 - Proactividad: Siempre cerrá con una acción concreta para el cliente
+- Ajuste dinámico: Adaptá el tono y la empatía según el plan interno (response_tone) y el estado emocional del cliente.
 
 ESTRUCTURA DE RESPUESTA (seguí este orden):
 
@@ -2978,18 +2888,6 @@ ESTRUCTURA DE RESPUESTA (seguí este orden):
    - O pregunta específica: "¿Es para 110cc o 125cc?"
    - O siguiente paso: "Confirmo stock y te paso el total"
 
-EJEMPLO BUENO:
-"Dale, para la Wave 110 tengo:
-
-Filtro Aceite Mann (0956/12345-001) - $8.500
-Filtro Aire K&N (0956/12346-002) - $12.300
-
-El K&N te dura más pero ambos van bien. ¿Los cargo al carrito?"
-
-EJEMPLO MALO (no hacer):
-"¡Hola! Muchas gracias por tu consulta. He revisado nuestro catálogo y encontré varias opciones interesantes que podrían servirte. A continuación te detallo los productos disponibles con sus características..."
-[muy largo, formal, sin acción]
-
 REGLAS DE PRODUCTOS:
 - Si el plan interno te pasó products_decision, usá SOLO esos
 - Siempre citá código entre paréntesis: (código XXXX/XXXXX-XXX)
@@ -2997,9 +2895,14 @@ REGLAS DE PRODUCTOS:
 - Si un producto no tiene código en el plan, NO lo menciones
 
 MANEJO DE CASOS ESPECIALES:
-- Cliente confuso: Hacé 1 pregunta específica (marca O modelo O año)
+- Cliente confuso o frustrado: reconocé el problema en 1 frase y mostrale que vas a solucionarlo con el tono pedido (ej: empathetic)
 - Sin stock exacto: Ofrecé alternativas equivalentes
 - Productos dudosos: Aclaralo: "Puede ser que busques X, si no avisame"
+- Usa siempre el response_tone del plan interno y el customer_state.emotion (ej: si emotion=frustrated → tono empático y breve)
+
+PLAN INTERNO:
+- Recibirás un JSON con {customer_state, real_intent, actions_to_execute, products_strategy, response_tone}.
+- NO muestres el plan, solo usalo para redactar.
 
 {BUSINESS_CONTEXT}
 """
@@ -3007,394 +2910,67 @@ MANEJO DE CASOS ESPECIALES:
 # Compatibilidad hacia atrás
 CITATION_ENFORCED_PROMPT = CUSTOMER_OUTPUT_PROMPT
 
-INTERNAL_REASONING_PROMPT = """
-Sos el sistema de razonamiento interno de Fran. Tu trabajo es ANALIZAR y PLANIFICAR, no hablar con el cliente.
+PLANNING_UNIFIED_PROMPT = f"""
+Sos el cerebro único de planificación de Fran. En UNA sola respuesta debés: detectar intención real, leer el estado emocional, decidir acciones y proponer la respuesta_tone adecuada.
 
-ENTRADA que recibirás:
-- mensaje_usuario: lo que escribió
-- productos_permitidos: lista de productos del catálogo (SOLO podés elegir de acá)
-- historial: conversaciones previas
-- memoria_viva: contexto del cliente (moto habitual, búsquedas previas, carrito)
-- cart_state: productos actuales en el carrito
-- pending_action: si hay alguna acción esperando confirmación
+ENTRADA (JSON):
+- contexto: incluye mensaje_usuario, historial_relevante (últimos mensajes), memoria_viva (moto habitual, allowed_products_snapshot, carrito, pending_action), warnings, search_query, metadata_catalogo.
+- productos_permitidos: lista de productos concretos (SOLO podés elegir de acá).
 
-TU TAREA (paso a paso):
+OBJETIVOS:
+1) Detectar intención real (real_intent) sin pasos extra.
+2) Analizar estado del cliente → customer_state: {"emotion": "satisfied|neutral|confused|frustrated", "sales_phase": "awareness|consideration|ready_to_buy|post_sale", "urgency": "low|medium|high"}.
+3) Planificar acciones → actions_to_execute: lista de objetos (ej: {"type": "add_to_cart", "products": ["code1"], "qty_each": 1}, {"type": "ask_clarification", "message": "..."}, {"type": "save_moto_context", "brand": "...", "model": "..."}).
+4) Estrategia de productos → products_strategy.products_decision con SOLO códigos de productos_permitidos. Incluí qty y por qué.
+5) Elegir response_tone coherente con customer_state (ej: empathetic, concise, upbeat, recovery).
 
-1. INTERPRETAR EL PEDIDO (con expansión semántica):
-   
-   a) SINÓNIMOS Y JERGA ARGENTINA:
-      - "gomas" / "cubiertas" / "cauchos" → buscar NEUMÁTICOS
-      - "amortiguadores" / "shocks" → buscar SUSPENSIÓN
-      - "bujías" / "candelas" → buscar BUJÍAS
-      - "batería" / "acumulador" → buscar BATERÍAS
-      - "filtro" puede ser: filtro de aceite, filtro de aire, filtro de nafta
-      - Si el usuario usa jerga, normalizá al término técnico del catálogo
-   
-   b) CONTEXTO IMPLÍCITO:
-      - Si dice solo una categoría ("cubiertas", "espejos") pero en memoria_viva
-        hay una moto reciente (ej: "fz16"), ASUMIR que es para esa moto
-      - Si dice "y [producto]?" está pidiendo otro producto para la MISMA moto
+GUÍAS DE RAZONAMIENTO (antes de decidir):
+- Normalizá jerga: gomas/cubiertas/cauchos → neumáticos; amortiguadores/shocks → suspensión; bujías/candelas → bujías; batería/acumulador → baterías; filtro puede ser aceite/aire/nafta.
+- Si hay moto en memoria_viva y el mensaje es genérico, asumí esa moto (ej: "cubiertas" + most_recent_bike="fz16" → query "neumaticos yamaha fz16").
+- Referencias a productos previos se resuelven SOLO con allowed_products_snapshot en orden. "los tres" = primeros 3; "el primero" = posición 1; "el más barato" = ordená por precio.
+- Evitá inventar: trabajá solo con productos_permitidos y snapshot. Si faltan datos, pedí aclaración.
 
-   REGLA DE CONSISTENCIA:
-      - Usá SIEMPRE los mismos mapeos de sinónimos (gomas → neumaticos/cubiertas, etc.).
-      - Para referencias a productos anteriores, usá únicamente memoria_viva.allowed_products_snapshot en el orden recibido.
-   
-   c) REFERENCIAS A PRODUCTOS ANTERIORES:
-      - "los tres" / "esos tres" → primeros 3 de memoria_viva.allowed_products_snapshot
-      - "los que me mostraste" → todos de memoria_viva.allowed_products_snapshot
-      - "el primero" / "el segundo" → producto en esa posición del snapshot
-      - "el más barato" / "el más caro" → ordenar por precio
-      - "todos" / "todos esos" → todos los productos del último mensaje
-
-2. CONSTRUIR QUERY DE BÚSQUEDA ENRIQUECIDA:
-   
-   Si el mensaje original es ambiguo o incompleto, construí una query mejorada:
-   
-   Ejemplos:
-   - Usuario: "cubiertas"
-     memoria_viva.most_recent_bike: "yamaha fz16"
-     → new_query: "neumaticos yamaha fz16"
-   
-   - Usuario: "gomas para la moto"
-     memoria_viva.most_recent_bike: "honda wave 110"
-     → new_query: "neumaticos honda wave 110"
-   
-   - Usuario: "y espejos?"
-     memoria_viva.last_search_query: "filtros yamaha fz16"
-     → new_query: "espejos yamaha fz16"
-
-3. EVALUAR PRODUCTOS DISPONIBLES:
-   - Revisá productos_permitidos uno por uno
-   - Para CADA producto relevante, decidí:
-     * ¿Coincide con lo que busca? (score 0-100)
-     * ¿Qué cantidad tiene sentido? (default: 1)
-     * ¿Por qué lo recomendarías? (1 frase)
-
-4. TOMAR DECISIÓN:
-   
-   a) SI encontraste productos que encajan bien (score > 70):
-      → status: "OK"
-      → products_decision: [lista de productos seleccionados con qty y razón]
-      → extracted_entities: {términos normalizados}
-     
-   b) SI el usuario hace referencia a productos anteriores:
-      → status: "OK"
-      → products_decision: [productos de memoria_viva.allowed_products_snapshot]
-      → reason: "Usuario solicitó productos de búsqueda anterior"
-     
-   c) SI productos son dudosos (score 50-70):
-      → status: "OK" (igual mostrá opciones pero avisá en "reason")
-      → products_decision: [los mejores que tenés]
-     
-   d) SI necesitás refinar búsqueda (productos irrelevantes):
-      → status: "NEED_REQUERY"
-      → new_query: query mejorada usando sinónimos + contexto de memoria_viva
-     
-   e) SI falta info crítica (no sabés marca/modelo/categoría):
-      → status: "NEED_CLARIFICATION"
-      → message_to_user_if_clarification: pregunta específica
-
-FORMATO DE SALIDA (JSON puro, sin markdown):
-{
+SALIDA OBLIGATORIA (JSON limpio, sin texto extra):
+{{
   "status": "OK|NEED_REQUERY|NEED_CLARIFICATION",
-  "reason": "string explicando la decisión interna",
-  "semantic_expansion": {
-    "original_terms": ["gomas"],
-    "normalized_terms": ["neumaticos", "cubiertas"],
-    "context_added": "yamaha fz16"
-  },
-  "products_decision": [
-    {
-      "code": "1234/56789-012",
-      "name": "nombre del producto",
-      "qty": 1,
-      "why": "razón comercial en 1 frase",
-      "confidence_score": 85
-    }
-  ],
-  "new_query": "query refinada (solo si NEED_REQUERY)",
-  "message_to_user_if_clarification": "pregunta (solo si NEED_CLARIFICATION)",
-  "extracted_entities": {
-    "brand": "yamaha",
-    "model": "fz16",
-    "category": "neumaticos",
-    "original_category": "gomas",
-    "displacement_cc": "150"
-  },
-  "reference_resolution": {
-    "type": "previous_search|implicit_quantity|none",
-    "resolved_to": "3 productos de búsqueda anterior de espejos"
-  },
-  "pending_actions": [
-    {"type": "save_moto_context", "brand": "yamaha", "model": "fz16"}
-  ],
-  "memory_updates": {
-    "most_recent_bike": "Yamaha FZ16",
-    "search_pattern": "busca repuestos regularmente"
-  }
-}
-
-EJEMPLOS COMPLETOS:
-
-Ejemplo 1 - Sinónimo:
-mensaje_usuario: "tenes gomas para una fz16?"
-memoria_viva: {most_recent_bike: ""}
-productos_permitidos: [neumaticos yamaha fz16...]
-
-Respuesta:
-{
-  "status": "NEED_REQUERY",
-  "reason": "Usuario usó 'gomas' (sinónimo de neumáticos). Busco con término normalizado.",
-  "semantic_expansion": {
-    "original_terms": ["gomas"],
-    "normalized_terms": ["neumaticos", "cubiertas"],
-    "context_added": "yamaha fz16"
-  },
-  "new_query": "neumaticos yamaha fz16",
-  "extracted_entities": {
-    "brand": "yamaha",
-    "model": "fz16",
-    "category": "neumaticos",
-    "original_category": "gomas"
-  }
-}
-
-Ejemplo 2 - Contexto implícito:
-mensaje_usuario: "y espejos?"
-memoria_viva: {
-  most_recent_bike: "yamaha fz16",
-  last_search_query: "cubiertas fz16"
-}
-productos_permitidos: [espejos yamaha fz16...]
-
-Respuesta:
-{
-  "status": "NEED_REQUERY",
-  "reason": "Usuario pidió otra categoría ('espejos') para la misma moto del contexto",
-  "semantic_expansion": {
-    "original_terms": ["espejos"],
-    "normalized_terms": ["espejos", "retrovisores"],
-    "context_added": "yamaha fz16"
-  },
-  "new_query": "espejos yamaha fz16",
-  "extracted_entities": {
-    "brand": "yamaha",
-    "model": "fz16",
-    "category": "espejos"
-  }
-}
-
-Ejemplo 3 - Referencia a productos anteriores:
-mensaje_usuario: "sumas los tres al carrito"
-memoria_viva: {
-  allowed_products_snapshot: [
-    {code: "1234/00001-001", name: "Espejo izq FZ16", price: 5000},
-    {code: "1234/00002-002", name: "Espejo der FZ16", price: 5000},
-    {code: "1234/00003-003", name: "Soporte espejo", price: 2500}
-  ]
-}
-
-Respuesta:
-{
-  "status": "OK",
-  "reason": "Usuario solicitó agregar los 3 productos mostrados anteriormente",
-  "reference_resolution": {
-    "type": "implicit_quantity",
-    "resolved_to": "primeros 3 productos de búsqueda anterior"
-  },
-  "products_decision": [
-    {
-      "code": "1234/00001-001",
-      "name": "Espejo izq FZ16",
-      "qty": 1,
-      "why": "Usuario pidió 'los tres' refiriéndose a la búsqueda anterior",
-      "confidence_score": 100
-    },
-    {
-      "code": "1234/00002-002",
-      "name": "Espejo der FZ16",
-      "qty": 1,
-      "why": "Segundo producto de la lista anterior",
-      "confidence_score": 100
-    },
-    {
-      "code": "1234/00003-003",
-      "name": "Soporte espejo",
-      "qty": 1,
-      "why": "Tercer producto de la lista anterior",
-      "confidence_score": 100
-    }
-  ],
-  "pending_actions": [
-    {
-      "type": "add_to_cart",
-      "products": ["1234/00001-001", "1234/00002-002", "1234/00003-003"],
-      "qty_each": 1
-    }
-  ]
-}
-"""
-
-META_COGNITION_PROMPT = """
-Sos un experto en análisis de conversaciones comerciales B2B. Tu trabajo es entender la INTENCIÓN REAL del cliente.
-
-ENTRADA:
-- mensaje_actual: lo que acaba de escribir
-- historial_completo: últimos 10 mensajes (usuario + bot)
-- contexto: moto habitual, búsquedas previas, carrito
-
-TU TRABAJO:
-Analizá la conversación como un vendedor experto y respondé estas preguntas:
-
-1. ESTADO EMOCIONAL / SATISFACCIÓN:
-   - ¿Está satisfecho con lo que le mostramos antes?
-   - ¿Está confundido o frustrado?
-   - ¿Está explorando opciones o ya decidió?
-
-2. CONTINUIDAD:
-   - ¿Es un tema NUEVO o CONTINUACIÓN del anterior?
-   - Si es continuación: ¿está profundizando o cambiando de ángulo?
-   - Si es nuevo: ¿es para la misma moto o cambió de contexto?
-
-3. INTENCIÓN REAL:
-   - ¿Qué quiere LOGRAR con este mensaje?
-   - ¿Hay alguna frustración oculta? (ej: "me refería a..." = "no me entendiste")
-   - ¿Está listo para comprar o todavía investigando?
-
-4. NIVEL DE EXPERTISE:
-   - ¿Usa términos técnicos correctos o jerga/sinónimos?
-   - ¿Es mecánico/taller o usuario final?
-   - ¿Qué nivel de detalle necesita?
-
-FORMATO DE SALIDA (JSON):
-{
-  "satisfaction_level": "satisfied|neutral|confused|frustrated",
-  "conversation_flow": "new_topic|continuation_same|continuation_pivot|clarification",
-  "intent_type": "exploration|purchase_ready|technical_question|complaint",
-  "customer_profile": {
-    "expertise": "mechanic|enthusiast|casual_user",
-    "confidence": "high|medium|low",
-    "bike_context": "same_as_before|new_bike|unknown"
-  },
-  "hidden_signals": {
-    "frustration_detected": true/false,
-    "reason": "string explicando qué pasó",
-    "suggested_recovery": "string con cómo recuperar la conversación"
-  },
-  "recommended_approach": "show_more_options|clarify_need|confirm_understanding|proceed_with_last_context"
-}
-
-EJEMPLOS:
-
-Ejemplo 1 - Frustración oculta:
-historial: [
-  {bot: "Te paso esta cubierta para FZ16: [1 producto]"},
-  {user: "Me refería a gomas para la moto, cubiertas"}
-]
-
-Respuesta:
-{
-  "satisfaction_level": "confused",
-  "conversation_flow": "clarification",
-  "intent_type": "clarification",
-  "customer_profile": {
-    "expertise": "casual_user",
-    "confidence": "low",
-    "bike_context": "same_as_before"
-  },
-  "hidden_signals": {
-    "frustration_detected": true,
-    "reason": "Usuario usó sinónimo ('gomas') pero el bot solo mostró 1 producto. Dice 'me refería a' indicando que siente que no lo entendimos. En realidad SÍ le mostramos lo correcto, pero probablemente esperaba MÁS opciones.",
-    "suggested_recovery": "Reconocer que le mostramos lo correcto pero ofrecer MÁS variedad: 'Claro, esas son las cubiertas/gomas disponibles. Te paso más opciones con diferentes medidas y marcas'"
-  },
-  "recommended_approach": "show_more_options"
-}
-
-Ejemplo 2 - Continuación natural:
-historial: [
-  {bot: "Acá tenés 3 opciones de filtros para FZ16"},
-  {user: "y espejos?"}
-]
-
-Respuesta:
-{
-  "satisfaction_level": "satisfied",
-  "conversation_flow": "continuation_same",
-  "intent_type": "exploration",
-  "customer_profile": {
-    "expertise": "mechanic",
-    "confidence": "high",
-    "bike_context": "same_as_before"
-  },
-  "hidden_signals": {
-    "frustration_detected": false,
-    "reason": "Está armando pedido completo para FZ16, va por partes",
-    "suggested_recovery": null
-  },
-  "recommended_approach": "proceed_with_last_context"
-}
-
-Ejemplo 3 - Usuario listo para comprar:
-historial: [
-  {bot: "Te paso 3 espejos para FZ16: [lista]"},
-  {user: "Tenía, me sumas los tres al carrito?"}
-]
-
-Respuesta:
-{
-  "satisfaction_level": "satisfied",
-  "conversation_flow": "continuation_same",
-  "intent_type": "purchase_ready",
-  "customer_profile": {
-    "expertise": "mechanic",
-    "confidence": "high",
-    "bike_context": "same_as_before"
-  },
-  "hidden_signals": {
-    "frustration_detected": false,
-    "reason": "Está conforme con opciones, quiere avanzar a checkout",
-    "suggested_recovery": null
-  },
-  "recommended_approach": "confirm_cart_addition"
-}
-"""
-
-PLANNING_PROMPT_V2 = f"""
-{INTERNAL_REASONING_PROMPT}
-
-NUEVO: Recibirás también un análisis de meta-cognición:
-
-meta_analysis: {{
-  "satisfaction_level": "...",
-  "recommended_approach": "...",
-  "hidden_signals": {{...}}
+  "real_intent": "product_search|cart_action|order_flow|payment|shipping|tech_expert|small_talk|unknown",
+  "customer_state": {{"emotion": "...", "sales_phase": "...", "urgency": "..."}},
+  "response_tone": "empathetic|concise|upbeat|technical|recovery",
+  "actions_to_execute": [{{"type": "...", ...}}],
+  "products_strategy": {{
+    "products_decision": [{{"code": "...", "qty": 1, "why": "..."}}],
+    "reference_resolution": "... opcional ..."
+  }},
+  "reason": "por qué decidiste esto",
+  "new_query": "solo si status=NEED_REQUERY",
+  "message_to_user_if_clarification": "solo si status=NEED_CLARIFICATION"
 }}
 
-Usá esta info para:
-1. Si hay frustración detectada, seguí el "suggested_recovery"
-2. Si el approach es "show_more_options", buscá más productos (top 10 en vez de top 3)
-3. Si el approach es "clarify_need", generá NEED_CLARIFICATION con pregunta específica
-4. Si el approach es "confirm_understanding", incluí en el plan una validación explícita
-5. Mantené consistencia con los ejemplos: sinónimos normalizados y referencias resueltas con allowed_products_snapshot.
+EJEMPLOS RÁPIDOS:
+1) Cliente frustrado porque vio pocas opciones:
+  - real_intent: product_search
+  - customer_state.emotion: frustrated
+  - status: NEED_REQUERY con new_query ampliada
+  - response_tone: empathetic
 
-Ejemplo:
-Si meta_analysis dice:
-{{
-  "satisfaction_level": "confused",
-  "hidden_signals": {{
-    "suggested_recovery": "Mostrar más variedad de cubiertas"
-  }}
-}}
+2) Cliente confundido pidiendo aclaración:
+  - status: NEED_CLARIFICATION con pregunta concreta
+  - actions_to_execute: [{"type": "ask_clarification", "message": "¿Es para Honda Wave o Biz?"}]
 
-Entonces tu plan debe:
-{{
-  "status": "NEED_REQUERY",
-  "new_query": "neumaticos yamaha fz16 todas las marcas",
-  "reason": "Usuario esperaba más opciones, amplío búsqueda",
-  "response_tone": "empathetic_recovery"
-}}
+3) Cliente listo para comprar:
+  - real_intent: cart_action u order_flow
+  - products_decision: los pedidos explícitos o snapshot
+  - actions_to_execute: [{"type": "add_to_cart", "products": [codes], "qty_each": 1}]
+  - response_tone: concise|upbeat
+
+4) Cliente comparando opciones:
+  - real_intent: product_search
+  - products_decision: 2-3 productos variados
+  - reason: resaltá diferencias
+  - response_tone: advisory
+
+DEVOLVÉ SIEMPRE JSON PURO SIN TEXTO ADICIONAL.
 """
-
 TECH_SYSTEM_PROMPT = f"""
 Sos Fran, mecánico experto y vendedor premium de TERCOM.
 
@@ -3620,46 +3196,13 @@ def build_enriched_context(phone, user_message, intent_data, productos_filtrados
 
     return memory
 
-
-def generate_meta_cognition(mensaje_actual: str, history: list, contexto: dict) -> dict:
-    try:
-        payload = {
-            "mensaje_actual": (mensaje_actual or "")[:600],
-            "historial_completo": history[-10:] if history else [],
-            "contexto": contexto or {},
-        }
-
-        with openai_sem:
-            resp = client.chat.completions.create(
-                model=MODEL_REASONING,
-                messages=[
-                    {"role": "system", "content": META_COGNITION_PROMPT},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                temperature=0.2,
-                max_tokens=300,
-            )
-
-        raw = (resp.choices[0].message.content or "").strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1:
-            raw = raw[start:end + 1]
-
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:
-        logger.error(f"generate_meta_cognition error: {e}")
-        return {}
-
-
 def validate_reasoning_json(raw_text):
     parsed = _safe_json_parse(raw_text or "")
     if not isinstance(parsed, dict):
         logger.error(f"JSON parse falló: contenido inválido, raw text: {str(raw_text)[:300]}")
         return None
 
-    status = parsed.get("status")
+    status = parsed.get("status") or "OK"
     if status not in {"OK", "NEED_REQUERY", "NEED_CLARIFICATION"}:
         logger.error(f"JSON de razonamiento con status inválido: {parsed}")
         return None
@@ -3670,8 +3213,27 @@ def validate_reasoning_json(raw_text):
     if status == "NEED_CLARIFICATION" and not parsed.get("message_to_user_if_clarification"):
         return None
 
-    if not isinstance(parsed.get("products_decision", []), list):
-        parsed["products_decision"] = []
+    products_strategy = parsed.get("products_strategy") or {}
+    decisions = products_strategy.get("products_decision")
+    if decisions is None:
+        decisions = parsed.get("products_decision", [])
+    if not isinstance(decisions, list):
+        decisions = []
+    parsed["products_strategy"] = {**products_strategy, "products_decision": decisions}
+    parsed["products_decision"] = decisions
+
+    actions = parsed.get("actions_to_execute") or parsed.get("pending_actions") or []
+    if not isinstance(actions, list):
+        actions = []
+    parsed["actions_to_execute"] = actions
+
+    customer_state = parsed.get("customer_state") or {}
+    parsed["customer_state"] = {
+        "emotion": customer_state.get("emotion", "neutral"),
+        "sales_phase": customer_state.get("sales_phase", "awareness"),
+        "urgency": customer_state.get("urgency", "medium"),
+    }
+    parsed["response_tone"] = parsed.get("response_tone") or "concise"
 
     return parsed
 
@@ -3697,8 +3259,11 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
             # Solo validamos que esos códigos existen
             logger.info(f"Resolviendo referencia: {reference_resolution.get('resolved_to')}")
 
+        strategy = parsed_plan.get("products_strategy", {})
+        reference_resolution = strategy.get("reference_resolution") or parsed_plan.get("reference_resolution", {})
+
         productos_seleccionados = []
-        for decision in parsed_plan.get("products_decision", []):
+        for decision in strategy.get("products_decision", []):
             code = decision.get("code")
             if not code:
                 continue
@@ -3728,31 +3293,28 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
                 "decision_score": decision.get("confidence_score"),
             })
 
-        # Ejecutar pending_actions
-        if parsed_plan.get("pending_actions"):
-            for action in parsed_plan.get("pending_actions", []):
-                action_type = action.get("type")
-                
-                if action_type == "save_moto_context":
-                    save_moto_context(phone, action.get("brand", ""), action.get("model", ""))
-                
-                # ← NUEVO: Manejar add_to_cart directo
-                elif action_type == "add_to_cart":
-                    products_to_add = action.get("products", [])
-                    qty_each = action.get("qty_each", 1)
-                    
-                    for code in products_to_add:
-                        catalog, _, _, _ = get_catalog_and_index()
-                        p = next((prod for prod in catalog if prod.get("code") == code), None)
-                        if p:
-                            cart_add(
-                                phone,
-                                code,
-                                qty_each,
-                                p.get("name", ""),
-                                to_decimal_money(p.get("price_ars", 0)),
-                                to_decimal_money(p.get("price_usd", 0))
-                            )
+        for action in parsed_plan.get("actions_to_execute", []) or []:
+            action_type = action.get("type")
+
+            if action_type == "save_moto_context":
+                save_moto_context(phone, action.get("brand", ""), action.get("model", ""))
+
+            elif action_type == "add_to_cart":
+                products_to_add = action.get("products", [])
+                qty_each = action.get("qty_each", 1)
+
+                for code in products_to_add:
+                    catalog, _, _, _ = get_catalog_and_index()
+                    p = next((prod for prod in catalog if prod.get("code") == code), None)
+                    if p:
+                        cart_add(
+                            phone,
+                            code,
+                            qty_each,
+                            p.get("name", ""),
+                            to_decimal_money(p.get("price_ars", 0)),
+                            to_decimal_money(p.get("price_usd", 0))
+                        )
 
         return {
             "productos_finales": productos_seleccionados,
@@ -3763,6 +3325,8 @@ def ejecutar_plan_interno(parsed_plan, phone, productos_permitidos):
                 "semantic_expansion": parsed_plan.get("semantic_expansion"),
                 "reference_resolution": reference_resolution,
             },
+            "customer_state": parsed_plan.get("customer_state", {}),
+            "response_tone": parsed_plan.get("response_tone"),
         }
     except Exception as e:
         logger.error(f"Error ejecutando plan interno: {e}")
@@ -3914,96 +3478,12 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
     return msgs
 
 
-def run_sales_prompt_flow(phone: str, user_message: str, catalog_products: list, memory: dict, meta_analysis: dict) -> str:
-    if not USE_SALES_PROMPT_FLOW:
-        return ""
-
-    try:
-        history = get_history_since(phone, days=1, limit=20)
-        conversation = [
-            {"role": h.get("role", "user"), "content": h.get("content", "")}
-            for h in history[-20:]
-        ]
-
-        carrito_raw = cart_get(phone)
-        carrito = [
-            {
-                "code": code,
-                "qty": qty,
-                "name": name,
-                "price": float(to_decimal_money(price)),
-            }
-            for code, qty, name, price in carrito_raw
-        ]
-
-        productos_disponibles = [normalize_product_for_llm(p) for p in (catalog_products or [])[: max(5, MAX_PRODUCTS_FOR_LLM)]]
-        if not productos_disponibles and catalog_products:
-            productos_disponibles = [normalize_product_for_llm(catalog_products[0])]
-
-        sales_analysis = call_sales_json_llm(
-            SALES_INTELLIGENCE_PROMPT,
-            {
-                "conversacion_completa": conversation,
-                "productos_disponibles": productos_disponibles,
-                "contexto_cliente": {
-                    "moto_habitual": memory.get("most_recent_bike"),
-                    "carrito": carrito,
-                    "compras_previas": get_search_history(phone, limit=5),
-                },
-                "perfil_cliente": build_user_profile_snapshot(phone, memory),
-            },
-        )
-
-        if not sales_analysis:
-            return ""
-
-        product_strategy = call_sales_json_llm(
-            PRODUCT_SELECTION_PROMPT,
-            {
-                "analisis_ventas": sales_analysis,
-                "productos_disponibles": productos_disponibles,
-                "restricciones": {"max_options": MAX_PRODUCTS_FOR_LLM},
-            },
-        )
-
-        if not product_strategy:
-            return ""
-
-        reply = call_sales_text_llm(
-            SALES_RESPONSE_PROMPT,
-            {
-                "analisis_ventas": sales_analysis,
-                "productos_seleccionados": product_strategy,
-                "perfil_cliente": build_user_profile_snapshot(phone, memory),
-                "conversacion_previa": meta_analysis or {},
-            },
-            temperature=0.4,
-        )
-
-        return reply
-    except Exception as e:
-        logger.error(f"run_sales_prompt_flow error: {e}")
-        return ""
-
-
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
-        intent_info = execution_context.get("intent_details", {"intent": execution_context.get("intent_detected", "unknown")})
-        memory = build_enriched_context(phone, user_message, intent_info, catalog_products)
-        historial_compacto = [
-            {"role": h["role"], "content": h["content"][:400]}
-            for h in history[-10:]
-        ]
-        meta_context = {
-            "most_recent_bike": memory.get("most_recent_bike"),
-            "last_search_query": memory.get("last_search_query"),
-            "cart_state": memory.get("cart_state", []),
-        }
-        meta_analysis = generate_meta_cognition(user_message, historial_compacto, meta_context)
+        memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), catalog_products)
         contexto = {
             "mensaje_usuario": user_message,
-            "intent": intent_info.get("intent", execution_context.get("intent_detected", "unknown")),
             "search_query": execution_context.get("search_query"),
             "warnings": execution_context.get("warnings", []),
             "historial": [{"role": h["role"], "content": h["content"]} for h in history[-8:]],
@@ -4013,22 +3493,11 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             "pending_actions": memory.get("pending_action"),
             "cart_state": memory.get("cart_state", []),
             "most_recent_bike": memory.get("most_recent_bike", ""),
-            "meta_analysis": meta_analysis,
         }
-
-        fast_reply = None
-        if USE_SALES_PROMPT_FLOW:
-            fast_reply = run_sales_prompt_flow(phone, user_message, catalog_products, memory, meta_analysis)
-            if fast_reply:
-                logger.info("generate_smart_ai_reply_v2: respuesta vía sales_prompt_flow")
-                return fast_reply
-            logger.info("generate_smart_ai_reply_v2: sales_prompt_flow vacío, uso doble LLM como fallback")
-        else:
-            logger.info("generate_smart_ai_reply_v2: sales_prompt_flow desactivado, uso doble LLM")
 
         productos_permitidos = catalog_products or []
         plan_interno = pensar_con_llm(
-            system_prompt or PLANNING_PROMPT_V2,
+            system_prompt or PLANNING_UNIFIED_PROMPT,
             contexto,
             productos_permitidos,
         )
@@ -4046,16 +3515,15 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                     semantic_results = []
                 productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
                 execution_context["search_query"] = nueva_query
-                memory = build_enriched_context(phone, user_message, intent_info, productos_permitidos)
+                memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
                 contexto.update({
                     "search_query": nueva_query,
                     "memoria_viva": memory,
                     "metadata_catalogo": {"productos_total": len(productos_permitidos)},
                     "cart_state": memory.get("cart_state", []),
-                    "meta_analysis": meta_analysis,
                 })
                 plan_interno = pensar_con_llm(
-                    system_prompt or PLANNING_PROMPT_V2,
+                    system_prompt or PLANNING_UNIFIED_PROMPT,
                     contexto,
                     productos_permitidos,
                 )
@@ -4066,27 +3534,37 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
 
         if not parsed_plan:
             logger.warning("Fallback: razonamiento inválido, usando catálogo real")
+            fallback_reply = None
             if productos_permitidos:
                 listado = format_search_results(productos_permitidos[:5])
-                return (
+                fallback_reply = (
                     "Te dejo opciones reales del catálogo mientras confirmo bien tu pedido:\n\n"
                     f"{listado}\n\n"
                     "¿Alguna te sirve o querés que refine por marca/modelo/categoría?"
                 )
-            return "Necesito un dato más para ayudarte: marca, modelo o categoría de la moto."
+            else:
+                fallback_reply = "Necesito un dato más para ayudarte: marca, modelo o categoría de la moto."
+            return {"reply": fallback_reply, "plan": None, "execution": None}
 
-        status = parsed_plan.get("status")
-        if status == "NEED_CLARIFICATION":
-            return parsed_plan.get("message_to_user_if_clarification") or "Pasame marca/modelo/año así lo busco bien."
+        if parsed_plan.get("status") == "NEED_CLARIFICATION":
+            clarification = parsed_plan.get("message_to_user_if_clarification") or "Pasame marca/modelo/año así lo busco bien."
+            return {"reply": clarification, "plan": parsed_plan, "execution": None}
 
         plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, productos_permitidos)
         razonamiento_final = json.dumps({**parsed_plan, **(plan_ejecutado or {})}, ensure_ascii=False)
         respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
-        return respuesta or "Uy, tuve un problema. ¿Me repetís?"
+        return {
+            "reply": respuesta or "Uy, tuve un problema. ¿Me repetís?",
+            "plan": parsed_plan,
+            "execution": plan_ejecutado,
+        }
     except Exception as e:
         logger.error(f"generate_smart_ai_reply_v2 error: {e}")
-        return "Estoy ajustando el sistema, ¿me repetís el pedido con marca y modelo?"
-
+        return {
+            "reply": "Estoy ajustando el sistema, ¿me repetís el pedido con marca y modelo?",
+            "plan": None,
+            "execution": None,
+        }
 
 def build_tech_expert_answer(phone, user_message):
     try:
@@ -4236,9 +3714,8 @@ def orquestar_fran(mensaje_usuario, phone):
     """
     Orquestador unificado de Fran.
 
-    Gestiona rate limiting, detección de intención, búsqueda, memoria y el doble
-    paso de LLM (razonamiento interno + respuesta conversacional). Siempre deja
-    registrado el historial y actualiza fases de venta.
+    Gestiona rate limiting, búsqueda, memoria y el doble
+    paso de LLM (razonamiento interno + respuesta conversacional).
     """
     start_time = time.time()
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
@@ -4249,17 +3726,13 @@ def orquestar_fran(mensaje_usuario, phone):
         save_message(phone, reply, "assistant")
         return reply
 
-    intent_data = detect_intent_llm(user_message)
-    intent = intent_data.get("intent", "unknown")
-    raw_query_for_search = intent_data.get("query") or user_message
-    current_phase = get_sales_phase(phone)
     last_search_data = get_last_search(phone) or {}
     last_search_query = (last_search_data.get("query") or "").strip()
 
     execution_context = {
-        "intent_detected": intent,
-        "intent_details": intent_data,
-        "search_query": raw_query_for_search,
+        "intent_detected": "unified",
+        "intent_details": {},
+        "search_query": user_message,
         "search_executed": False,
         "products_found": 0,
         "products_shown_to_llm": 0,
@@ -4267,289 +3740,111 @@ def orquestar_fran(mensaje_usuario, phone):
         "quality_assessment": None,
         "will_send_chunks": False,
         "chunk_info": None,
-        "warnings": []
+        "warnings": [],
     }
 
-    # ------------------------------------------------------
-    # Confirmar / cancelar acciones pendientes (CONTEXTO 2.0)
-    # ------------------------------------------------------
-    pending = get_pending_action(phone)
-
-    if intent == "confirmation" and pending:
-        if pending.get("action_type") == "add_each_quantity":
-            reply = apply_add_each_quantity_pending(phone, pending)
-            clear_pending_action(phone)
-            save_message(phone, reply, "assistant")
-            log_interaction(phone, user_message, "confirmation_pending_add_each", 0)
-            log_performance(phone, "confirmation_pending_add_each", time.time()-start_time, 0)
-            update_sales_phase_from_intent(phone, intent)
-            return reply
-
-    if intent == "negation" and pending:
-        clear_pending_action(phone)
-        reply = "Listo, no avanzo con eso."
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "negation_pending", 0)
-        log_performance(phone, "negation_pending", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    # ------------------------------------------------------
-    # Intenciones directas simples
-    # ------------------------------------------------------
-    if intent == "confirmation":
-        phase_responses = {
-            "checkout": "Perfecto, definimos pago o envío y lo cierro.",
-            "payment": "Genial, espero el comprobante y te confirmo.",
-            "shipping": "Dale, coordinemos la logística. ¿Moto CABA o despacho interior?",
-            "cart": "Listo, sigo ajustando el carrito con lo que me digas."
-        }
-        reply = phase_responses.get(current_phase, "Perfecto, sigo atento. Decime si querés que agregue algo más.")
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "confirmation", 0)
-        log_performance(phone, "confirmation", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "negation":
-        reply = "Sin drama, quedo atento si querés hacer otro pedido."
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "negation", 0)
-        log_performance(phone, "negation", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "small_talk":
-        reply = "¡Hola! Soy Fran de TERCOM, ¿en qué te puedo ayudar?"
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "small_talk", 0)
-        log_performance(phone, "small_talk", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "view_cart":
-        items = cart_get(phone)
-        if not items:
-            reply = "Tu carrito está vacío."
-        else:
-            total, _ = cart_totals(phone)
-            lines = ["TU CARRITO:\n"]
-            for code, q, name, price in items:
-                subtotal = (price * q).quantize(Decimal("0.01"))
-                lines.append(f"- {q}x {name[:40]} = {format_price(subtotal)}")
-            lines.append(f"\nTOTAL: {format_price(total)}")
-            reply = "\n".join(lines)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "view_cart", 0)
-        log_performance(phone, "view_cart", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "empty_cart":
-        cart_clear(phone)
-        reply = "Listo, vacié tu carrito."
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "empty_cart", 0)
-        log_performance(phone, "empty_cart", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    # ------------------------------------------------------
-    # Pedidos implícitos sobre la última búsqueda
-    # ------------------------------------------------------
-    implicit = detect_implicit_cart_action(user_message, phone)
-    if implicit:
-        products = implicit["products"][:MAX_PRODUCTS_FOR_LLM]
-        qty = implicit["quantity"]
-        total = sum(to_decimal_money(p["price_ars"]) * qty for p in products)
-        reply = (
-            f"Dale! Te preparo {qty} unidad(es) de cada uno de los últimos productos que te mostré.\n"
-            f"Total aprox: {format_price(total)}\n\n"
-            "¿Confirmás? (decime 'si' o 'dale')"
-        )
-        save_pending_action(phone, "add_each_quantity", {"qty": qty, "products": products}, context=f"{qty} de cada uno")
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "implicit_cart", len(products))
-        log_performance(phone, "implicit_cart", time.time()-start_time, len(products))
-        return reply
-
-    if intent == "cart_action":
-        reply = handle_cart_action(phone, user_message)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "cart_action", 0)
-        log_performance(phone, "cart_action", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "order_flow":
-        reply = build_checkout_response(phone)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "order_flow", 0)
-        log_performance(phone, "order_flow", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "payment":
-        reply = build_payment_response(phone)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "payment", 0)
-        log_performance(phone, "payment", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "shipping":
-        reply = build_shipping_response(phone)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "shipping", 0)
-        log_performance(phone, "shipping", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    if intent == "tech_expert":
-        reply = build_tech_expert_answer(phone, user_message)
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "tech_expert", 0)
-        log_performance(phone, "tech_expert", time.time()-start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
-        return reply
-
-    # ------------------------------------------------------
-    # Búsqueda en catálogo
-    # ------------------------------------------------------
     products = []
-    query_for_search = raw_query_for_search
+    query_for_search = user_message
     corrections = []
 
-    if intent in {"product_search", "unknown"}:
-        if raw_query_for_search and len(raw_query_for_search.split()) < 4 and last_search_query:
-            query_for_search = f"{last_search_query} {raw_query_for_search}".strip()
-            execution_context["warnings"].append("query_refined_with_last_search")
-            logger.info(f"Query refinada con contexto previo: '{query_for_search}'")
+    if query_for_search and len(query_for_search.split()) < 4 and last_search_query:
+        query_for_search = f"{last_search_query} {query_for_search}".strip()
+        execution_context["warnings"].append("query_refined_with_last_search")
 
-        query_for_search, corrections = autocorrect_keywords(query_for_search)
-        if corrections:
-            execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
-            logger.info(f"Autocorrect aplicado: {', '.join(corrections)}")
+    query_for_search, corrections = autocorrect_keywords(query_for_search)
+    if corrections:
+        execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
 
-        execution_context["search_query"] = query_for_search
+    execution_context["search_query"] = query_for_search
 
-        semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
+    semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
 
-        if isinstance(semantic_results, dict):
-            if semantic_results.get("error") == "too_many_combinations":
-                reply = semantic_results.get("message") or "Hay demasiadas combinaciones, pasame una sola moto o categoría."
-                save_message(phone, reply, "assistant")
-                log_interaction(phone, user_message, "too_many_combinations", 0)
-                log_performance(phone, intent, time.time()-start_time, 0)
-                return reply
-            execution_context["search_executed"] = True
-            total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
-            execution_context["products_found"] = total_found
-            reply = format_multi_search_response(semantic_results)
-            if reply:
-                save_message(phone, reply, "assistant")
-                log_interaction(phone, user_message, intent, total_found)
-                log_performance(phone, intent, time.time()-start_time, total_found)
-                update_sales_phase_from_intent(phone, intent)
-                return reply
-            semantic_results = []
-
-        products = [p for p, _ in semantic_results]
-
+    if isinstance(semantic_results, dict):
+        if semantic_results.get("error") == "too_many_combinations":
+            reply = semantic_results.get("message") or "Hay demasiadas combinaciones, pasame una sola moto o categoría."
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "too_many_combinations", 0)
+            log_performance(phone, "too_many_combinations", time.time()-start_time, 0)
+            return reply
         execution_context["search_executed"] = True
-        execution_context["products_found"] = len(products)
+        total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
+        execution_context["products_found"] = total_found
+        reply = format_multi_search_response(semantic_results)
+        if reply:
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "multi_search", total_found)
+            log_performance(phone, "multi_search", time.time()-start_time, total_found)
+            update_sales_phase_from_intent(phone, "product_search")
+            return reply
+        semantic_results = []
 
-        # Filtro por relevancia solo cuando hay algo razonable que mostrar
-        if products and intent in {"product_search"}:
-            original_len = len(products)
-            filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
+    products = [p for p, _ in semantic_results]
 
-            logger.info(f"Relevance filter: {len(filtered_products)}/{original_len} productos relevantes")
+    execution_context["search_executed"] = True
+    execution_context["products_found"] = len(products)
 
-            if filtered_products:
-                products = filtered_products
-                execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
-            else:
-                logger.warning(f"Sin productos claramente relevantes para query: {query_for_search}")
+    if products:
+        original_len = len(products)
+        filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
+        if filtered_products:
+            products = filtered_products
+            execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
 
-                top_candidates = semantic_results[:10]
-                top_3 = top_candidates[:3]
+    quality_assessment = assess_context_quality(query_for_search, products)
+    execution_context["quality_assessment"] = quality_assessment
+    log_quality_metrics(
+        phone,
+        query_for_search,
+        quality_assessment.get("avg_score", 0),
+        quality_assessment.get("max_score", 0),
+        quality_assessment.get("relevant_count", 0),
+    )
 
-                suggestions = "\n".join([
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p, score in top_3
-                ])
-
-                reply = (
-                    "No encontré coincidencia perfecta con lo que pediste, pero tengo opciones que se acercan:\n\n"
-                    f"{suggestions}\n\n"
-                    "Si querés algo más puntual, pasame más detalles (marca/modelo/año) así lo clavo mejor."
-                )
-                save_message(phone, reply, "assistant")
-                log_interaction(phone, user_message, "no_relevant_results", 0)
-                log_performance(phone, intent, time.time()-start_time, 0)
-                return reply
-
-        quality_assessment = assess_context_quality(query_for_search, products)
-        execution_context["quality_assessment"] = quality_assessment
-
-        logger.info(f"Quality assessment: {quality_assessment}")
-
-        log_quality_metrics(
-            phone,
-            query_for_search,
-            quality_assessment.get("avg_score", 0),
-            quality_assessment.get("max_score", 0),
-            quality_assessment.get("relevant_count", 0),
-        )
-
-        if not quality_assessment["sufficient"]:
-            if quality_assessment["action"] == "ask_clarification":
-                reply = quality_assessment["message"]
-            elif quality_assessment["action"] == "suggest_alternatives":
-                top_products = quality_assessment.get("top_products", [])
-                suggestions = "\n".join([
+    if not quality_assessment["sufficient"]:
+        if quality_assessment["action"] == "ask_clarification":
+            reply = quality_assessment["message"]
+        elif quality_assessment["action"] == "suggest_alternatives":
+            top_products = quality_assessment.get("top_products", [])
+            suggestions = "\n".join(
+                [
                     f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
                     for p in top_products
-                ])
-                reply = (
-                    "No encontré coincidencia perfecta, pero tengo estas opciones que se acercan:\n\n"
-                    f"{suggestions}\n\n"
-                    "O dame un poco más de detalle (marca/modelo/año) y afinamos la búsqueda."
-                )
+                ]
+            )
+            reply = (
+                "No encontré coincidencia perfecta, pero tengo estas opciones que se acercan:\n\n"
+                f"{suggestions}\n\n"
+                "O dame un poco más de detalle (marca/modelo/año) y afinamos la búsqueda."
+            )
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, f"low_quality_{quality_assessment['reason']}", 0)
+        log_performance(phone, "low_quality", time.time()-start_time, 0)
+        return reply
 
-            save_message(phone, reply, "assistant")
-            log_interaction(phone, user_message, f"low_quality_{quality_assessment['reason']}", 0)
-            log_performance(phone, intent, time.time()-start_time, 0)
-            return reply
-
-        if products:
-            save_last_search(phone, [
-                {
-                    "code": p["code"],
-                    "name": p["name"],
-                    "price_ars": p["price_ars"],
-                    "price_usd": p["price_usd"],
-                    "qty": 1
-                }
-                for p in products[:150]
-            ], query_for_search)
-
-        execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
-
-        if intent == "product_search" and len(products) > MAX_PRODUCTS_FOR_LLM:
-            execution_context["will_send_chunks"] = True
-            num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
-            execution_context["chunk_info"] = {
-                "total_chunks": num_chunks,
-                "products_per_chunk": PRODUCTS_PER_CHUNK,
-                "total_products": len(products)
+    if products:
+        save_last_search(phone, [
+            {
+                "code": p["code"],
+                "name": p["name"],
+                "price_ars": p["price_ars"],
+                "price_usd": p["price_usd"],
+                "qty": 1
             }
+            for p in products[:150]
+        ], query_for_search)
 
-    # ------------------------------------------------------
-    # Respuesta del modelo
-    # ------------------------------------------------------
-    reply = generate_smart_ai_reply_v2(
+    execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
+
+    if len(products) > MAX_PRODUCTS_FOR_LLM:
+        execution_context["will_send_chunks"] = True
+        num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
+        execution_context["chunk_info"] = {
+            "total_chunks": num_chunks,
+            "products_per_chunk": PRODUCTS_PER_CHUNK,
+            "total_products": len(products)
+        }
+
+    result = generate_smart_ai_reply_v2(
         phone,
         user_message,
         products[:MAX_PRODUCTS_FOR_LLM],
@@ -4557,29 +3852,30 @@ def orquestar_fran(mensaje_usuario, phone):
         system_prompt=CITATION_ENFORCED_PROMPT
     )
 
-    # ------------------------------------------------------
-    # Validación post-LLM (códigos / nombres)
-    # ------------------------------------------------------
+    reply = result.get("reply") or "Uy, tuve un problema. ¿Me repetís?"
+    plan = result.get("plan") or {}
+    real_intent = plan.get("real_intent", "unknown")
+    execution_context["intent_detected"] = real_intent
+
     if products:
         allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
         reply = validate_and_fix_response(reply, allowed_products, phone, execution_context)
 
-    # ------------------------------------------------------
-    # Enviar listados largos por chunks
-    # ------------------------------------------------------
-    if execution_context["will_send_chunks"] and intent == "product_search" and products:
+    if execution_context["will_send_chunks"] and products:
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
-            chunk_text = f"\n━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
+            chunk_text = f"
+━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━
+"
             chunk_text += format_search_results(chunk)
             if idx > 1:
                 time.sleep(0.5)
             send_long_message(phone, chunk_text)
 
     save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, intent, len(products))
-    log_performance(phone, intent, time.time()-start_time, len(products))
-    update_sales_phase_from_intent(phone, intent)
+    log_interaction(phone, user_message, real_intent, len(products))
+    log_performance(phone, real_intent, time.time()-start_time, len(products))
+    update_sales_phase_from_intent(phone, real_intent)
     return reply
 
 
