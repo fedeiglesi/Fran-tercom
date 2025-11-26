@@ -123,9 +123,11 @@ QUERY_UNDERSTANDING_SCHEMA = {
     
     CORRECCIONES TÍPICAS:
     - "gonda" → "Honda"
-    - "iamaha" → "Yamaha" 
+    - "iamaha" → "Yamaha"
     - "sanella" → "Zanella"
     - "bateria" → "batería"
+
+    Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
     """,
     "output_schema": {
         "type": "object",
@@ -163,7 +165,7 @@ QUERY_UNDERSTANDING_SCHEMA = {
             },
             "intent": {
                 "type": "string",
-                "enum": ["product_search", "cart_action", "greeting", "tech_question", "order_flow"],
+                "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"],
                 "description": "Intención detectada"
             },
             "confidence": {
@@ -264,12 +266,15 @@ RESPONSE_GENERATION_SCHEMA = {
     "description": """
     Generá la respuesta final para WhatsApp como Fran.
 
-    SI EL INTENT ES "greeting":
-    - Ignorá por completo allowed_products, el catálogo y cualquier búsqueda previa
-    - NO devuelvas mensajes del tipo “no encontré coincidencias”
-    - NO pidas aclaraciones
-    - Generá un saludo cálido, humano y breve (máx 2–3 líneas)
-    - El campo products_cited debe ir vacío []
+    SI EL INTENT ES "social":
+    - Ignorá allowed_products por completo.
+    - No generes listados ni pidas marca/modelo/año.
+    - Respondé en tono humano, cálido, vendedor mayorista real.
+    - La respuesta debe ser breve (1–3 líneas).
+    - Podés mantener continuidad (“¡Me alegra que te haya servido!”, “¿Todo tranqui por ahí?”).
+    - No menciones sistemas, búsquedas, catálogos ni procesos internos.
+    - products_cited debe ser siempre [].
+    - La respuesta debe ser 100% independiente del catálogo.
 
     REGLAS PARA RESPUESTA:
     1. Validación de coherencia entre lo que pidió el cliente y los productos (brand, model, cylinder, part_category, normalized_query, intent, corrections). Si allowed_products trae productos no coherentes, ignoralos. Si ninguno es coherente, devolvé un mensaje breve pidiendo aclaración. Si allowed_products está vacío o incoherente, devolvé: "No encontré coincidencias claras con lo que pediste. ¿Me pasás más detalles (marca/modelo/año) así lo afino?"
@@ -277,7 +282,7 @@ RESPONSE_GENERATION_SCHEMA = {
     3. Límites de Twilio / WhatsApp: cada mensaje < ~3500 caracteres. Ajustá dinámicamente el tamaño de los bloques manteniendo el máximo posible sin exceder el límite. Si hay varios mensajes, generá cada uno por separado manteniendo coherencia y continuidad.
     4. Estructura de los productos en cada mensaje: cada producto debe listar código TERCOM, descripción limpia y precio. Nunca inventes precios, códigos ni descripciones.
     5. products_cited: en cada mensaje listar solo los códigos incluidos en ese mensaje. No mezclar códigos de otros bloques. Si el intent NO es product_search, entonces products_cited = [].
-    6. Small talk, saludos y mensajes no comerciales (greeting, small_talk, thanks, etc.): ignorá allowed_products. No generes listados ni pidas marca/modelo. Respondé en máximo 2–3 líneas. products_cited = [].
+    6. Mensajes sociales, saludos, agradecimientos o conversación ligera (social, small_talk, rapport, etc.): ignorá allowed_products. No generes listados ni pidas marca/modelo/año. Respondé en máximo 1–3 líneas, tono humano. products_cited = [].
     7. Mensaje final: en el último bloque de productos (o en el único mensaje) agregá: "Decime si querés que compare opciones o te arme el carrito."
     8. Restricciones generales: nunca inventes productos, ni derivados, ni modifiques códigos. Nunca respondas fuera de la estructura JSON del schema.
 
