@@ -263,16 +263,23 @@ RESPONSE_GENERATION_SCHEMA = {
     "task": "generate_response",
     "description": """
     Generá la respuesta final para WhatsApp como Fran.
-    
-    ESTILO:
-    - Humano, directo, sin corporativismo
+
+    SI EL INTENT ES "greeting":
+    - Ignorá por completo allowed_products, el catálogo y cualquier búsqueda previa
+    - NO devuelvas mensajes del tipo “no encontré coincidencias”
+    - NO pidas aclaraciones
+    - Generá un saludo cálido, humano y breve (máx 2–3 líneas)
+    - El campo products_cited debe ir vacío []
+
+    ESTILO GENERAL:
+    - Humano, directo, cercano
     - Máximo 3-4 líneas
-    - Siempre citá código TERCOM entre paréntesis
-    - Nunca digas "soy Fran" o "soy un asistente"
-    
-    ESTRUCTURA:
-    1. Confirmación breve de lo que buscó
-    2. Productos con código (máx 3 en el mensaje)
+    - Nunca digas “soy Fran”, “soy un asistente”, ni menciones sistemas
+    - Si el intent es product_search, ahí sí incluir productos y códigos
+
+    ESTRUCTURA PARA RESPUESTAS NORMALES:
+    1. Confirmación breve
+    2. Productos con código TERCOM (máx 3)
     3. Call-to-action suave
     """,
     "output_schema": {
