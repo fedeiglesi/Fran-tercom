@@ -2833,6 +2833,62 @@ Instrucciones críticas:
   - pedir aclaraciones (accion_sugerida="pedir_aclaracion").
 - Devuelve SIEMPRE un JSON válido. No envíes nunca texto fuera del JSON.
 """
+
+SALES_ANALYSIS_PROMPT = """
+Eres Fran, analista comercial de TERCOM.
+Analiza la conversación reciente y el contexto del cliente.
+
+Devuelve SIEMPRE un JSON con:
+{
+  "sales_analysis": {
+    "tipo_de_cliente": "comparador|fiel|nuevo|desconfiado|price_sensitive|impulsivo|indefinido",
+    "nivel_de_interes": "bajo|medio|alto",
+    "senales_de_cierre": ["texto breve con señales claras"],
+    "producto_recomendado": "codigo_principal" (si aplica),
+    "argumentos_clave": ["bullets comerciales clave"],
+    "alternativas_seguras": ["codigos_alternativos_seguro"] ,
+    "tono_sugerido": "amigable|experto|directo|asesor|concise",
+    "nivel_de_confianza": 0.0-1.0
+  },
+  "confianza": "alta|media|baja",
+  "alertas": ["strings de alerta si faltan datos o hay ambigüedades"]
+}
+
+No expliques nada fuera del JSON.
+"""
+
+
+def run_sales_analysis_llm(conversacion_completa, productos_disponibles, contexto_cliente, perfil_cliente):
+    """
+    Ejecuta el análisis comercial previo al planning.
+    Devuelve el JSON con sales_analysis.
+    """
+    payload = {
+        "conversacion_completa": conversacion_completa,
+        "productos_disponibles": productos_disponibles,
+        "contexto_cliente": contexto_cliente,
+        "perfil_cliente": perfil_cliente,
+    }
+
+    messages = [
+        {"role": "system", "content": SALES_ANALYSIS_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+    resp = client.chat.completions.create(
+        model=MODEL_REASONING,
+        messages=messages,
+        temperature=0,
+        max_tokens=400,
+        response_format={"type": "json_object"},
+    )
+
+    try:
+        return json.loads(resp.choices[0].message.content)
+    except Exception:
+        logger.error("Sales analysis JSON inválido")
+        return {"sales_analysis": {}, "confianza": "baja", "alertas": ["parse_error"]}
+
 TECH_SYSTEM_PROMPT = f"""
 Sos Fran, mecánico experto y vendedor premium de TERCOM.
 
@@ -3606,12 +3662,13 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
+        short_history = history[-8:]
         memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), catalog_products)
-        contexto = {
+        contexto_prev = {
             "mensaje_usuario": user_message,
             "search_query": execution_context.get("search_query"),
             "warnings": execution_context.get("warnings", []),
-            "historial": [{"role": h["role"], "content": h["content"]} for h in history[-8:]],
+            "historial": [{"role": h["role"], "content": h["content"]} for h in short_history],
             "metadata_catalogo": {"productos_total": len(catalog_products or [])},
             "ultimo_contexto": execution_context,
             "memoria_viva": memory,
@@ -3621,9 +3678,40 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         }
 
         productos_permitidos = catalog_products or []
+
+        # 1) Construir conversación reducida para análisis comercial
+        historial = short_history[-6:] if short_history else []
+        conversacion_completa = [h.get("content", "") for h in historial]
+
+        # 2) Ejecutar análisis comercial previo
+        sales_result = run_sales_analysis_llm(
+            conversacion_completa=conversacion_completa,
+            productos_disponibles=productos_permitidos,
+            contexto_cliente=memory,
+            perfil_cliente=memory.get("perfil_cliente", {}),
+        )
+
+        # Validación final del análisis comercial
+        parsed = sales_result or {}
+        sales = parsed.get("sales_analysis", {}) or {}
+
+        parsed["sales_analysis"] = {
+            "tipo_de_cliente": sales.get("tipo_de_cliente", ""),
+            "nivel_de_interes": sales.get("nivel_de_interes", "medio"),
+            "senales_de_cierre": sales.get("senales_de_cierre", []),
+            "producto_recomendado": sales.get("producto_recomendado", ""),
+            "argumentos_clave": sales.get("argumentos_clave", []),
+            "alternativas_seguras": sales.get("alternativas_seguras", []),
+            "tono_sugerido": sales.get("tono_sugerido", "concise"),
+            "nivel_de_confianza": float(sales.get("nivel_de_confianza", 0.0) or 0.0),
+        }
+
+        sales_analysis = parsed.get("sales_analysis", {})
+        contexto_prev["sales_analysis"] = sales_analysis
+
         plan_interno = pensar_con_llm(
             system_prompt or PLANNING_UNIFIED_PROMPT,
-            contexto,
+            contexto_prev,
             productos_permitidos,
         )
 
@@ -3641,7 +3729,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                 productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
                 execution_context["search_query"] = nueva_query
                 memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
-                contexto.update({
+                contexto_prev.update({
                     "search_query": nueva_query,
                     "memoria_viva": memory,
                     "metadata_catalogo": {"productos_total": len(productos_permitidos)},
@@ -3649,7 +3737,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                 })
                 plan_interno = pensar_con_llm(
                     system_prompt or PLANNING_UNIFIED_PROMPT,
-                    contexto,
+                    contexto_prev,
                     productos_permitidos,
                 )
                 parsed_plan = validate_reasoning_json(plan_interno, productos_permitidos)
