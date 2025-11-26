@@ -4504,39 +4504,48 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 3] Selecting best products...")
 
-    selection = complete_template(
-        "product_selection",
-        {
-            "phone": phone,
-            "normalized_query": normalized_query,
-            "original_query": user_message,
-            "entities": understanding.get("entities", {}),
-            "intent": intent,
-            "allowed_products": [
-                {
-                    "code": p.get("code", ""),
-                    "name": p.get("name", ""),
-                    "price_ars": float(p.get("price_ars", 0)),
-                    "brand": p.get("brand", ""),
-                    "model": p.get("model", ""),
-                    "category": p.get("category", ""),
-                }
-                for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
-            ],
-            "conversation_context": {
-                "cart_items": len(cart_get(phone)),
-                "sales_phase": get_sales_phase(phone),
-                "is_first_message": len(get_history_since(phone, days=1, limit=5)) <= 1,
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        logger.info("[STEP 3] Skipping product selection for social intent")
+        selected_products = []
+        selection = {
+            "selected_products": [],
+            "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
+            "action": "show_products",
+        }
+    else:
+        selection = complete_template(
+            "product_selection",
+            {
+                "phone": phone,
+                "normalized_query": normalized_query,
+                "original_query": user_message,
+                "entities": understanding.get("entities", {}),
+                "intent": intent,
+                "allowed_products": [
+                    {
+                        "code": p.get("code", ""),
+                        "name": p.get("name", ""),
+                        "price_ars": float(p.get("price_ars", 0)),
+                        "brand": p.get("brand", ""),
+                        "model": p.get("model", ""),
+                        "category": p.get("category", ""),
+                    }
+                    for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
+                ],
+                "conversation_context": {
+                    "cart_items": len(cart_get(phone)),
+                    "sales_phase": get_sales_phase(phone),
+                    "is_first_message": len(get_history_since(phone, days=1, limit=5)) <= 1,
+                },
             },
-        },
-    )
+        )
 
-    if selection.get("action") == "ask_clarification":
-        reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
-        save_message(phone, reply, "assistant")
-        return reply
+        if selection.get("action") == "ask_clarification":
+            reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
+            save_message(phone, reply, "assistant")
+            return reply
 
-    selected_products = selection.get("selected_products", [])
+        selected_products = selection.get("selected_products", [])
 
     logger.info(
         f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
@@ -4551,6 +4560,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         "response_generation",
         {
             "phone": phone,
+            "intent": intent,
             "selected_products": selected_products,
             "customer_analysis": selection.get("analysis", {}),
             "query_context": {
