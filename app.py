@@ -2733,6 +2733,7 @@ PLAN INTERNO:
 # Compatibilidad hacia atrás
 CITATION_ENFORCED_PROMPT = CUSTOMER_OUTPUT_PROMPT
 
+# Prompt de planificación unificada (versión actualizada)
 PLANNING_UNIFIED_PROMPT = """
 Eres FRAN, un vendedor mayorista de repuestos de moto para TERCOM.
 Tu tarea es PENSAR en voz baja (razonamiento interno) y devolver SIEMPRE un JSON ESTRICTO
