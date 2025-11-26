@@ -2569,6 +2569,20 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_k]
 
+
+def run_allowed_products_search(normalized_query: str, phone: str | None = None) -> list | dict:
+    """
+    Ejecuta la búsqueda híbrida y filtra por relevancia para generar allowed_products.
+    """
+    semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+
+    if isinstance(semantic_results, dict):
+        return semantic_results
+
+    products = [p for p, _ in semantic_results]
+
+    return filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
 # ------------------------------------------------------------------
@@ -4420,30 +4434,29 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 2] Searching products...")
 
-    filtered_products = []
+    allowed_products = []
     quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
 
-    if intent in ["social", "greeting", "conversation"]:
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        allowed_products = []
         logger.info("[STEP 2] Bypass search for social intent")
     else:
-        semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+        allowed_products = run_allowed_products_search(normalized_query, phone=phone)
+        logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
 
-        if isinstance(semantic_results, dict):
-            if semantic_results.get("error") == "too_many_combinations":
-                reply = semantic_results.get("message", "Pasame una sola moto o categoría.")
+        if isinstance(allowed_products, dict):
+            if allowed_products.get("error") == "too_many_combinations":
+                reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
                 save_message(phone, reply, "assistant")
                 return reply
 
-            reply = format_multi_search_response(semantic_results)
+            reply = format_multi_search_response(allowed_products)
             if reply:
                 save_message(phone, reply, "assistant")
                 return reply
-            semantic_results = []
+            allowed_products = []
 
-        products = [p for p, _ in semantic_results]
-
-        filtered_products = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
-        quality = assess_context_quality(normalized_query, filtered_products)
+        quality = assess_context_quality(normalized_query, allowed_products)
 
         if not quality["sufficient"]:
             if quality["action"] == "ask_clarification":
@@ -4464,7 +4477,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
             save_message(phone, reply, "assistant")
             log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
-            log_performance(phone, "low_quality", time.time() - start_time, len(filtered_products))
+            log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
             return reply
 
         save_last_search(
@@ -4477,13 +4490,13 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                     "price_usd": p.get("price_usd"),
                     "qty": 1,
                 }
-                for p in filtered_products[:MAX_ITEMS]
+                for p in allowed_products[:MAX_ITEMS]
             ],
             normalized_query,
         )
 
         logger.info(
-            f"[STEP 2] Found {len(filtered_products)} relevant products | Quality: {quality.get('confidence')}"
+            f"[STEP 2] Found {len(allowed_products)} relevant products | Quality: {quality.get('confidence')}"
         )
 
     # ============================================
@@ -4508,7 +4521,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                     "model": p.get("model", ""),
                     "category": p.get("category", ""),
                 }
-                for p in filtered_products[:MAX_PRODUCTS_FOR_LLM]
+                for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
             ],
             "conversation_context": {
                 "cart_items": len(cart_get(phone)),
@@ -4560,16 +4573,16 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 5] Validating response...")
 
-    allowed_codes = {p.get("code") for p in filtered_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
     hallucinated = set(products_cited) - allowed_codes
 
     if hallucinated:
         logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-        reply = format_search_results(filtered_products[:5])
+        reply = format_search_results(allowed_products[:5])
         reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    if len(filtered_products) > MAX_PRODUCTS_FOR_LLM:
-        remaining_products = filtered_products[MAX_PRODUCTS_FOR_LLM:]
+    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
+        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
         if remaining_products:
             chunks = [
                 remaining_products[i : i + PRODUCTS_PER_CHUNK]
@@ -4584,7 +4597,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, intent, len(selected_products))
-    log_performance(phone, intent, time.time() - start_time, len(filtered_products))
+    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
     update_sales_phase_from_intent(phone, intent)
 
     logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
