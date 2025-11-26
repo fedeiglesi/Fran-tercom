@@ -72,6 +72,7 @@ MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
 MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
+USE_SALES_PROMPT_FLOW = (os.environ.get("USE_SALES_PROMPT_FLOW", "true").strip().lower() == "true")
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -2688,6 +2689,183 @@ def handle_cart_action(phone, message):
 # ------------------------------------------------------------------
 # PROMPTS LLM
 # ------------------------------------------------------------------
+SALES_INTELLIGENCE_PROMPT = """
+Sos Fran, vendedor mayorista experto con 20 años de experiencia en motopartes en Argentina.
+
+Tu especialidad: entender clientes en 2-3 mensajes y cerrar ventas de forma natural.
+
+ENTRADA que recibirás:
+- conversacion_completa: últimos 20 mensajes
+- productos_disponibles: qué tenés para ofrecer
+- contexto_cliente: moto habitual, compras previas, carrito actual
+- perfil_cliente: cómo es este cliente (si ya lo conocés)
+
+TU TRABAJO:
+Analizá la conversación como lo haría un vendedor experto y respondé:
+
+1. ¿QUÉ QUIERE REALMENTE ESTE CLIENTE?
+   - No solo qué pidió, sino qué NECESITA
+   - ¿Es la pregunta correcta o está confundido?
+   - ¿Tiene una necesidad oculta? (ej: pide filtro pero debería cambiar aceite también)
+
+2. ¿DÓNDE ESTÁ EN EL PROCESO DE COMPRA?
+   - ¿Está explorando, comparando, o listo para comprar?
+   - ¿Qué frenos tiene? (precio, duda técnica, no sabe qué necesita)
+   - ¿Qué lo haría comprar AHORA?
+
+3. ¿CÓMO DEBERÍA VENDERLE A ESTE CLIENTE ESPECÍFICO?
+   - Según su personalidad: ¿directo o consultivo?
+   - Según su expertise: ¿técnico o simple?
+   - Según su urgencia: ¿empujar o educar?
+   - ¿Qué lenguaje/tono funcionaría mejor?
+
+4. ¿CUÁL ES LA JUGADA ÓPTIMA?
+   - ¿Qué productos mostrar? (¿1 opción o 3?)
+   - ¿Cómo presentarlos? (precio, calidad, disponibilidad)
+   - ¿Qué decir para cerrar? (pregunta, afirmación, oferta)
+   - ¿Agregar urgencia/incentivo o no?
+
+IMPORTANTE:
+- Usá tu conocimiento de ventas (que ya tenés como LLM)
+- NO sigas reglas rígidas, adaptate a ESTE cliente en ESTE momento
+- Pensá como vendedor que quiere ayudar Y cerrar la venta
+- Si algo no tiene sentido en la conversación, decilo
+
+FORMATO DE SALIDA (JSON):
+
+{
+  "analisis_cliente": {
+    "necesidad_real": "string - qué necesita de verdad",
+    "necesidad_vs_pedido": "string - ¿pidió lo correcto o está confundido?",
+    "nivel_urgencia": "string - bajo/medio/alto + por qué",
+    "nivel_confianza": "string - desconfiado/neutral/confiado",
+    "señales_compra": ["string", "string"],
+    "frenos_detectados": ["string", "string"]
+  },
+  
+  "momento_de_venta": {
+    "fase": "string - en qué está (explorando/decidiendo/comprando)",
+    "probabilidad_cierre": 0.75,
+    "que_necesita_para_comprar": "string - qué falta para que cierre",
+    "ventana_temporal": "string - cuánto tiempo tenés (ahora/hoy/esta_semana)"
+  },
+  
+  "estrategia_recomendada": {
+    "enfoque": "string - consultivo/directo/educativo",
+    "tono": "string - cómo hablarle (amigable/profesional/urgente)",
+    "productos_a_mostrar": {
+      "cantidad": 1,
+      "criterio": "string - por qué esa cantidad",
+      "orden": "string - cómo ordenarlos (mejor primero, más barato, etc)"
+    },
+    "como_cerrar": {
+      "tipo": "string - pregunta/afirmacion/oferta/validacion",
+      "lenguaje": "string - qué decir exactamente (ej: '¿lo agregamos?')",
+      "agregar_urgencia": true/false,
+      "agregar_valor": "string - qué beneficio destacar"
+    }
+  },
+  
+  "intuicion_vendedor": {
+    "este_cliente_es": "string - tipo de cliente en pocas palabras",
+    "voy_a_cerrar_si": "string - qué tengo que hacer para vender",
+    "riesgos": ["string"],
+    "oportunidades": ["string"]
+  },
+  
+  "jugada_optima": "string - en 2-3 oraciones, qué haría un vendedor experto acá"
+}
+"""
+
+PRODUCT_SELECTION_PROMPT = """
+Sos el gerente comercial de TERCOM. Tu trabajo: decidir QUÉ productos mostrar y CÓMO para maximizar venta.
+
+ENTRADA:
+- analisis_ventas: el análisis del paso anterior
+- productos_disponibles: lista completa de opciones (código, nombre, precio, specs)
+- restricciones: stock, precios, familias
+
+TU TRABAJO:
+Basándote en el análisis de ventas, seleccioná productos y decidí cómo presentarlos.
+
+PENSÁ COMO COMERCIAL:
+- Si el cliente es price-sensitive → mostrar opción económica primero
+- Si busca calidad → destacar premium
+- Si está confundido → dar 2-3 opciones claras con diferencias
+- Si está decidido → confirmar su elección y sugerir complementos
+
+NO USAR REGLAS, USAR CRITERIO:
+- ¿Este cliente quiere 1 opción o 5?
+- ¿Ordeno por precio, calidad, o popularidad?
+- ¿Destaco specs técnicos o beneficios prácticos?
+- ¿Agrego productos complementarios o no?
+
+FORMATO DE SALIDA:
+
+{
+  "productos_seleccionados": [
+    {
+      "code": "1234/56789-001",
+      "presentacion": {
+        "orden": 1,
+        "highlight": "precio",
+        "enfasis": "La más económica - $15.200",
+        "beneficio_clave": "Te dura 12.000km fácil",
+        "specs_mostrar": ["medida", "marca"],
+        "agregar_social_proof": false
+      },
+      "razon_seleccion": "Cliente busca opción económica"
+    }
+  ],
+  
+  "cross_sell": {
+    "sugerir": true/false,
+    "productos": ["codigo"],
+    "momento": "ahora|despues_de_confirmar",
+    "como_presentar": "string - ej: 'Aprovechá y llevate el aceite que va con eso'"
+  },
+  
+  "estructura_oferta": {
+    "tipo": "lista|comparacion|recomendacion_unica|paquete",
+    "razon": "string - por qué esta estructura"
+  }
+}
+"""
+
+SALES_RESPONSE_PROMPT = """
+Sos Fran, vendedor de TERCOM. Escribí el mensaje de WhatsApp perfecto para cerrar esta venta.
+
+ENTRADA:
+- analisis_ventas: análisis del cliente
+- productos_seleccionados: qué productos y cómo presentarlos
+- perfil_cliente: personalidad y preferencias (si existe)
+- conversacion_previa: contexto
+
+TU TRABAJO:
+Escribir el mensaje de venta PERFECTO para ESTE cliente en ESTE momento.
+
+REGLAS DE ORO:
+1. Escribí como hablarías naturalmente (sos argentino, mayorista, experto)
+2. Adaptate al cliente (su tono, su urgencia, su nivel técnico)
+3. SIEMPRE incluí call-to-action claro
+4. Asumí la venta (lenguaje assumptivo)
+5. Sé breve si el cliente es conciso, detallado si aprecia explicaciones
+
+NO HAGAS:
+- Listas genéricas de productos sin contexto
+- "Espero que te sirva" / "Cualquier cosa avisame" (pasivo)
+- Bombardear con specs si no las pidió
+- Sonar como robot o chatbot
+
+SÍ HACE:
+- Confirmar que entendiste
+- Presentar productos con VALOR (no solo precio)
+- Cerrar con pregunta/afirmación que asume compra
+- Usar lenguaje del cliente (si dice "che" vos también)
+
+NO PIENSES EN REGLAS, PENSÁ: ¿Qué diría el mejor vendedor de motopartes que conocés?
+"""
+
 BUSINESS_CONTEXT = """
 TERCOM - Mayorista Motopartes Argentina
 
@@ -3177,6 +3355,86 @@ def _safe_json_parse(text):
             return {}
 
 
+def _extract_json_block(text: str) -> str:
+    if not text:
+        return ""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start:end + 1]
+    return text
+
+
+def normalize_product_for_llm(product: dict) -> dict:
+    if not product:
+        return {}
+    return {
+        "code": product.get("code"),
+        "name": product.get("name"),
+        "price": float(to_decimal_money(product.get("price_ars", 0))),
+        "brand": product.get("brand", ""),
+        "model": product.get("model", ""),
+        "category": product.get("category", ""),
+    }
+
+
+def call_sales_json_llm(prompt: str, payload: dict, model: str = None, temperature: float = 0.35, max_tokens: int = 700):
+    model = model or MODEL_REASONING
+    try:
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        parsed = _safe_json_parse(_extract_json_block(raw))
+        return parsed if isinstance(parsed, dict) else None
+    except Exception as e:
+        logger.error(f"call_sales_json_llm error: {e}")
+        return None
+
+
+def call_sales_text_llm(prompt: str, payload: dict, model: str = None, temperature: float = 0.35, max_tokens: int = 500):
+    model = model or MODEL_RESPONSE
+    try:
+        with openai_sem:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.error(f"call_sales_text_llm error: {e}")
+        return ""
+
+
+def build_user_profile_snapshot(phone: str, memory: dict) -> dict:
+    profile = {
+        "moto_principal": memory.get("most_recent_bike"),
+        "ultima_busqueda": memory.get("last_search_query"),
+        "categorias_recurrentes": (memory.get("purchase_pattern") or {}).get("main_category"),
+    }
+
+    history = get_history_since(phone, days=7, limit=12)
+    if history:
+        profile["tono_reciente"] = "directo" if any(len(h.get("content", "")) < 25 for h in history[-3:]) else "detallado"
+        profile["mensajes_recientes"] = [h.get("content", "") for h in history[-5:]]
+
+    return {k: v for k, v in profile.items() if v}
+
+
 def build_live_memory(phone, user_message, intent_data, productos_filtrados):
     history = get_history_since(phone, days=14, limit=400)
     search_history = get_search_history(phone, limit=5)
@@ -3591,6 +3849,78 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
     return msgs
 
 
+def run_sales_prompt_flow(phone: str, user_message: str, catalog_products: list, memory: dict, meta_analysis: dict) -> str:
+    if not USE_SALES_PROMPT_FLOW:
+        return ""
+
+    try:
+        history = get_history_since(phone, days=1, limit=20)
+        conversation = [
+            {"role": h.get("role", "user"), "content": h.get("content", "")}
+            for h in history[-20:]
+        ]
+
+        carrito_raw = cart_get(phone)
+        carrito = [
+            {
+                "code": code,
+                "qty": qty,
+                "name": name,
+                "price": float(to_decimal_money(price)),
+            }
+            for code, qty, name, price in carrito_raw
+        ]
+
+        productos_disponibles = [normalize_product_for_llm(p) for p in (catalog_products or [])[: max(5, MAX_PRODUCTS_FOR_LLM)]]
+        if not productos_disponibles and catalog_products:
+            productos_disponibles = [normalize_product_for_llm(catalog_products[0])]
+
+        sales_analysis = call_sales_json_llm(
+            SALES_INTELLIGENCE_PROMPT,
+            {
+                "conversacion_completa": conversation,
+                "productos_disponibles": productos_disponibles,
+                "contexto_cliente": {
+                    "moto_habitual": memory.get("most_recent_bike"),
+                    "carrito": carrito,
+                    "compras_previas": get_search_history(phone, limit=5),
+                },
+                "perfil_cliente": build_user_profile_snapshot(phone, memory),
+            },
+        )
+
+        if not sales_analysis:
+            return ""
+
+        product_strategy = call_sales_json_llm(
+            PRODUCT_SELECTION_PROMPT,
+            {
+                "analisis_ventas": sales_analysis,
+                "productos_disponibles": productos_disponibles,
+                "restricciones": {"max_options": MAX_PRODUCTS_FOR_LLM},
+            },
+        )
+
+        if not product_strategy:
+            return ""
+
+        reply = call_sales_text_llm(
+            SALES_RESPONSE_PROMPT,
+            {
+                "analisis_ventas": sales_analysis,
+                "productos_seleccionados": product_strategy,
+                "perfil_cliente": build_user_profile_snapshot(phone, memory),
+                "conversacion_previa": meta_analysis or {},
+            },
+            temperature=0.4,
+        )
+
+        return reply
+    except Exception as e:
+        logger.error(f"run_sales_prompt_flow error: {e}")
+        return ""
+
+
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
@@ -3620,6 +3950,11 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             "most_recent_bike": memory.get("most_recent_bike", ""),
             "meta_analysis": meta_analysis,
         }
+
+        if USE_SALES_PROMPT_FLOW:
+            fast_reply = run_sales_prompt_flow(phone, user_message, catalog_products, memory, meta_analysis)
+            if fast_reply:
+                return fast_reply
 
         productos_permitidos = catalog_products or []
         plan_interno = pensar_con_llm(
