@@ -4420,63 +4420,71 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 2] Searching products...")
 
-    semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+    filtered_products = []
+    quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
 
-    if isinstance(semantic_results, dict):
-        if semantic_results.get("error") == "too_many_combinations":
-            reply = semantic_results.get("message", "Pasame una sola moto o categoría.")
+    if intent in ["social", "greeting", "conversation"]:
+        logger.info("[STEP 2] Bypass search for social intent")
+    else:
+        semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+
+        if isinstance(semantic_results, dict):
+            if semantic_results.get("error") == "too_many_combinations":
+                reply = semantic_results.get("message", "Pasame una sola moto o categoría.")
+                save_message(phone, reply, "assistant")
+                return reply
+
+            reply = format_multi_search_response(semantic_results)
+            if reply:
+                save_message(phone, reply, "assistant")
+                return reply
+            semantic_results = []
+
+        products = [p for p, _ in semantic_results]
+
+        filtered_products = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+        quality = assess_context_quality(normalized_query, filtered_products)
+
+        if not quality["sufficient"]:
+            if quality["action"] == "ask_clarification":
+                reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
+            else:
+                top_products = quality.get("top_products", [])[:3]
+                suggestions = "\n".join(
+                    [
+                        f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                        for p in top_products
+                    ]
+                )
+                reply = (
+                    "No encontré coincidencia perfecta. Tengo:\n\n"
+                    f"{suggestions}\n\n"
+                    "¿Te sirve alguna o dame más detalles?"
+                )
+
             save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
+            log_performance(phone, "low_quality", time.time() - start_time, len(filtered_products))
             return reply
 
-        reply = format_multi_search_response(semantic_results)
-        if reply:
-            save_message(phone, reply, "assistant")
-            return reply
-        semantic_results = []
+        save_last_search(
+            phone,
+            [
+                {
+                    "code": p["code"],
+                    "name": p.get("name", ""),
+                    "price_ars": p.get("price_ars"),
+                    "price_usd": p.get("price_usd"),
+                    "qty": 1,
+                }
+                for p in filtered_products[:MAX_ITEMS]
+            ],
+            normalized_query,
+        )
 
-    products = [p for p, _ in semantic_results]
-
-    filtered_products = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
-    quality = assess_context_quality(normalized_query, filtered_products)
-
-    if not quality["sufficient"]:
-        if quality["action"] == "ask_clarification":
-            reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
-        else:
-            top_products = quality.get("top_products", [])[:3]
-            suggestions = "\n".join(
-                [
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in top_products
-                ]
-            )
-            reply = (
-                "No encontré coincidencia perfecta. Tengo:\n\n"
-                f"{suggestions}\n\n"
-                "¿Te sirve alguna o dame más detalles?"
-            )
-
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
-        log_performance(phone, "low_quality", time.time() - start_time, len(filtered_products))
-        return reply
-
-    save_last_search(
-        phone,
-        [
-            {
-                "code": p["code"],
-                "name": p.get("name", ""),
-                "price_ars": p.get("price_ars"),
-                "price_usd": p.get("price_usd"),
-                "qty": 1,
-            }
-            for p in filtered_products[:MAX_ITEMS]
-        ],
-        normalized_query,
-    )
-
-    logger.info(f"[STEP 2] Found {len(filtered_products)} relevant products | Quality: {quality.get('confidence')}")
+        logger.info(
+            f"[STEP 2] Found {len(filtered_products)} relevant products | Quality: {quality.get('confidence')}"
+        )
 
     # ============================================
     # STEP 3: PRODUCT SELECTION (LLM)
