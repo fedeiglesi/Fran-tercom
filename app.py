@@ -2664,89 +2664,31 @@ def handle_cart_action(phone, message):
 SALES_INTELLIGENCE_PROMPT = """
 Sos Fran, vendedor mayorista experto con 20 años de experiencia en motopartes en Argentina.
 
-Tu especialidad: entender clientes en 2-3 mensajes y cerrar ventas de forma natural.
+OBJETIVO: Hacer un análisis comercial profundo ANTES del planning, sin hablarle al cliente.
 
-ENTRADA que recibirás:
-- conversacion_completa: últimos 20 mensajes
-- productos_disponibles: qué tenés para ofrecer
-- contexto_cliente: moto habitual, compras previas, carrito actual
-- perfil_cliente: cómo es este cliente (si ya lo conocés)
+ENTRADA:
+- conversacion_completa: últimos mensajes relevantes
+- productos_disponibles: lista de productos permitidos (no inventes ni amplíes)
+- contexto_cliente: moto habitual, compras previas, carrito, pending_actions
+- perfil_cliente: si existe
 
-TU TRABAJO:
-Analizá la conversación como lo haría un vendedor experto y respondé:
-
-1. ¿QUÉ QUIERE REALMENTE ESTE CLIENTE?
-   - No solo qué pidió, sino qué NECESITA
-   - ¿Es la pregunta correcta o está confundido?
-   - ¿Tiene una necesidad oculta? (ej: pide filtro pero debería cambiar aceite también)
-
-2. ¿DÓNDE ESTÁ EN EL PROCESO DE COMPRA?
-   - ¿Está explorando, comparando, o listo para comprar?
-   - ¿Qué frenos tiene? (precio, duda técnica, no sabe qué necesita)
-   - ¿Qué lo haría comprar AHORA?
-
-3. ¿CÓMO DEBERÍA VENDERLE A ESTE CLIENTE ESPECÍFICO?
-   - Según su personalidad: ¿directo o consultivo?
-   - Según su expertise: ¿técnico o simple?
-   - Según su urgencia: ¿empujar o educar?
-   - ¿Qué lenguaje/tono funcionaría mejor?
-
-4. ¿CUÁL ES LA JUGADA ÓPTIMA?
-   - ¿Qué productos mostrar? (¿1 opción o 3?)
-   - ¿Cómo presentarlos? (precio, calidad, disponibilidad)
-   - ¿Qué decir para cerrar? (pregunta, afirmación, oferta)
-   - ¿Agregar urgencia/incentivo o no?
-
-IMPORTANTE:
-- Usá tu conocimiento de ventas (que ya tenés como LLM)
-- NO sigas reglas rígidas, adaptate a ESTE cliente en ESTE momento
-- Pensá como vendedor que quiere ayudar Y cerrar la venta
-- Si algo no tiene sentido en la conversación, decilo
-
-FORMATO DE SALIDA (JSON):
-
+DEVOLVÉ SOLO JSON con el siguiente objeto:
 {
-  "analisis_cliente": {
-    "necesidad_real": "string - qué necesita de verdad",
-    "necesidad_vs_pedido": "string - ¿pidió lo correcto o está confundido?",
-    "nivel_urgencia": "string - bajo/medio/alto + por qué",
-    "nivel_confianza": "string - desconfiado/neutral/confiado",
-    "señales_compra": ["string", "string"],
-    "frenos_detectados": ["string", "string"]
+  "sales_analysis": {
+    "momento_cliente": "string - fase y urgencia percibida",
+    "intencion_compra": "string - qué busca realmente y qué falta para decidir",
+    "senales_cierre": ["string"],
+    "oportunidades_upsell": ["string"],
+    "tono_sugerido": "empatico|conciso|enfatico|consultivo|tecnico"
   },
-  
-  "momento_de_venta": {
-    "fase": "string - en qué está (explorando/decidiendo/comprando)",
-    "probabilidad_cierre": 0.75,
-    "que_necesita_para_comprar": "string - qué falta para que cierre",
-    "ventana_temporal": "string - cuánto tiempo tenés (ahora/hoy/esta_semana)"
-  },
-  
-  "estrategia_recomendada": {
-    "enfoque": "string - consultivo/directo/educativo",
-    "tono": "string - cómo hablarle (amigable/profesional/urgente)",
-    "productos_a_mostrar": {
-      "cantidad": 1,
-      "criterio": "string - por qué esa cantidad",
-      "orden": "string - cómo ordenarlos (mejor primero, más barato, etc)"
-    },
-    "como_cerrar": {
-      "tipo": "string - pregunta/afirmacion/oferta/validacion",
-      "lenguaje": "string - qué decir exactamente (ej: '¿lo agregamos?')",
-      "agregar_urgencia": true/false,
-      "agregar_valor": "string - qué beneficio destacar"
-    }
-  },
-  
-  "intuicion_vendedor": {
-    "este_cliente_es": "string - tipo de cliente en pocas palabras",
-    "voy_a_cerrar_si": "string - qué tengo que hacer para vender",
-    "riesgos": ["string"],
-    "oportunidades": ["string"]
-  },
-  
-  "jugada_optima": "string - en 2-3 oraciones, qué haría un vendedor experto acá"
+  "confianza": "alta|media|baja",
+  "alertas": ["string"]
 }
+
+REGLAS:
+- No respondas al cliente ni generes texto comercial, solo el JSON anterior.
+- Basate en los productos_disponibles y la conversación real; no agregues catálogos nuevos.
+- Si algo no cierra, indicá alertas breves dentro del JSON.
 """
 
 PRODUCT_SELECTION_PROMPT = """
@@ -2902,6 +2844,7 @@ MANEJO DE CASOS ESPECIALES:
 
 PLAN INTERNO:
 - Recibirás un JSON con {customer_state, real_intent, actions_to_execute, products_strategy, response_tone}.
+- Incluye sales_analysis y meta_razonamiento: usalos para ajustar tono, cierre y seguridad, pero NO los muestres.
 - NO muestres el plan, solo usalo para redactar.
 
 {BUSINESS_CONTEXT}
@@ -2916,19 +2859,23 @@ Sos el cerebro único de planificación de Fran. En UNA sola respuesta debés: d
 ENTRADA (JSON):
 - contexto: incluye mensaje_usuario, historial_relevante (últimos mensajes), memoria_viva (moto habitual, allowed_products_snapshot, carrito, pending_action), warnings, search_query, metadata_catalogo.
 - productos_permitidos: lista de productos concretos (SOLO podés elegir de acá).
+- sales_analysis: insights comerciales previos (momento_cliente, intencion_compra, senales_cierre, oportunidades_upsell, tono_sugerido).
 
 OBJETIVOS:
 1) Detectar intención real (real_intent) sin pasos extra.
 2) Analizar estado del cliente → customer_state: {"emotion": "satisfied|neutral|confused|frustrated", "sales_phase": "awareness|consideration|ready_to_buy|post_sale", "urgency": "low|medium|high"}.
-3) Planificar acciones → actions_to_execute: lista de objetos (ej: {"type": "add_to_cart", "products": ["code1"], "qty_each": 1}, {"type": "ask_clarification", "message": "..."}, {"type": "save_moto_context", "brand": "...", "model": "..."}).
-4) Estrategia de productos → products_strategy.products_decision con SOLO códigos de productos_permitidos. Incluí qty y por qué.
-5) Elegir response_tone coherente con customer_state (ej: empathetic, concise, upbeat, recovery).
+3) Ingerir sales_analysis para ajustar tono, urgencia y posibles upsells sin saltarte allowed_products.
+4) Planificar acciones → actions_to_execute: lista de objetos (ej: {"type": "add_to_cart", "products": ["code1"], "qty_each": 1}, {"type": "ask_clarification", "message": "..."}, {"type": "save_moto_context", "brand": "...", "model": "..."}).
+5) Estrategia de productos → products_strategy.products_decision con SOLO códigos de productos_permitidos. Incluí qty y por qué.
+6) Elegir response_tone coherente con customer_state y tono_sugerido del sales_analysis.
+7) Activar metacognición interna → meta_razonamiento con confianza, datos faltantes y la respuesta más segura.
 
 GUÍAS DE RAZONAMIENTO (antes de decidir):
 - Normalizá jerga: gomas/cubiertas/cauchos → neumáticos; amortiguadores/shocks → suspensión; bujías/candelas → bujías; batería/acumulador → baterías; filtro puede ser aceite/aire/nafta.
 - Si hay moto en memoria_viva y el mensaje es genérico, asumí esa moto (ej: "cubiertas" + most_recent_bike="fz16" → query "neumaticos yamaha fz16").
 - Referencias a productos previos se resuelven SOLO con allowed_products_snapshot en orden. "los tres" = primeros 3; "el primero" = posición 1; "el más barato" = ordená por precio.
 - Evitá inventar: trabajá solo con productos_permitidos y snapshot. Si faltan datos, pedí aclaración.
+- Detectá mala interpretación/ruido/errores ortográficos. Si la consulta es incoherente o pobre, marcá status=NEED_REQUERY con new_query mejorada PERO limitada al motor FAISS/familias/filtros existentes y manteniendo MAX_PRODUCTS_FOR_LLM.
 
 SALIDA OBLIGATORIA (JSON limpio, sin texto extra):
 {{
@@ -2943,7 +2890,13 @@ SALIDA OBLIGATORIA (JSON limpio, sin texto extra):
   }},
   "reason": "por qué decidiste esto",
   "new_query": "solo si status=NEED_REQUERY",
-  "message_to_user_if_clarification": "solo si status=NEED_CLARIFICATION"
+  "message_to_user_if_clarification": "solo si status=NEED_CLARIFICATION",
+  "meta_razonamiento": {{
+    "confianza": "alta|media|baja",
+    "datos_faltantes": ["string"],
+    "riesgos": ["string"],
+    "respuesta_mas_segura": "confirmar|aclarar|responder_con_productos"
+  }}
 }}
 
 EJEMPLOS RÁPIDOS:
@@ -3063,6 +3016,33 @@ def call_sales_text_llm(prompt: str, payload: dict, model: str = None, temperatu
     except Exception as e:
         logger.error(f"call_sales_text_llm error: {e}")
         return ""
+
+
+def run_sales_intelligence(contexto: dict, productos_permitidos: list) -> dict:
+    """Ejecuta el análisis comercial avanzado dentro del mismo pipeline unificado."""
+    try:
+        payload = {
+            "conversacion_completa": contexto.get("historial", []),
+            "mensaje_usuario": contexto.get("mensaje_usuario"),
+            "productos_disponibles": [normalize_product_for_llm(p) for p in (productos_permitidos or [])[:MAX_PRODUCTS_FOR_LLM]],
+            "contexto_cliente": {
+                "most_recent_bike": contexto.get("most_recent_bike"),
+                "cart_state": contexto.get("cart_state", []),
+                "pending_actions": contexto.get("pending_actions"),
+            },
+            "perfil_cliente": contexto.get("memoria_viva", {}).get("perfil_cliente"),
+        }
+        analysis = call_sales_json_llm(
+            SALES_INTELLIGENCE_PROMPT,
+            payload,
+            temperature=0.15,
+            max_tokens=500,
+        )
+        if isinstance(analysis, dict):
+            return analysis.get("sales_analysis") or analysis
+    except Exception as e:
+        logger.error(f"run_sales_intelligence error: {e}")
+    return {}
 
 
 def build_user_profile_snapshot(phone: str, memory: dict) -> dict:
@@ -3213,6 +3193,9 @@ def validate_reasoning_json(raw_text):
     if status == "NEED_CLARIFICATION" and not parsed.get("message_to_user_if_clarification"):
         return None
 
+    if status == "NEED_REQUERY":
+        parsed["new_query"] = (parsed.get("new_query") or "").strip()
+
     products_strategy = parsed.get("products_strategy") or {}
     decisions = products_strategy.get("products_decision")
     if decisions is None:
@@ -3234,6 +3217,14 @@ def validate_reasoning_json(raw_text):
         "urgency": customer_state.get("urgency", "medium"),
     }
     parsed["response_tone"] = parsed.get("response_tone") or "concise"
+
+    meta = parsed.get("meta_razonamiento") or {}
+    parsed["meta_razonamiento"] = {
+        "confianza": meta.get("confianza", "media"),
+        "datos_faltantes": meta.get("datos_faltantes", []),
+        "riesgos": meta.get("riesgos", []),
+        "respuesta_mas_segura": meta.get("respuesta_mas_segura", "aclarar"),
+    }
 
     return parsed
 
@@ -3401,7 +3392,7 @@ def responder_con_llm(system_prompt_cliente, razonamiento_interno):
                 "role": "user",
                 "content": (
                     "Generá la respuesta final para el cliente en WhatsApp usando este plan interno. "
-                    "NO muestres el plan ni reglas.\n\nPLAN INTERNO:\n"
+                    "NO muestres el plan ni reglas. Considerá sales_analysis y meta_razonamiento solo como guía de tono y seguridad.\n\nPLAN INTERNO:\n"
                     + razonamiento_serializado
                 ),
             },
@@ -3496,6 +3487,8 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         }
 
         productos_permitidos = catalog_products or []
+        sales_analysis = run_sales_intelligence(contexto, productos_permitidos)
+        contexto["sales_analysis"] = sales_analysis or {}
         plan_interno = pensar_con_llm(
             system_prompt or PLANNING_UNIFIED_PROMPT,
             contexto,
@@ -3521,6 +3514,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                     "memoria_viva": memory,
                     "metadata_catalogo": {"productos_total": len(productos_permitidos)},
                     "cart_state": memory.get("cart_state", []),
+                    "sales_analysis": sales_analysis or {},
                 })
                 plan_interno = pensar_con_llm(
                     system_prompt or PLANNING_UNIFIED_PROMPT,
@@ -3551,6 +3545,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             return {"reply": clarification, "plan": parsed_plan, "execution": None}
 
         plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, productos_permitidos)
+        parsed_plan["sales_analysis"] = sales_analysis or {}
         razonamiento_final = json.dumps({**parsed_plan, **(plan_ejecutado or {})}, ensure_ascii=False)
         respuesta = responder_con_llm(CUSTOMER_OUTPUT_PROMPT, razonamiento_final)
         return {
