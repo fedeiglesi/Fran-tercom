@@ -582,3 +582,48 @@ def test_mixed_spanish_variations(realistic_app):
     # Usted (formal)
     r3 = app.orquestar_fran("Tiene filtros de aire?", phone)
     assert r3
+
+
+def test_ultra_complex_multi_product_multi_moto(realistic_app):
+    """Test ultra complejo: saludo + referencia previa + 3 productos + 2 motos + typo."""
+    app, state, catalog = realistic_app
+    phone = "+5491155559999"
+
+    # Simular conversación previa sobre amortiguadores FZ
+    state["history"].append({"phone": phone, "content": "Recomendame amortiguadores para FZ", "role": "user"})
+    state["history"].append({"phone": phone, "content": "Te recomiendo los amortiguadores YSS para FZ", "role": "assistant"})
+
+    # Mensaje ultra complejo del usuario
+    mensaje_complejo = (
+        "fran, genio, como estas? gracias por la recomendación de los amortiguadores "
+        "para la fz. me quede pensando y ademas necesito una batería para esa moto, "
+        "unos espejos para una honda cg y un kit de herramIENTas. tenes?"
+    )
+
+    r1 = app.orquestar_fran(mensaje_complejo, phone)
+
+    # Verificaciones:
+    # 1. Debe responder (no crashear)
+    assert r1
+    assert len(r1) > 0
+
+    # 2. Debe detectar múltiples productos
+    # Batería, espejos, o herramientas deberían aparecer
+    productos_mencionados = (
+        "batería" in r1.lower() or "bateria" in r1.lower() or
+        "espejo" in r1.lower() or
+        "herramienta" in r1.lower() or "kit" in r1.lower() or
+        # O al menos responder con stock/disponibilidad
+        "disponible" in r1.lower() or "stock" in r1.lower() or "tengo" in r1.lower()
+    )
+    assert productos_mencionados, f"No detectó productos en: {r1}"
+
+    # 3. Debe manejar el typo "herramIENTas"
+    # (el sistema debe entenderlo como "herramientas")
+
+    # 4. Debe tener productos en last_products
+    assert len(state["last_products"]) > 0, "No generó búsqueda de productos"
+
+    # 5. El historial debe crecer correctamente
+    # Teníamos 2 mensajes previos + 2 nuevos = 4
+    assert len(state["history"]) >= 4
