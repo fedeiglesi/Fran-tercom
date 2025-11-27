@@ -2731,11 +2731,11 @@ def hybrid_search(
     LAST_SEARCH_DEBUG["rrf_count"] = len(fused)
     _log_ranked("RRF", fused, include_rank=False)
 
-    merged_results = fused
+    merged_results = [p for p, _ in fused]
     LAST_SEARCH_DEBUG["merged_count"] = len(merged_results)
     logger.info(f"[SEARCH] merged_results={len(merged_results)}")
 
-    products_only = [p for p, _ in merged_results]
+    products_only = merged_results
 
     if FRAN_DEBUG:
         debug_log(
@@ -2811,26 +2811,24 @@ def hybrid_search(
 
     if filtered_pairs:
         results = sorted(filtered_pairs, key=lambda x: x[1], reverse=True)
-        logger.info(f"[SEARCH] filtered_by_moto={len(filtered_pairs)}")
-    elif intent == "product_search" and merged_results:
-        logger.info(
-            f"[SEARCH] Moto filter empty, using merged_results fallback ({len(merged_results)})"
-        )
-        results = merged_results
+        filtered_by_moto_sorted = [p for p, _ in results]
+        logger.info(f"[SEARCH] filtered_by_moto={len(filtered_by_moto_sorted)}")
     else:
-        results = merged_results
+        filtered_by_moto_sorted = []
+        if intent == "product_search" and merged_results:
+            logger.info(
+                f"[SEARCH] Moto filter empty, using merged_results fallback ({len(merged_results)})"
+            )
 
-    if intent == "product_search":
-        if len(filtered_by_moto) > 0:
-            final_results = filtered_by_moto[:top_k]
-        else:
-            final_results = [p for p, _ in merged_results[:top_k]]
+    if filtered_by_moto_sorted:
+        final_results = filtered_by_moto_sorted[:top_k]
     else:
-        final_results = [p for p, _ in results[:top_k]]
+        final_results = merged_results[:top_k]
 
     LAST_SEARCH_DEBUG["after_moto_filter"] = len(filtered_by_moto)
     LAST_SEARCH_DEBUG["final_results"] = len(final_results)
     logger.info(f"[SEARCH] final_results={len(final_results)}")
+    logger.info(f"[FINAL] Returning {len(final_results)} products")
 
     if FRAN_DEBUG:
         after_moto = LAST_FILTER_CATALOG_DEBUG.get("after_moto_filter", len(products_only)) if LAST_FILTER_CATALOG_DEBUG else len(products_only)
@@ -2847,7 +2845,13 @@ def hybrid_search(
             f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_by_moto)}"
         )
 
-    return final_results
+    return {
+        "faiss": faiss_results,
+        "bm25": bm25_results,
+        "merged": merged_results,
+        "filtered_by_moto": filtered_by_moto,
+        "final_results": final_results,
+    }
 
 
 def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> list | dict:
@@ -2862,9 +2866,9 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None,
     )
 
     if isinstance(semantic_results, dict):
-        return semantic_results
-
-    products = semantic_results
+        products = semantic_results.get("final_results", [])
+    else:
+        products = semantic_results
     if FRAN_DEBUG:
         debug_log(
             "[DEBUG][Pipeline] Productos antes de filtro_final: "
@@ -2968,8 +2972,9 @@ def process_bulk_sync(phone, raw_list):
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
         matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-        if matches:
-            best, score = matches[0]
+        final_results = matches.get("final_results", []) if isinstance(matches, dict) else matches
+        if final_results:
+            best = final_results[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
             subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
             total_quoted += subtotal
@@ -3044,8 +3049,9 @@ def process_bulk_async(job):
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
             matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-            if matches:
-                best, score = matches[0]
+            final_results = matches.get("final_results", []) if isinstance(matches, dict) else matches
+            if final_results:
+                best = final_results[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
                 total_quoted += subtotal
@@ -3380,8 +3386,12 @@ def handle_cart_action(phone, message):
             candidate = match_product_from_list(message, last_products, key="name")
         if not candidate and code:
             fallback_matches = hybrid_search(code, phone=phone, top_k=3, intent="cart_action") or []
-            if fallback_matches:
-                candidate = fallback_matches[0][0]
+            if isinstance(fallback_matches, dict):
+                fallback_candidates = fallback_matches.get("final_results", [])
+            else:
+                fallback_candidates = fallback_matches
+            if fallback_candidates:
+                candidate = fallback_candidates[0]
         if not candidate:
             return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
 
@@ -3863,18 +3873,17 @@ def maybe_requery_and_replan(
         logger.info(f"[Requery] Activado para {phone}: '{original_query}' -> '{new_query}'")
 
         # Nueva búsqueda híbrida solo con el nuevo query
-        catalog, index, bm25, bm25_corpus = get_catalog_and_index()
         search_results = hybrid_search(
-            catalog=catalog,
-            index=index,
-            bm25=bm25,
-            bm25_corpus=bm25_corpus,
             query=new_query,
-            max_results=MAX_SEARCH_RESULTS,
+            phone=phone,
+            top_k=MAX_SEARCH_RESULTS,
         )
 
         # Filtrar por relevancia y calidad
-        filtered = filter_by_relevance(new_query, search_results, min_score=RELEVANCE_MIN_SCORE)
+        results_for_filter = (
+            search_results.get("final_results", []) if isinstance(search_results, dict) else search_results
+        )
+        filtered = filter_by_relevance(new_query, results_for_filter, min_score=RELEVANCE_MIN_SCORE)
         allowed_products = filtered
         context_quality = assess_context_quality(new_query, allowed_products)
 
@@ -4527,9 +4536,11 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             nueva_query = parsed_plan.get("requery", {}).get("new_query")
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
-                if isinstance(semantic_results, dict):
-                    semantic_results = []
-                productos_permitidos = [p for p, _ in semantic_results]
+                productos_permitidos = (
+                    semantic_results.get("final_results", [])
+                    if isinstance(semantic_results, dict)
+                    else semantic_results
+                )
                 execution_context["search_query"] = nueva_query
                 memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
                 contexto_prev.update({
@@ -5368,7 +5379,11 @@ def orquestar_fran(mensaje_usuario, phone):
             return reply
         semantic_results = []
 
-    products = [p for p, _ in semantic_results]
+    products = (
+        semantic_results.get("final_results", [])
+        if isinstance(semantic_results, dict)
+        else semantic_results
+    )
 
     execution_context["search_executed"] = True
     execution_context["products_found"] = len(products)
