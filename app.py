@@ -2820,9 +2820,17 @@ def hybrid_search(
     else:
         results = merged_results
 
+    if intent == "product_search":
+        if len(filtered_by_moto) > 0:
+            final_results = filtered_by_moto[:top_k]
+        else:
+            final_results = [p for p, _ in merged_results[:top_k]]
+    else:
+        final_results = [p for p, _ in results[:top_k]]
+
     LAST_SEARCH_DEBUG["after_moto_filter"] = len(filtered_by_moto)
-    LAST_SEARCH_DEBUG["final_results"] = len(results)
-    logger.info(f"[SEARCH] final_results={len(results)}")
+    LAST_SEARCH_DEBUG["final_results"] = len(final_results)
+    logger.info(f"[SEARCH] final_results={len(final_results)}")
 
     if FRAN_DEBUG:
         after_moto = LAST_FILTER_CATALOG_DEBUG.get("after_moto_filter", len(products_only)) if LAST_FILTER_CATALOG_DEBUG else len(products_only)
@@ -2839,7 +2847,7 @@ def hybrid_search(
             f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_by_moto)}"
         )
 
-    return results[:top_k]
+    return final_results
 
 
 def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> list | dict:
@@ -2856,7 +2864,7 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None,
     if isinstance(semantic_results, dict):
         return semantic_results
 
-    products = [p for p, _ in semantic_results]
+    products = semantic_results
     if FRAN_DEBUG:
         debug_log(
             "[DEBUG][Pipeline] Productos antes de filtro_final: "
@@ -4853,6 +4861,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                 save_message(phone, reply, "assistant")
                 return reply
             allowed_products = []
+
+        logger.info(f"[STEP 2] Returned products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
 
         quality = assess_context_quality(normalized_query, allowed_products)
 
