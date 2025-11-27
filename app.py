@@ -2601,7 +2601,13 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list | dict:
+def hybrid_search(
+    query: str,
+    phone: str | None = None,
+    top_k: int = MAX_SEARCH_RESULTS,
+    metadata_filters: dict | None = None,
+    intent: str = "product_search",
+) -> list | dict:
     catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
     if not catalog or not query:
         return []
@@ -2697,6 +2703,10 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     else:
         logger.warning("Índice FAISS no disponible, usando solo BM25")
 
+    logger.info(
+        f"[SEARCH] FAISS results: {len(faiss_results)} | BM25 results: {len(bm25_results)}"
+    )
+
     if not bm25_results and not faiss_results:
         return []
 
@@ -2721,7 +2731,11 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     LAST_SEARCH_DEBUG["rrf_count"] = len(fused)
     _log_ranked("RRF", fused, include_rank=False)
 
-    products_only = [p for p, _ in fused]
+    merged_results = fused
+    LAST_SEARCH_DEBUG["merged_count"] = len(merged_results)
+    logger.info(f"[SEARCH] merged_results={len(merged_results)}")
+
+    products_only = [p for p, _ in merged_results]
 
     if FRAN_DEBUG:
         debug_log(
@@ -2770,21 +2784,20 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             results[key] = sub_filtered[:MAX_SEARCH_RESULTS]
         return {"multi_moto": True, "results": results}
 
-    filtered_products = filter_catalog(products_only, parsed)
+    filtered_by_moto = filter_catalog(products_only, parsed)
 
     def _score_for(product):
         key = product.get("code") or product.get("name") or id(product)
         return fused_scores.get(key, 0.0)
 
-    if filtered_products:
-        results = [(p, _score_for(p)) for p in filtered_products]
-    else:
+    filtered_pairs = [(p, _score_for(p)) for p in filtered_by_moto]
+
+    if not filtered_pairs:
         families = parsed.get("families") or []
         cat = parsed.get("category")
         brands = parsed.get("brands") or []
         models = parsed.get("models") or []
 
-        results = []
         if (brands or models) and (families or cat):
             super_relaxed = {
                 "families": families,
@@ -2793,38 +2806,52 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
                 "models": [],
                 "raw": parsed.get("raw", "")
             }
-            filtered_products = filter_catalog(products_only, super_relaxed)
-            if filtered_products:
-                results = [(p, _score_for(p)) for p in filtered_products]
+            filtered_super_relaxed = filter_catalog(products_only, super_relaxed)
+            filtered_pairs = [(p, _score_for(p)) for p in filtered_super_relaxed]
 
-        if not results:
-            results = fused
+    if filtered_pairs:
+        results = sorted(filtered_pairs, key=lambda x: x[1], reverse=True)
+        logger.info(f"[SEARCH] filtered_by_moto={len(filtered_pairs)}")
+    elif intent == "product_search" and merged_results:
+        logger.info(
+            f"[SEARCH] Moto filter empty, using merged_results fallback ({len(merged_results)})"
+        )
+        results = merged_results
+    else:
+        results = merged_results
 
-    results.sort(key=lambda x: x[1], reverse=True)
+    LAST_SEARCH_DEBUG["after_moto_filter"] = len(filtered_by_moto)
+    LAST_SEARCH_DEBUG["final_results"] = len(results)
+    logger.info(f"[SEARCH] final_results={len(results)}")
 
     if FRAN_DEBUG:
         after_moto = LAST_FILTER_CATALOG_DEBUG.get("after_moto_filter", len(products_only)) if LAST_FILTER_CATALOG_DEBUG else len(products_only)
-        after_family = LAST_FILTER_CATALOG_DEBUG.get("after_family_filter", len(filtered_products)) if LAST_FILTER_CATALOG_DEBUG else len(filtered_products)
+        after_family = LAST_FILTER_CATALOG_DEBUG.get("after_family_filter", len(filtered_by_moto)) if LAST_FILTER_CATALOG_DEBUG else len(filtered_by_moto)
         LAST_SEARCH_DEBUG.update(
             {
                 "after_moto_filter": after_moto,
                 "after_family_filter": after_family,
-                "after_filter_catalog": len(filtered_products),
+                "after_filter_catalog": len(filtered_by_moto),
             }
         )
         debug_log(
             "[DEBUG][Pipeline] Conteo tras filtros -> "
-            f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_products)}"
+            f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_by_moto)}"
         )
 
     return results[:top_k]
 
 
-def run_allowed_products_search(normalized_query: str, phone: str | None = None) -> list | dict:
+def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> list | dict:
     """
     Ejecuta la búsqueda híbrida y filtra por relevancia para generar allowed_products.
     """
-    semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+    semantic_results = hybrid_search(
+        normalized_query,
+        phone=phone,
+        top_k=MAX_SEARCH_RESULTS,
+        intent=intent,
+    )
 
     if isinstance(semantic_results, dict):
         return semantic_results
@@ -2837,6 +2864,16 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None)
         )
 
     filtered = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+
+    logger.info(
+        "[SEARCH] Summary → "
+        f"FAISS={LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
+        f"BM25={LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
+        f"merged={LAST_SEARCH_DEBUG.get('merged_count', len(products))} "
+        f"after_moto_filter={LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
+        f"final_results={LAST_SEARCH_DEBUG.get('final_results', len(products))} "
+        f"post_relevance={len(filtered)}"
+    )
 
     if FRAN_DEBUG:
         summary = (
@@ -3246,6 +3283,17 @@ def match_product_from_list(message, products, key="name"):
     return best
 
 
+def find_product_by_code_in_catalog(code: str):
+    catalog, _idx, _bm25, _bm25_corpus = get_catalog_and_index()
+    if not catalog or not code:
+        return None
+
+    ok, normalized = validate_tercom_code(code)
+    target = normalized if ok else str(code).strip()
+
+    return next((p for p in catalog if str(p.get("code", "")).strip() == target), None)
+
+
 def handle_cart_action(phone, message):
     msg_norm = strip_accents((message or "")).lower()
     if not msg_norm:
@@ -3286,7 +3334,7 @@ def handle_cart_action(phone, message):
     if action == "unknown":
         return "Para tocar el carrito decime el código o nombre del producto y qué querés hacer."
 
-    if action == "add" and not last_products:
+    if action == "add" and not last_products and not code:
         return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
 
     target_cart = None
@@ -3302,9 +3350,17 @@ def handle_cart_action(phone, message):
     if action == "add":
         candidate = None
         if code:
+            candidate = find_product_by_code_in_catalog(code)
+            if candidate:
+                logger.info(f"[CART] Exact code match in catalog: {candidate.get('code')}")
+        if not candidate and code:
             candidate = next((p for p in last_products if p.get("code") == code), None)
         if not candidate:
             candidate = match_product_from_list(message, last_products, key="name")
+        if not candidate and code:
+            fallback_matches = hybrid_search(code, phone=phone, top_k=3, intent="cart_action") or []
+            if fallback_matches:
+                candidate = fallback_matches[0][0]
         if not candidate:
             return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
 
@@ -4760,7 +4816,17 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
         logger.info("[STEP 2] Bypass search for social intent")
     elif primary_intent == "product_search":
-        allowed_products = run_allowed_products_search(normalized_query, phone=phone)
+        allowed_products = run_allowed_products_search(
+            normalized_query, phone=phone, intent=primary_intent
+        )
+        logger.info(
+            "[STEP 2][SEARCH] FAISS=%s BM25=%s merged=%s moto_filtered=%s final=%s",
+            LAST_SEARCH_DEBUG.get("faiss_count", 0),
+            LAST_SEARCH_DEBUG.get("bm25_count", 0),
+            LAST_SEARCH_DEBUG.get("merged_count", 0),
+            LAST_SEARCH_DEBUG.get("after_moto_filter", 0),
+            LAST_SEARCH_DEBUG.get("final_results", 0),
+        )
         logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
 
         if isinstance(allowed_products, dict):
@@ -4982,7 +5048,7 @@ def handle_cart_action_intent(intent: dict, phone: str) -> str:
 
 def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
     query_span = intent.get("span", "")
-    allowed_products = run_allowed_products_search(query_span, phone=phone)
+    allowed_products = run_allowed_products_search(query_span, phone=phone, intent=intent.get("type"))
 
     if isinstance(allowed_products, dict):
         reply = format_multi_search_response(allowed_products)
