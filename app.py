@@ -2037,8 +2037,8 @@ def get_last_search(phone):
             timestamp = datetime.fromisoformat(row[3])
             age_minutes = (datetime.now() - timestamp).total_seconds() / 60
 
-            # Si pasaron más de 10 minutos, no usar ese contexto
-            if age_minutes > 10:
+            # Si pasaron más de 30 minutos, no usar ese contexto
+            if age_minutes > 30:
                 logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
                 return None
 
@@ -4904,9 +4904,17 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             p for p in selection_candidates if p.get("code") in selected_codes
         ]
     else:
-        selected_products = []
+        # Para clarification u otros intents, usar la última búsqueda si existe
+        last_search_data = get_last_search(phone)
+        if last_search_data and last_search_data.get("products"):
+            selected_products = last_search_data["products"][:5]  # Máximo 5 productos del contexto
+            logger.info(f"[STEP 3] Using {len(selected_products)} products from last search (age: {last_search_data.get('age_minutes', 0):.1f} min)")
+        else:
+            selected_products = []
+            logger.info("[STEP 3] No last search available for clarification")
+
         selection = {
-            "selected_products": [],
+            "selected_products": selected_products,
             "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
         }
 

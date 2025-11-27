@@ -119,6 +119,78 @@ Detectá TODAS las intenciones presentes en el mensaje...
 
 ---
 
+### 3. ⚠️ **Contexto Perdido en Follow-up** (CRÍTICO)
+
+**Ubicación:** `app.py:2041` (timeout) y `app.py:4906-4911` (manejo de clarification)
+
+**Problema:**
+```
+2025-11-27 18:08:57 - Body: Tenés bujía NGK para Honda Wave?
+[... respuesta con productos ...]
+
+2025-11-27 18:21:27 - Body: Qué diferencia hay?
+2025-11-27 18:21:27 - Last search for ... is 12.4 min old, ignoring  ← ❌
+2025-11-27 18:21:37 - Intent: clarification
+[... respuesta genérica sin productos ...]
+```
+
+**Causa raíz:**
+1. **Timeout muy corto**: 10 minutos es insuficiente para conversaciones reales
+2. **No usa contexto en clarification**: Cuando el intent es "clarification", no recupera la última búsqueda
+
+**Impacto:**
+- Usuario pregunta "Qué diferencia hay?" pero el sistema no sabe entre qué productos
+- Respuesta genérica: "¿Podrías aclararme qué producto o pieza te interesa comparar?"
+- Mala experiencia de usuario - el bot parece "olvidar" la conversación
+
+**Solución aplicada:**
+
+**Fix 1: Aumentar timeout**
+```python
+# ANTES:
+if age_minutes > 10:  # ❌ Muy corto
+    logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
+    return None
+
+# AHORA:
+if age_minutes > 30:  # ✅ 30 minutos
+    logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
+    return None
+```
+
+**Fix 2: Usar contexto en clarification**
+```python
+# ANTES (no usaba contexto):
+else:  # clarification, tech_question, etc.
+    selected_products = []  # ❌ Sin contexto
+    selection = {
+        "selected_products": [],
+        ...
+    }
+
+# AHORA (usa última búsqueda):
+else:
+    last_search_data = get_last_search(phone)
+    if last_search_data and last_search_data.get("products"):
+        selected_products = last_search_data["products"][:5]  # ✅ Usa contexto
+        logger.info(f"Using {len(selected_products)} products from last search")
+    else:
+        selected_products = []
+    ...
+```
+
+**Resultado esperado:**
+```
+Usuario: Tenés bujía NGK para Honda Wave?
+Bot: ¡Hola! Tengo varias bujías NGK. Por ejemplo, la C6HSA y la C7HSA...
+
+Usuario: Qué diferencia hay?  (12.4 min después)
+Bot: ✅ La C6HSA es intermedia fría (grado 6), ideal para uso normal.
+     La C7HSA es más caliente (grado 7), mejor para baja velocidad...
+```
+
+---
+
 ## Logs Relevantes
 
 ### Caso 1: Bujía para Honda Wave
@@ -153,17 +225,22 @@ Detectá TODAS las intenciones presentes en el mensaje...
 
 ## Recomendaciones
 
-### Prioridad Alta
-1. **Corregir filtro de motos** para permitir productos universales
-2. **Mejorar prompt de query understanding** para evitar errores de schema
+### ✅ Fixes Aplicados (en esta branch)
+1. **Filtro de motos** - Permite productos universales sin rechazarlos
+2. **Timeout de contexto** - Aumentado de 10 a 30 minutos
+3. **Manejo de clarification** - Usa última búsqueda para responder con contexto
 
-### Prioridad Media
-3. **Limpiar catálogo CSV**: Revisar y corregir columnas `marca_moto`/`modelo_moto` para productos universales
-4. **Agregar validación** al cargar el CSV para detectar datos incorrectos
+### Prioridad Alta (pendiente)
+4. **Mejorar prompt de query understanding** para evitar errores de schema validation
+5. **Limpiar catálogo CSV**: Revisar y corregir columnas `marca_moto`/`modelo_moto` para productos universales
 
-### Prioridad Baja
-5. **Agregar tests** para validar el filtro de motos con productos universales
-6. **Mejorar logs** para mostrar por qué se rechazan productos (incluir `rejection_reasons`)
+### Prioridad Media (pendiente)
+6. **Agregar validación** al cargar el CSV para detectar datos incorrectos
+7. **Mejorar logs** para mostrar por qué se rechazan productos (incluir `rejection_reasons`)
+
+### Prioridad Baja (pendiente)
+8. **Agregar tests** para validar el filtro de motos con productos universales
+9. **Considerar timeout adaptativo**: Timeout más largo para usuarios activos
 
 ---
 
