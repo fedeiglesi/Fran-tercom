@@ -2863,7 +2863,20 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None,
             + ", ".join(p.get("code", p.get("name", "")) for p in products[:50])
         )
 
-    filtered = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+    relevance_threshold = RELEVANCE_MIN_SCORE
+    if LAST_SEARCH_DEBUG.get("fallback_used"):
+        relevance_threshold = 0.0
+    filtered = filter_by_relevance(normalized_query, products, min_score=relevance_threshold)
+
+    logger.info(
+        "[SEARCH] Summary → "
+        f"FAISS={LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
+        f"BM25={LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
+        f"merged={LAST_SEARCH_DEBUG.get('merged_count', len(products))} "
+        f"after_moto_filter={LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
+        f"final_results={LAST_SEARCH_DEBUG.get('final_results', len(products))} "
+        f"post_relevance={len(filtered)}"
+    )
 
     logger.info(
         "[SEARCH] Summary → "
@@ -4883,6 +4896,10 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         logger.info(
             f"[STEP 2] Found {len(allowed_products)} relevant products | Quality: {quality.get('confidence')}"
         )
+    elif primary_intent == "cart_action":
+        cart_reply = handle_cart_action(phone, user_message)
+        save_message(phone, cart_reply, "assistant")
+        return cart_reply
     else:
         quality = {"sufficient": True, "confidence": 1.0, "reason": f"{primary_intent}_intent"}
 
