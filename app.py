@@ -642,6 +642,21 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 def normalize_search_query(query):
     return strip_accents(query)
 
+
+def _contains_word(text: str, phrase: str) -> bool:
+    if not text or not phrase:
+        return False
+    pattern = rf"\b{re.escape(strip_accents(phrase))}\b"
+    return re.search(pattern, strip_accents(text)) is not None
+
+
+def normalize_moto_model(model: str) -> str | None:
+    if not model:
+        return None
+    key = strip_accents(model).replace("  ", " ").strip()
+    normalized = MOTO_MODEL_NORMALIZATION.get(key)
+    return normalized
+
 # ------------------------------------------------------------
 # NUEVO: RELEVANCE SCORING GENERAL
 # ------------------------------------------------------------
@@ -929,13 +944,48 @@ MODEL_LIST = [
     "dakar", "due", "eco", "en125", "energy", "falcon", "fazer", "fire", "flash", "fly", "fz", "gixxer",
     "gn125", "go", "hd", "hunter", "jet", "jog", "k1", "k2", "k3", "k4", "kmx", "liberty", "luxe", "magic",
     "monkey", "motard", "navi", "ns", "pulsar", "rc", "rks", "road", "rocket", "rouser", "rs", "rx",
-    "sahel", "sempre", "sma", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
+    "sahel", "sempre", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
     "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
     "wave", "x3m", "xr", "xtz", "zb", "ztt"
 ]
 
 KNOWN_BRANDS = BRAND_LIST
 KNOWN_MODELS = MODEL_LIST
+
+
+MOTO_MODEL_NORMALIZATION = {
+    "wave": "WAVE 110",
+    "wave 110": "WAVE 110",
+    "wave110": "WAVE 110",
+    "wave110s": "WAVE 110",
+    "wave s": "WAVE 110",
+    "wave 100": "WAVE 100",
+    "cg": "CG 150",
+    "cg 150": "CG 150",
+    "cg150": "CG 150",
+    "cg125": "CG 125",
+    "cg 125": "CG 125",
+    "cg 160": "CG 160",
+    "cg160": "CG 160",
+    "ybr": "YBR 125",
+    "ybr 125": "YBR 125",
+    "ybr125": "YBR 125",
+    "ybr 250": "YBR 250",
+    "ybr250": "YBR 250",
+    "gn": "GN 125",
+    "gn 125": "GN 125",
+    "gn125": "GN 125",
+    "xr": "XR 250",
+    "xr 250": "XR 250",
+    "xr250": "XR 250",
+    "tornado": "TORNADO",
+    "titan": "TITAN",
+    "titan 150": "TITAN",
+    "biz": "BIZ",
+    "biz 110": "BIZ 110",
+    "biz110": "BIZ 110",
+    "crypton": "CRYPTON",
+}
 
 
 def _build_autocorrect_vocab():
@@ -1118,21 +1168,33 @@ def parse_query_v2(query: str, phone: str | None = None) -> dict:
 
     out["category"] = out["categories"][0] if out["categories"] else None
 
+    brand_hits = []
     for b in BRAND_LIST:
-        if b in q:
+        if _contains_word(q, b):
             out["brands"].append(b)
+            brand_hits.append(b)
 
-    for m in MODEL_LIST:
-        if m in q:
-            out["models"].append(m)
+    model_hits = []
+    for variant, canonical in MOTO_MODEL_NORMALIZATION.items():
+        if _contains_word(q, variant):
+            model_hits.append({"raw": variant, "normalized": canonical})
+            out["models"].append(canonical)
 
-    for brand in KNOWN_BRANDS:
-        for model in KNOWN_MODELS:
-            if brand in q and model in q:
-                out["motos_detectadas"].append({
+    if model_hits:
+        for m in model_hits:
+            logger.info(
+                f"[MOTO] Detectada raw='{m['raw']}' -> normalizada='{m['normalized']}'"
+            )
+
+    if brand_hits and model_hits:
+        for brand in brand_hits:
+            for model in model_hits:
+                moto_data = {
                     "brand": brand,
-                    "model": model
-                })
+                    "model": model["normalized"],
+                    "raw_model": model["raw"],
+                }
+                out["motos_detectadas"].append(moto_data)
 
     if "esa moto" in q or "esa misma" in q:
         ctx = get_moto_context(phone)
@@ -1144,6 +1206,18 @@ def parse_query_v2(query: str, phone: str | None = None) -> dict:
     if out["motos_detectadas"]:
         out["moto_brands"] = list({m["brand"] for m in out["motos_detectadas"] if m.get("brand")})
         out["moto_models"] = list({m["model"] for m in out["motos_detectadas"] if m.get("model")})
+
+    if model_hits and not out["moto_models"]:
+        out["moto_models"] = list({m["normalized"] for m in model_hits})
+
+    if out["motos_detectadas"]:
+        logger.info(
+            "[MOTO] Para filtrar: "
+            + "; ".join(
+                f"brand={m.get('brand','').upper()} model={m.get('model','')}"
+                for m in out["motos_detectadas"]
+            )
+        )
 
     for m in out["motos_detectadas"]:
         save_moto_context(phone, m.get("brand", ""), m.get("model", ""))
@@ -1173,6 +1247,12 @@ def filter_catalog(catalog, parsed):
             f"moto_brands={sorted(moto_brands)} moto_models={sorted(moto_models)} "
             f"motos_detectadas={motos_detectadas} families={sorted(families)} "
             f"categories={cats} displacement={displacement} final_category={final_category}"
+        )
+
+    if motos_detectadas or moto_models or moto_brands:
+        before_codes = [p.get("code", p.get("name", "")) for p in catalog[:30]]
+        logger.info(
+            f"[MOTO][Filtro] Compatibles antes del filtro: {len(catalog)} | Ejemplos: {before_codes}"
         )
 
     def _match(p):
@@ -1267,6 +1347,12 @@ def filter_catalog(catalog, parsed):
     for p in catalog:
         if _match(p):
             filtered.append(p)
+
+    if motos_detectadas or moto_models or moto_brands:
+        after_codes = [p.get("code", p.get("name", "")) for p in filtered[:30]]
+        logger.info(
+            f"[MOTO][Filtro] Después del filtro: {len(filtered)} | Ejemplos: {after_codes}"
+        )
 
     if FRAN_DEBUG:
         total = len(catalog)
