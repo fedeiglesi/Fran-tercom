@@ -29,6 +29,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 from cachetools import LRUCache
+from jsonschema import Draft7Validator
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
@@ -116,77 +117,79 @@ MAX_BULK_ITEMS = 150
 QUERY_UNDERSTANDING_SCHEMA = {
     "task": "understand_query",
     "description": """
-    Sos un experto en motos argentinas. Analiza el mensaje del cliente y normaliza errores.
-    
-    MARCAS COMUNES (pueden estar mal escritas):
-    - Honda, Yamaha, Zanella, Motomel, Corven, Gilera, Guerrero, Bajaj, Keeway
-    
-    CATEGORÍAS COMUNES:
-    - Batería (ytx, gel, litio), Amortiguador, Filtro, Aceite, Cadena, Bujía, Pastillas
-    
-    CORRECCIONES TÍPICAS:
-    - "gonda" → "Honda"
-    - "iamaha" → "Yamaha"
-    - "sanella" → "Zanella"
-    - "bateria" → "batería"
+    Sos Fran 3.15, asistente mayorista argentino 100% LLM-first.
 
-    Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
+    Debés identificar TODAS las intenciones presentes en un mismo mensaje, sin
+    hardcodear palabras ni reglas. No asumas que las intenciones vienen separadas:
+    puede haber saludo, agradecimiento, referencias a búsquedas previas, pedidos de
+    carrito y nuevas búsquedas todo junto. Segmentá en fragmentos (spans) exactos
+    del usuario, sin alterar ni inventar texto.
+
+    Intenciones válidas (solo estas):
+    - "social": saludo, agradecimiento, rapport, humor o cierre humano.
+    - "product_search": interés en buscar, comparar o cotizar productos/repuestos.
+    - "cart_action": agregar, quitar o modificar cantidades en el carrito.
+    - "clarification": cuando el usuario pide o ofrece aclarar datos faltantes.
+    - "tech_question": consultas técnicas o de compatibilidad que requieran
+      explicación.
+    - "order_flow": pasos de compra, envío o pago.
+
+    Reglas clave:
+    - Devolvé spans exactos del texto original, sin reordenar ni corregir.
+    - Cada intención debe incluir probabilidad (confidence 0.0–1.0) basada en
+      sentido semántico, no en keywords.
+    - Usá el campo "data" para estructurar detalles útiles (query, product, brand,
+      model, action, quantity, category, notes). Podés agregar campos relevantes
+      si son coherentes con la intención, pero nunca datos inventados.
+    - Respondé SOLO JSON válido según el schema.
     """,
     "output_schema": {
         "type": "object",
-        "required": ["normalized_query", "entities", "intent", "confidence"],
+        "required": ["intents"],
         "properties": {
-            "original_query": {
-                "type": "string",
-                "description": "Query original del usuario"
-            },
-            "normalized_query": {
-                "type": "string", 
-                "description": "Query corregida y lista para búsqueda"
-            },
-            "entities": {
-                "type": "object",
-                "properties": {
-                    "brand": {
-                        "type": "string",
-                        "description": "Marca de moto detectada (nombre correcto)"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Modelo de moto detectado (nombre correcto)"
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "Categoría de repuesto detectada"
-                    }
-                }
-            },
-            "corrections": {
+            "intents": {
                 "type": "array",
-                "items": {"type": "string"},
-                "description": "Lista de correcciones aplicadas (ej: 'gonda→Honda')"
-            },
-            "intent": {
-                "type": "string",
-                "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"],
-                "description": "Intención detectada"
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-                "description": "Confianza en la normalización (0.0-1.0)"
-            },
-            "needs_clarification": {
-                "type": "boolean",
-                "description": "True si falta info crítica"
-            },
-            "clarification_question": {
-                "type": "string",
-                "description": "Pregunta para el cliente si needs_clarification=true"
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["type", "span", "confidence", "data"],
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "social",
+                                "product_search",
+                                "cart_action",
+                                "clarification",
+                                "tech_question",
+                                "order_flow",
+                            ],
+                        },
+                        "span": {"type": "string"},
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                        "data": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "product": {"type": "string"},
+                                "brand": {"type": "string"},
+                                "model": {"type": "string"},
+                                "category": {"type": "string"},
+                                "action": {"type": "string"},
+                                "quantity": {"type": "number"},
+                                "notes": {"type": "string"},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
+                },
             }
-        }
-    }
+        },
+    },
 }
 
 PRODUCT_SELECTION_SCHEMA = {
@@ -403,14 +406,14 @@ FAMILIES_INDEX = []
 
 TEMPLATE_FALLBACKS = {
     "query_understanding": {
-        "original_query": "",
-        "normalized_query": "",
-        "entities": {},
-        "corrections": [],
-        "intent": "product_search",
-        "confidence": 0.5,
-        "needs_clarification": False,
-        "clarification_question": ""
+        "intents": [
+            {
+                "type": "product_search",
+                "span": "",
+                "confidence": 0.5,
+                "data": {},
+            }
+        ]
     },
     "product_selection": {
         "selected_products": [],
@@ -432,48 +435,13 @@ TEMPLATE_FALLBACKS = {
 
 
 def validate_schema(data: dict, schema: dict) -> bool:
-    if data is None:
-        raise ValueError("Schema validation failed: data is None")
-
-    if not isinstance(schema, dict):
-        raise ValueError("Schema validation failed: invalid schema")
-
-    if schema.get("type") == "object":
-        if not isinstance(data, dict):
-            raise ValueError("Schema validation failed: expected object")
-        for key in schema.get("required", []):
-            if key not in data:
-                raise ValueError(f"Schema validation failed: missing '{key}'")
-
-        properties = schema.get("properties", {})
-        for key, value in data.items():
-            if key not in properties:
-                continue
-            expected = properties[key]
-            expected_type = expected.get("type")
-            if expected_type == "object" and value is not None:
-                validate_schema(value, expected)
-            elif expected_type == "array" and value is not None:
-                if not isinstance(value, list):
-                    raise ValueError(f"Schema validation failed: '{key}' should be array")
-                item_schema = expected.get("items")
-                if item_schema:
-                    for item in value:
-                        if item_schema.get("type") == "object" and isinstance(item, dict):
-                            validate_schema(item, item_schema)
-                        elif item_schema.get("type") == "string" and not isinstance(item, str):
-                            raise ValueError(f"Schema validation failed: '{key}' items should be string")
-            elif expected_type == "string" and value is not None and not isinstance(value, str):
-                raise ValueError(f"Schema validation failed: '{key}' should be string")
-            elif expected_type == "number" and value is not None and not isinstance(value, (int, float)):
-                raise ValueError(f"Schema validation failed: '{key}' should be number")
-            elif expected_type == "boolean" and not isinstance(value, bool):
-                raise ValueError(f"Schema validation failed: '{key}' should be boolean")
-
-            enum_values = expected.get("enum")
-            if enum_values and value not in enum_values:
-                raise ValueError(f"Schema validation failed: '{key}' not in enum")
-
+    validator = Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
+    if errors:
+        messages = "; ".join(
+            [f"{'.'.join([str(p) for p in err.path])}: {err.message}" for err in errors]
+        )
+        raise ValueError(f"Schema validation failed: {messages}")
     return True
 
 
@@ -521,31 +489,54 @@ REGLAS:
     user_prompt = json.dumps(context, ensure_ascii=False)
     start_time = time.time()
 
+    last_error = None
+    for attempt in range(3):
+        try:
+            with openai_sem:
+                resp = llm_client.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+
+            result = json.loads(resp.choices[0].message.content)
+            validate_schema(result, template["output_schema"])
+            log_template_execution(template_name, context, result, time.time() - start_time)
+            return result
+
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Template completion attempt {attempt+1} failed: {e}")
+            time.sleep(0.2)
+
+    logger.error(f"Template completion failed after retries: {last_error}", exc_info=True)
+    fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+    try:
+        log_template_execution(template_name, context, fallback, time.time() - start_time)
+    except Exception:
+        pass
+    return fallback
+
+
+def llm_text_response(system_prompt: str, user_prompt: str, *, temperature: float = 0.2, model: str = MODEL_OUTPUT) -> str:
     try:
         with openai_sem:
             resp = llm_client.completion(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.1,
-                response_format={"type": "json_object"}
+                temperature=temperature,
             )
-
-        result = json.loads(resp.choices[0].message.content)
-        validate_schema(result, template["output_schema"])
-        log_template_execution(template_name, context, result, time.time() - start_time)
-        return result
-
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        logger.error(f"Template completion failed: {e}", exc_info=True)
-        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
-        try:
-            log_template_execution(template_name, context, fallback, time.time() - start_time)
-        except Exception:
-            pass
-        return fallback
+        logger.error(f"LLM text response failed: {e}")
+        return ""
 
 
 def should_use_v315(phone: str) -> bool:
@@ -4633,6 +4624,220 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
 
     return reply
+
+
+def handle_social_intent(intent: dict, phone: str) -> str:
+    span = intent.get("span", "")
+    system_prompt = (
+        "Sos Fran, asistente mayorista humano y cercano. Contestá breve (1-2 líneas), "
+        "en tono cálido, sin catálogo ni listas."
+    )
+    user_prompt = f"Mensaje social del cliente: \"{span}\""
+    return llm_text_response(system_prompt, user_prompt, temperature=0.5)
+
+
+def handle_clarification_intent(intent: dict, phone: str) -> str:
+    span = intent.get("span", "")
+    data = intent.get("data", {}) or {}
+    system_prompt = (
+        "Pedí datos faltantes de forma simple y amable. No ofrezcas productos aún."
+    )
+    fields = []
+    for key in ("brand", "model", "product", "category"):
+        if data.get(key):
+            fields.append(f"{key}: {data.get(key)}")
+    info_hint = f" Datos detectados: {', '.join(fields)}." if fields else ""
+    user_prompt = f"Texto del cliente: '{span}'.{info_hint}"
+    return llm_text_response(system_prompt, user_prompt, temperature=0.4)
+
+
+def handle_cart_intent(intent: dict, phone: str) -> str:
+    span = intent.get("span", "")
+    data = intent.get("data", {}) or {}
+    enriched = span
+    if data.get("product") or data.get("quantity"):
+        extra = []
+        if data.get("product"):
+            extra.append(f"producto: {data['product']}")
+        if data.get("quantity"):
+            extra.append(f"cantidad: {data['quantity']}")
+        enriched = f"{span} ({', '.join(extra)})"
+    return handle_cart_action(phone, enriched)
+
+
+def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
+    query_span = intent.get("span", "")
+    allowed_products = run_allowed_products_search(query_span, phone=phone)
+
+    if isinstance(allowed_products, dict):
+        reply = format_multi_search_response(allowed_products)
+        return reply or "Pasame una sola moto o categoría para buscar bien.", []
+
+    quality = assess_context_quality(query_span, allowed_products)
+    if not quality["sufficient"]:
+        if quality.get("action") == "ask_clarification":
+            return quality.get("message") or "Necesito marca/modelo/año para buscar bien.", []
+        top_products = quality.get("top_products", [])[:3]
+        suggestions = "\n".join(
+            [
+                f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                for p in top_products
+            ]
+        )
+        reply = (
+            "No encontré coincidencia perfecta. Tengo:\n\n"
+            f"{suggestions}\n\n"
+            "¿Te sirve alguna o dame más detalles?"
+        )
+        return reply, allowed_products
+
+    selection = complete_template(
+        "product_selection",
+        {
+            "allowed_products": [
+                {
+                    "code": p.get("code", ""),
+                    "name": p.get("name", ""),
+                    "price_ars": float(p.get("price_ars", 0)),
+                    "brand": p.get("brand", ""),
+                    "model": p.get("model", ""),
+                    "category": p.get("category", ""),
+                }
+                for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
+            ],
+            "conversation_context": {
+                "cart_items": len(cart_get(phone)),
+                "sales_phase": get_sales_phase(phone),
+                "is_first_message": len(get_history_since(phone, days=1, limit=5)) <= 1,
+            },
+        },
+    )
+
+    if selection.get("action") == "ask_clarification":
+        reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
+        return reply, allowed_products
+
+    selected_products = selection.get("selected_products", [])
+
+    response = complete_template(
+        "response_generation",
+        {
+            "phone": phone,
+            "intent": "product_search",
+            "selected_products": selected_products,
+            "customer_analysis": selection.get("analysis", {}),
+            "query_context": {"original": query_span, "normalized": query_span, "corrections": []},
+            "conversation_state": {
+                "sales_phase": get_sales_phase(phone),
+                "cart_total": format_price(cart_totals(phone)[0]),
+            },
+        },
+    )
+
+    reply = response.get("message", "")
+    products_cited = response.get("products_cited", [])
+    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    hallucinated = set(products_cited) - allowed_codes
+
+    if hallucinated:
+        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
+        reply = format_search_results(allowed_products[:5])
+        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
+
+    save_last_search(phone, allowed_products, query_span)
+    return reply, allowed_products
+
+
+def handle_tech_question_intent(intent: dict) -> str:
+    span = intent.get("span", "")
+    system_prompt = (
+        "Contestá dudas técnicas o de compatibilidad de forma breve y clara, tono mayorista."
+    )
+    return llm_text_response(system_prompt, f"Consulta técnica: {span}", temperature=0.3)
+
+
+def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> str:
+    ordered = []
+    for intent_type, text in responses:
+        if not text:
+            continue
+        cleaned = text.strip()
+        if cleaned and cleaned not in ordered:
+            ordered.append(cleaned)
+
+    message = "\n\n".join(ordered)
+    if any(i[0] == "social" for i in responses) and "😊" not in message:
+        message = f"{message}\n\n😊"
+
+    if len(message) > 1800:
+        message = message[:1797] + "..."
+    return message
+
+
+def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
+    start_time = time.time()
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+
+    if not rate_limit_check(phone):
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    save_message(phone, user_message, "user")
+
+    if not is_llm_available():
+        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    understanding = complete_template(
+        "query_understanding",
+        {
+            "phone": phone,
+            "user_message": user_message,
+            "conversation_history": get_history_since(phone, days=1, limit=6),
+            "last_search_query": (get_last_search(phone) or {}).get("query", ""),
+        },
+    )
+
+    intents = understanding.get("intents") or []
+    priority = {
+        "social": 0,
+        "clarification": 1,
+        "cart_action": 2,
+        "product_search": 3,
+        "tech_question": 4,
+        "order_flow": 5,
+    }
+    intents_sorted = sorted(intents, key=lambda x: priority.get(x.get("type", "z"), 9))
+
+    responses: list[tuple[str, str]] = []
+    all_products = []
+
+    for intent in intents_sorted:
+        itype = intent.get("type")
+        if itype == "social":
+            responses.append((itype, handle_social_intent(intent, phone)))
+        elif itype == "clarification":
+            responses.append((itype, handle_clarification_intent(intent, phone)))
+        elif itype == "cart_action":
+            responses.append((itype, handle_cart_intent(intent, phone)))
+        elif itype == "product_search":
+            reply, products = handle_product_search_intent(intent, phone)
+            responses.append((itype, reply))
+            all_products.extend(products or [])
+        elif itype == "tech_question":
+            responses.append((itype, handle_tech_question_intent(intent)))
+        elif itype == "order_flow":
+            responses.append((itype, llm_text_response("Guiá pasos de compra o envío en tono mayorista y breve.", intent.get("span", ""))))
+
+    final_reply = combine_responses(responses, intents_sorted)
+
+    save_message(phone, final_reply, "assistant")
+    log_interaction(phone, user_message, "multi_intent", len(all_products))
+    log_performance(phone, "multi_intent", time.time() - start_time, len(all_products))
+
+    return final_reply
 
 # =========================================================
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14

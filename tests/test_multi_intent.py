@@ -19,13 +19,13 @@ from multi_intent import (
 def dummy_llm():
     def _llm(prompt: str) -> str:
         # detect prompts that expect JSON vs plain text
-        if "intenciones" in prompt.lower():
+        if "intents" in prompt or "intenciones" in prompt.lower():
             return json.dumps(
                 {
                     "intents": [
-                        {"type": "social", "span": "hola"},
-                        {"type": "product_search", "span": "necesito pastillas"},
-                        {"type": "cart_action", "span": "sumalas"},
+                        {"type": "social", "span": "hola", "confidence": 0.9, "data": {}},
+                        {"type": "product_search", "span": "necesito pastillas", "confidence": 0.8, "data": {"query": "pastillas"}},
+                        {"type": "cart_action", "span": "sumalas", "confidence": 0.7, "data": {"action": "add"}},
                     ]
                 }
             )
@@ -40,6 +40,7 @@ def test_parse_multi_intent_returns_intents(dummy_llm):
     assert len(intents) == 3
     assert intents[0]["type"] == "social"
     assert intents[0]["span"] == "hola"
+    assert "confidence" in intents[0]
 
 
 def test_generate_prompts_are_human_focused():
@@ -60,7 +61,7 @@ def test_orchestrate_respects_priority(dummy_llm):
         aplicar_accion_carrito=lambda text: f"cart({text})",
     )
 
-    # Order: social -> product_search -> cart_action
+    # Order: social -> cart_action -> product_search
     assert "LLM(El usuario está en modo de charla social" in replies
+    assert replies.index("cart(sumalas)") > 0
     assert "LLM(El usuario está consultando sobre productos" in replies
-    assert "cart(sumalas)" in replies
