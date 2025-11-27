@@ -2809,8 +2809,6 @@ def hybrid_search(
             filtered_super_relaxed = filter_catalog(products_only, super_relaxed)
             filtered_pairs = [(p, _score_for(p)) for p in filtered_super_relaxed]
 
-    LAST_SEARCH_DEBUG["fallback_used"] = False
-
     if filtered_pairs:
         results = sorted(filtered_pairs, key=lambda x: x[1], reverse=True)
         logger.info(f"[SEARCH] filtered_by_moto={len(filtered_pairs)}")
@@ -2818,7 +2816,6 @@ def hybrid_search(
         logger.info(
             f"[SEARCH] Moto filter empty, using merged_results fallback ({len(merged_results)})"
         )
-        LAST_SEARCH_DEBUG["fallback_used"] = True
         results = merged_results
     else:
         results = merged_results
@@ -2870,6 +2867,16 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None,
     if LAST_SEARCH_DEBUG.get("fallback_used"):
         relevance_threshold = 0.0
     filtered = filter_by_relevance(normalized_query, products, min_score=relevance_threshold)
+
+    logger.info(
+        "[SEARCH] Summary → "
+        f"FAISS={LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
+        f"BM25={LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
+        f"merged={LAST_SEARCH_DEBUG.get('merged_count', len(products))} "
+        f"after_moto_filter={LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
+        f"final_results={LAST_SEARCH_DEBUG.get('final_results', len(products))} "
+        f"post_relevance={len(filtered)}"
+    )
 
     logger.info(
         "[SEARCH] Summary → "
