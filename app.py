@@ -1274,16 +1274,15 @@ def filter_catalog(catalog, parsed):
         if motos_detectadas:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
-            if not p_moto_brand or not p_moto_model:
-                rejection_reasons["moto_detection_missing"] += 1
-                return False
-            if not any(
-                normalize_search_query(m.get("brand", "")) in p_moto_brand and
-                normalize_search_query(m.get("model", "")) in p_moto_model
-                for m in motos_detectadas
-            ):
-                rejection_reasons["moto_detection_mismatch"] += 1
-                return False
+
+            if p_moto_brand and p_moto_model:
+                if not any(
+                    normalize_search_query(m.get("brand", "")) in p_moto_brand and
+                    normalize_search_query(m.get("model", "")) in p_moto_model
+                    for m in motos_detectadas
+                ):
+                    rejection_reasons["moto_detection_mismatch"] += 1
+                    return False
 
         if families:
             p_family = normalize_search_query(p.get("family_name", ""))
