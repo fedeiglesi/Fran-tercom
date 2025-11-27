@@ -132,12 +132,15 @@ QUERY_UNDERSTANDING_SCHEMA = {
     - "bateria" → "batería"
 
     IMPORTANTE - DETECCIÓN DE MÚLTIPLES INTENTS:
-    - Un mensaje puede tener MÁS DE UNA intención.
-    - Ejemplo: "Bien gracias. Necesito baterías" tiene:
-      * intent social: "Bien gracias"
-      * intent product_search: "Necesito baterías"
-    - Si detectás múltiples intents, marcá has_multiple_intents=true y listá cada uno con su span.
+    - Un mensaje puede tener MÁS DE UNA intención (hasta 4 simultáneamente).
+    - Ejemplo: "Genio, gracias. Necesito batería para faz. Las de litio van? Llevame 2."
+      * social: "Genio, gracias"
+      * product_search: "Necesito batería para faz"
+      * tech_question: "Las de litio van?"
+      * cart_action: "Llevame 2"
+    - Si detectás múltiples intents, marcá has_multiple_intents=true y listá cada uno.
     - Para product_search, normalized_query debe contener SOLO la parte técnica (sin saludos).
+    - Identificá el span (fragmento) específico de cada intent para procesamiento separado.
 
     Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
     """,
@@ -188,9 +191,26 @@ QUERY_UNDERSTANDING_SCHEMA = {
                 "type": "array",
                 "items": {
                     "type": "string",
-                    "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"]
+                    "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow", "clarification"]
                 },
                 "description": "Lista de TODAS las intenciones detectadas en el mensaje"
+            },
+            "intent_spans": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow", "clarification"]
+                        },
+                        "span": {
+                            "type": "string",
+                            "description": "Fragmento exacto del mensaje original para este intent"
+                        }
+                    }
+                },
+                "description": "Cada intent con su fragmento específico del mensaje"
             },
             "confidence": {
                 "type": "number",
@@ -291,13 +311,49 @@ RESPONSE_GENERATION_SCHEMA = {
     Generá la respuesta final para WhatsApp como Fran.
 
     MANEJO DE MÚLTIPLES INTENTS (MUY IMPORTANTE):
-    - Si has_multiple_intents=true, el mensaje tiene VARIAS intenciones.
-    - Ejemplo: "Bien gracias. Necesito baterías" tiene social + product_search.
-    - En estos casos:
-      1. Primero, respondé brevemente al intent social (1 línea)
-      2. Luego, pasá a los productos
-      3. Ejemplo: "¡Me alegra! Tengo estas baterías: [productos]"
-    - NO ignorés el product_search solo porque hay social.
+    - Si has_multiple_intents=true, el mensaje puede tener hasta 4 intenciones simultáneas.
+    - Ejemplo: "Genio, gracias. Necesito batería. Las de litio van? Llevame 2."
+      * social + product_search + tech_question + cart_action
+    - En estos casos, construí una respuesta que cubra TODAS las intenciones:
+      1. Social: Reconocé brevemente (1 línea, ej: "¡De nada, genio!")
+      2. Product_search: Mostrá productos encontrados
+      3. Tech_question: Respondé la consulta técnica (ej: diferencia gel vs litio)
+      4. Cart_action: Confirmá la acción del carrito
+    - Ejemplo completo: "¡De nada, genio! Tengo baterías de gel y litio. Las de litio duran más pero son más caras. ¿Querés que te agregue 2 al carrito?"
+    - NO ignorés ningún intent. Procesá TODOS.
+
+    PROCESAMIENTO DE CADA INTENT:
+
+    1. SOCIAL:
+       - Reconocé brevemente (máx 1 línea)
+       - Ej: "¡Genio vos!", "¡De nada!", "¡Me alegra!"
+       - Si SOLO hay social (sin otros intents), products_cited = []
+
+    2. PRODUCT_SEARCH:
+       - Mostrá los productos de selected_products
+       - Incluí código TERCOM, nombre y precio
+       - Máximo 3-5 productos
+       - products_cited = [códigos mostrados]
+
+    3. TECH_QUESTION (has_tech_question=true):
+       - Respondé la pregunta técnica del cliente
+       - Usá el texto de tech_question_text para saber qué preguntó
+       - Ej: "Las de litio van?" → "Las de litio van perfecto, duran más pero son más caras"
+       - Explicación breve (1-2 líneas), no técnica
+       - Basá la respuesta en los productos encontrados si aplica
+
+    4. CART_ACTION (has_cart_action=true):
+       - Procesá la acción del carrito indicada en cart_action_text
+       - Ej: "Llevame 2" → "¿Querés que te agregue 2 unidades al carrito?"
+       - Ej: "Agregame al carrito" → "Perfecto, te lo agrego al pedido"
+       - Confirmá o preguntá según corresponda
+
+    ORDEN DE RESPUESTA cuando hay múltiples intents:
+    social → product_search → tech_question → cart_action
+
+    Ejemplo completo (4 intents):
+    Input: "Genio gracias. Necesito batería para faz. Las de litio van? Llevame 2"
+    Output: "¡Genio vos! Tengo batería YTX7L-BS gel $8500 y litio $15000. Las de litio van perfecto y duran más. ¿Querés que te agregue 2 al carrito?"
 
     SI EL INTENT ES "social" (Y NO HAY OTROS INTENTS):
     - Ignorá allowed_products por completo.
@@ -309,7 +365,7 @@ RESPONSE_GENERATION_SCHEMA = {
     - products_cited debe ser siempre [].
     - La respuesta debe ser 100% independiente del catálogo.
 
-    REGLAS PARA RESPUESTA:
+    REGLAS GENERALES PARA RESPUESTA:
     1. Validación de coherencia entre lo que pidió el cliente y los productos (brand, model, cylinder, part_category, normalized_query, intent, corrections). Si allowed_products trae productos no coherentes, ignoralos. Si ninguno es coherente, devolvé un mensaje breve pidiendo aclaración. Si allowed_products está vacío o incoherente, devolvé: "No encontré coincidencias claras con lo que pediste. ¿Me pasás más detalles (marca/modelo/año) así lo afino?"
     2. Manejo de large list (mayorista): si allowed_products tiene más de 10 elementos, no limites el total. Dividí la respuesta en bloques aptos para WhatsApp con 8–12 productos ordenados por relevancia, sin repetir. Tono formal mayorista.
     3. Límites de Twilio / WhatsApp: cada mensaje < ~3500 caracteres. Ajustá dinámicamente el tamaño de los bloques manteniendo el máximo posible sin exceder el límite. Si hay varios mensajes, generá cada uno por separado manteniendo coherencia y continuidad.
@@ -4458,12 +4514,19 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # Detectar múltiples intents
     all_intents = understanding.get("all_intents", [intent])
     has_multiple_intents = understanding.get("has_multiple_intents", False)
+    intent_spans = understanding.get("intent_spans", [])
+
+    # Flags para cada tipo de intent
     has_product_search = "product_search" in all_intents or intent == "product_search"
     has_social = "social" in all_intents or intent == "social"
+    has_tech_question = "tech_question" in all_intents or intent == "tech_question"
+    has_clarification = "clarification" in all_intents or intent == "clarification"
+    has_cart_action = "cart_action" in all_intents or intent == "cart_action"
 
     logger.info(
         f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | "
-        f"All intents: {all_intents} | Multi: {has_multiple_intents} | Corrections: {understanding.get('corrections')}"
+        f"All intents: {all_intents} | Multi: {has_multiple_intents} | "
+        f"Spans: {len(intent_spans)} | Corrections: {understanding.get('corrections')}"
     )
 
     # ============================================
@@ -4598,6 +4661,11 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 4] Generating response...")
 
+    # Extraer spans específicos por intent para procesamiento
+    tech_question_span = next((s["span"] for s in intent_spans if s["type"] == "tech_question"), None)
+    cart_action_span = next((s["span"] for s in intent_spans if s["type"] == "cart_action"), None)
+    social_span = next((s["span"] for s in intent_spans if s["type"] == "social"), None)
+
     response = complete_template(
         "response_generation",
         {
@@ -4606,6 +4674,11 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             "all_intents": all_intents,
             "has_multiple_intents": has_multiple_intents,
             "has_social": has_social,
+            "has_tech_question": has_tech_question,
+            "has_cart_action": has_cart_action,
+            "intent_spans": intent_spans,
+            "tech_question_text": tech_question_span,
+            "cart_action_text": cart_action_span,
             "selected_products": selected_products,
             "customer_analysis": selection.get("analysis", {}),
             "query_context": {
