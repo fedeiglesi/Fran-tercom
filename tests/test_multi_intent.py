@@ -8,8 +8,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from multi_intent import (
     generate_clarification_prompt,
-    generate_product_response_prompt,
-    generate_social_response_prompt,
+    generate_product_prompt,
+    generate_social_prompt,
     orchestrate,
     parse_multi_intent,
 )
@@ -43,13 +43,13 @@ def test_parse_multi_intent_returns_intents(dummy_llm):
 
 
 def test_generate_prompts_are_human_focused():
-    social_prompt = generate_social_response_prompt("hola")
+    social_prompt = generate_social_prompt("hola")
     clarification_prompt = generate_clarification_prompt("que modelos?")
-    product_prompt = generate_product_response_prompt("pastillas", ["a", "b"])
+    product_prompt = generate_product_prompt("pastillas", ["a", "b"])
 
-    assert "SOCIAL" in social_prompt
-    assert "aclaración".lower() in clarification_prompt.lower()
-    assert "permitidos" in product_prompt
+    assert "modo de charla social" in social_prompt
+    assert "aclarar" in clarification_prompt.lower()
+    assert "allowed_products" in product_prompt
 
 
 def test_orchestrate_respects_priority(dummy_llm):
@@ -61,6 +61,6 @@ def test_orchestrate_respects_priority(dummy_llm):
     )
 
     # Order: social -> product_search -> cart_action
-    assert "LLM(Actuá como vendedor humano" in replies
-    assert "LLM(Este fragmento es una consulta" in replies
+    assert "LLM(El usuario está en modo de charla social" in replies
+    assert "LLM(El usuario está consultando sobre productos" in replies
     assert "cart(sumalas)" in replies

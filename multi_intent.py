@@ -21,66 +21,70 @@ def parse_multi_intent(llm: Callable[[str], str], message: str) -> Iterable[Inte
     model to identify coherent spans grouped by the communicative act.
     """
 
-    template = r'''
-    Analizá el siguiente mensaje y dividilo en fragmentos coherentes según su INTENCIÓN.
-    NO te bases en palabras sueltas; identificá el acto comunicativo del usuario.
+    prompt = f'''
+    Sos un modelo experto en analizar lenguaje natural en conversaciones de WhatsApp.
+    Dado un mensaje, debés identificar TODAS las intenciones presentes.
 
-    Intenciones posibles:
-      - "social": saludo, agradecimiento, comentario, charla humana.
-      - "clarification": pide detalles sin intención de compra.
-      - "product_search": el usuario está pidiendo repuestos, opciones,
-        disponibilidad o iniciando una compra.
-      - "cart_action": agregar, sacar, cambiar cantidad, cerrar pedido.
+    Tu tarea:
+    - Dividir el mensaje en fragmentos (spans) si contiene más de una intención.
+    - Cada fragmento debe ser texto EXACTO del usuario (sin inventar).
+    - Cada fragmento debe tener solo UNA intención.
+    - Mantener el orden original.
 
-    IMPORTANTE:
-    - El mensaje puede tener más de una intención.
-    - NO inventes spans: cada 'span' debe ser una porción EXACTA del mensaje original.
-    - El orden de aparición importa.
-    - Ejemplo esperado:
-      {{
-        "intents": [
-          {{"type": "social", "span": "hola Fran, genio, como estas? Me salvaste el otro día."}},
-          {{"type": "product_search", "span": "Sabes q ahora ando buscando amortiguadores."}}
-        ]
-      }}
+    Intenciones posibles (no agregues otras):
+    - "social": saludos, agradecer, cómo estás, charla humana no comercial.
+    - "product_search": cuando el usuario expresa interés en buscar, ver, consultar, comparar o analizar cualquier producto, parte, repuesto o catálogo.
+    - "clarification": cuando el usuario necesita aclarar o ampliar lo anterior.
+    - "cart_action": agregar, sacar, confirmar, cambiar cantidades, cerrar compra.
 
-    Mensaje:
-    """{mensaje}"""
+    NO uses reglas fijas. NO asumas palabras clave. NO dependas de un diccionario.
+    Analizá el significado y contexto general, como haría ChatGPT.
+
+    Respondé SOLO con JSON en este formato:
+    {{
+      "intents": [
+        {{"type": "<intent>", "span": "<texto_original>"}},
+        ...
+      ]
+    }}
+
+    Mensaje del usuario:
+    """{message}"""
     '''
 
-    llm_response = llm(template.format(mensaje=message))
+    llm_response = llm(prompt)
     parsed = json.loads(llm_response)
     return parsed["intents"]
 
 
-def generate_social_response_prompt(text: str) -> str:
+def generate_social_prompt(text: str) -> str:
     return f'''
-    Actuá como vendedor humano. Este fragmento es SOCIAL.
-    Respondé en tono cálido, 1–2 líneas, sin catálogo, sin allowed_products,
-    sin pedir marca/modelo.
-    Texto del usuario: "{text}"
+    El usuario está en modo de charla social. Contestá brevemente (1–2 líneas), 
+    cálido, humano, natural, sin catálogo ni detalles técnicos.
+
+    Texto: "{text}"
     '''
 
 
 def generate_clarification_prompt(text: str) -> str:
     return f'''
-    El usuario necesita una aclaración. NO es búsqueda todavía.
-    Pedí solo la información mínima (marca, modelo, año).
+    El usuario necesita aclarar algo. Pedí más información de forma simple,
+    sin recomendar productos ni buscar en catálogo todavía.
+
     Texto: "{text}"
     '''
 
 
-def generate_product_response_prompt(text: str, allowed_products: Any) -> str:
+def generate_product_prompt(text: str, allowed_products: Any) -> str:
     return f'''
-    Este fragmento es una consulta TÉCNICA de productos.
-    Trabajá EXCLUSIVAMENTE con estos productos permitidos:
-    {json.dumps(allowed_products)}
+    El usuario está consultando sobre productos o repuestos.
+    Usá exclusivamente esta lista (allowed_products) proporcionada por el sistema:
+    {json.dumps(allowed_products, ensure_ascii=False)}
 
-    Respondé como vendedor mayorista:
-    - pocas líneas
-    - comparaciones claras
-    - preguntar si quiere agregar al carrito
-    Texto: "{text}"
+    Respondé de forma profesional, clara y mayorista.
+    Si faltan datos, pedí SOLO lo necesario.
+
+    Texto del usuario: "{text}"
     '''
 
 
@@ -116,7 +120,7 @@ def orchestrate(
         span = intent_item["span"]
 
         if intent_type == "social":
-            respuestas.append(llm(generate_social_response_prompt(span)))
+            respuestas.append(llm(generate_social_prompt(span)))
             continue
 
         if intent_type == "clarification":
@@ -125,7 +129,7 @@ def orchestrate(
 
         if intent_type == "product_search":
             allowed_products = run_allowed_products_search(span)
-            respuestas.append(llm(generate_product_response_prompt(span, allowed_products)))
+            respuestas.append(llm(generate_product_prompt(span, allowed_products)))
             continue
 
         if intent_type == "cart_action":
