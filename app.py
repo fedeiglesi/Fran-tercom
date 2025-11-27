@@ -195,13 +195,17 @@ QUERY_UNDERSTANDING_SCHEMA = {
 PRODUCT_SELECTION_SCHEMA = {
     "task": "select_products",
     "description": """
-    Elegí los mejores productos de la lista para el cliente.
-    
-    REGLAS CRÍTICAS:
-    - SOLO productos de allowed_products (NO inventes códigos)
-    - Prioriza compatibilidad exacta de marca/modelo
-    - Si hay múltiples opciones, explicá diferencias clave
-    - Máximo 5 productos (3 si es primer mensaje)
+    Elegí los productos finales directamente desde final_candidates.
+
+    CONTEXTO Y REGLAS MAYORISTAS (FRAN 3.15):
+    - Usa el mensaje original del cliente y la intención detectada para decidir.
+    - Trabajá SOLO con los final_candidates provistos (NO inventes ni busques otros). Cada uno puede traer metadata de bloque.
+    - Si hay más de 50 productos, vendrán marcados con block_number (bloques de 15–20). Podés dosificar la entrega priorizando los primeros bloques.
+    - Si el pedido es cadena + piñón + corona, agrupá las piezas compatibles en un kit.
+    - Si el pedido es múltiple (varias piezas o motos), devolvé cada grupo por separado.
+    - Si hay demasiados resultados, dosificá: elegí un subconjunto representativo y marcá en action si hay más para mostrar.
+    - Si falta información clave, pedí aclaración concreta (pero NO inventes productos nuevos).
+    - Siempre respondé en tono mayorista y nunca inventes códigos.
     """,
     "output_schema": {
         "type": "object",
@@ -209,7 +213,7 @@ PRODUCT_SELECTION_SCHEMA = {
         "properties": {
             "selected_products": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": 150,
                 "items": {
                     "type": "object",
                     "required": ["code", "reason", "rank"],
@@ -273,7 +277,6 @@ RESPONSE_GENERATION_SCHEMA = {
     Generá la respuesta final para WhatsApp como Fran.
 
     SI EL INTENT ES "social":
-    - Ignorá allowed_products por completo.
     - No generes listados ni pidas marca/modelo/año.
     - Respondé en tono humano, cálido, vendedor mayorista real.
     - La respuesta debe ser breve (1–3 líneas).
@@ -282,27 +285,15 @@ RESPONSE_GENERATION_SCHEMA = {
     - products_cited debe ser siempre [].
     - La respuesta debe ser 100% independiente del catálogo.
 
-    REGLAS PARA RESPUESTA:
-    1. Validación de coherencia entre lo que pidió el cliente y los productos (brand, model, cylinder, part_category, normalized_query, intent, corrections). Si allowed_products trae productos no coherentes, ignoralos. Si ninguno es coherente, devolvé un mensaje breve pidiendo aclaración. Si allowed_products está vacío o incoherente, devolvé: "No encontré coincidencias claras con lo que pediste. ¿Me pasás más detalles (marca/modelo/año) así lo afino?"
-    2. Manejo de large list (mayorista): si allowed_products tiene más de 10 elementos, no limites el total. Dividí la respuesta en bloques aptos para WhatsApp con 8–12 productos ordenados por relevancia, sin repetir. Tono formal mayorista.
-    3. Límites de Twilio / WhatsApp: cada mensaje < ~3500 caracteres. Ajustá dinámicamente el tamaño de los bloques manteniendo el máximo posible sin exceder el límite. Si hay varios mensajes, generá cada uno por separado manteniendo coherencia y continuidad.
-    4. Estructura de los productos en cada mensaje: cada producto debe listar código TERCOM, descripción limpia y precio. Nunca inventes precios, códigos ni descripciones.
-    5. products_cited: en cada mensaje listar solo los códigos incluidos en ese mensaje. No mezclar códigos de otros bloques. Si el intent NO es product_search, entonces products_cited = [].
-    6. Mensajes sociales, saludos, agradecimientos o conversación ligera (social, small_talk, rapport, etc.): ignorá allowed_products. No generes listados ni pidas marca/modelo/año. Respondé en máximo 1–3 líneas, tono humano. products_cited = [].
-    7. Mensaje final: en el último bloque de productos (o en el único mensaje) agregá: "Decime si querés que compare opciones o te arme el carrito."
-    8. Restricciones generales: nunca inventes productos, ni derivados, ni modifiques códigos. Nunca respondas fuera de la estructura JSON del schema.
-    9. Autoverificación: confirmá que cada mensaje realmente responde al span/intención correspondiente; si falta información, pedí una aclaración puntual en lugar de inventar.
-
-    ESTILO GENERAL:
-    - Humano, directo, cercano
-    - Máximo 3-4 líneas
-    - Nunca digas “soy Fran”, “soy un asistente”, ni menciones sistemas
-    - Si el intent es product_search, ahí sí incluir productos y códigos
-
-    ESTRUCTURA PARA RESPUESTAS NORMALES:
-    1. Confirmación breve
-    2. Productos con código TERCOM (máx 3)
-    3. Call-to-action suave
+    REGLAS PARA RESPUESTA EN BÚSQUEDAS DE PRODUCTO:
+    1. Trabajá SOLO con selected_products provistos por el paso de selección (ya vienen desde final_candidates). No inventes ni filtres en Python.
+    2. Si selected_products está vacío o faltan datos clave, pedí una aclaración concreta (marca/modelo/año o qué pieza quiere).
+    3. Si hay kits de transmisión (cadena + piñón + corona), agrupá en bloques separados por pieza y ofrecé armar kit.
+    4. Si hay muchos resultados, dosificá: usá bloques numerados si llegan como metadata (block_number) y avisá cuántos bloques totales hay.
+    5. Estructura de productos: código TERCOM + descripción limpia. No inventes precios ni códigos.
+    6. products_cited debe listar solo los códigos mencionados.
+    7. Mensaje final: en el último bloque agregá "Decime si querés que compare opciones o te arme el carrito."
+    8. Estilo mayorista, directo y sin rodeos.
     """,
     "output_schema": {
         "type": "object",
@@ -4882,12 +4873,39 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
         }
     elif primary_intent == "product_search":
-        selection = {"selected_products": candidates, "analysis": {}}
+        selection_candidates = candidates[:MAX_ITEMS]
+        if len(selection_candidates) > 50:
+            block_size = 18
+            annotated: list[dict] = []
+            for idx, start in enumerate(range(0, len(selection_candidates), block_size)):
+                block = selection_candidates[start:start + block_size]
+                for product in block:
+                    annotated.append({**product, "block_number": idx + 1})
+            selection_candidates = annotated
 
-        selected_products = candidates
+        selection_payload = {
+            "phone": phone,
+            "intent": primary_intent,
+            "original_message": user_message,
+            "detected_intent": primary_intent,
+            "normalized_query": normalized_query,
+            "business_context": "Ventas mayoristas de repuestos de moto. Tono mayorista, directo, sin inventar productos.",
+            "final_candidates": selection_candidates,
+        }
+
+        selection = complete_template("product_selection", selection_payload)
+        selected_codes = {
+            p.get("code") for p in selection.get("selected_products", []) if p.get("code")
+        }
+        selected_products = [
+            p for p in selection_candidates if p.get("code") in selected_codes
+        ]
     else:
         selected_products = []
-        selection = {"selected_products": [], "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []}}
+        selection = {
+            "selected_products": [],
+            "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
+        }
 
     logger.info(
         f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
@@ -5261,6 +5279,12 @@ def orquestar_fran(mensaje_usuario, phone):
         if isinstance(semantic_results, dict)
         else semantic_results
     )
+
+    if products and all(isinstance(p, tuple) for p in products):
+        try:
+            products = [p[0] for p in products]
+        except Exception:
+            products = []
 
     execution_context["search_executed"] = True
     execution_context["products_found"] = len(products)
