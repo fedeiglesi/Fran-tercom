@@ -28,6 +28,13 @@ def patched_app(monkeypatch):
     monkeypatch.setitem(sys.modules, "dotenv", types.SimpleNamespace(load_dotenv=lambda: None))
     monkeypatch.setitem(sys.modules, "dotenv.main", types.SimpleNamespace(load_dotenv=lambda: None))
     monkeypatch.setitem(sys.modules, "cachetools", types.SimpleNamespace(LRUCache=DummyLRUCache))
+    monkeypatch.setitem(
+        sys.modules,
+        "jsonschema",
+        types.SimpleNamespace(
+            Draft7Validator=lambda schema: types.SimpleNamespace(iter_errors=lambda data: [])
+        ),
+    )
 
     if "app" in sys.modules:
         del sys.modules["app"]

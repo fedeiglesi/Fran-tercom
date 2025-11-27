@@ -22,34 +22,22 @@ def parse_multi_intent(llm: Callable[[str], str], message: str) -> Iterable[Inte
     """
 
     prompt = f'''
-    Sos un modelo experto en analizar lenguaje natural en conversaciones de WhatsApp.
-    Dado un mensaje, debés identificar TODAS las intenciones presentes.
+    Sos un analista LLM-first de conversaciones. Detectá TODAS las intenciones en el
+    mensaje sin usar palabras clave. Segmentar en spans exactos del usuario.
 
-    Tu tarea:
-    - Dividir el mensaje en fragmentos (spans) si contiene más de una intención.
-    - Cada fragmento debe ser texto EXACTO del usuario (sin inventar).
-    - Cada fragmento debe tener solo UNA intención.
-    - Mantener el orden original.
-
-    Intenciones posibles (no agregues otras):
-    - "social": saludos, agradecer, cómo estás, charla humana no comercial.
-    - "product_search": cuando el usuario expresa interés en buscar, ver, consultar, comparar o analizar cualquier producto, parte, repuesto o catálogo.
-    - "clarification": cuando el usuario necesita aclarar o ampliar lo anterior.
-    - "cart_action": agregar, sacar, confirmar, cambiar cantidades, cerrar compra.
-
-    NO uses reglas fijas. NO asumas palabras clave. NO dependas de un diccionario.
-    Analizá el significado y contexto general, como haría ChatGPT.
-
-    Respondé SOLO con JSON en este formato:
+    Formato JSON obligatorio:
     {{
       "intents": [
-        {{"type": "<intent>", "span": "<texto_original>"}},
-        ...
+        {{
+          "type": "social|product_search|cart_action|clarification|tech_question|order_flow",
+          "span": "<texto_exactamente_original>",
+          "confidence": 0.0,
+          "data": {{"query": "", "product": "", "action": "", "quantity": 0}}
+        }}
       ]
     }}
 
-    Mensaje del usuario:
-    """{message}"""
+    Mensaje del usuario: """{message}"""
     '''
 
     llm_response = llm(prompt)
@@ -110,8 +98,15 @@ def orchestrate(
 
     intents_detected = parse_multi_intent(llm, message)
 
-    prioridad = ["social", "clarification", "product_search", "cart_action"]
-    intents_sorted = sorted(intents_detected, key=lambda x: prioridad.index(x["type"]))
+    prioridad = {
+        "social": 0,
+        "clarification": 1,
+        "cart_action": 2,
+        "product_search": 3,
+        "tech_question": 4,
+        "order_flow": 5,
+    }
+    intents_sorted = sorted(intents_detected, key=lambda x: prioridad.get(x.get("type"), len(prioridad)))
 
     respuestas = []
 
