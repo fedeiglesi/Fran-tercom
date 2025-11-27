@@ -1715,6 +1715,24 @@ def init_db():
         """)
 
         c.execute("""
+            CREATE TABLE IF NOT EXISTS memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                phone TEXT,
+                data_json TEXT,
+                timestamp TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_memory_phone_timestamp ON memory(phone, timestamp DESC)")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS memory_index (
+                phone TEXT PRIMARY KEY,
+                last_interaction TEXT,
+                order_closed_at TEXT
+            )
+        """)
+
+        c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
                 customer_address TEXT, items_json TEXT, total_ars TEXT,
@@ -1918,6 +1936,93 @@ def save_message(phone, msg, role):
         logger.error(f"Error guardando mensaje: {e}")
 
 
+def minutes_since(timestamp_str: str) -> float | None:
+    try:
+        dt = datetime.fromisoformat(timestamp_str)
+        return (datetime.now() - dt).total_seconds() / 60
+    except Exception as e:
+        logger.error(f"minutes_since error: {e}")
+        return None
+
+
+def update_last_interaction(phone):
+    if not phone:
+        return
+    try:
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO memory_index (phone, last_interaction)
+                VALUES (?, ?)
+                ON CONFLICT(phone) DO UPDATE SET last_interaction=excluded.last_interaction""",
+                (phone, now),
+            )
+    except Exception as e:
+        logger.error(f"update_last_interaction error: {e}")
+
+
+def register_order_closed(phone):
+    if not phone:
+        return
+    try:
+        now = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                """INSERT INTO memory_index (phone, order_closed_at)
+                VALUES (?, ?)
+                ON CONFLICT(phone) DO UPDATE SET order_closed_at=excluded.order_closed_at""",
+                (phone, now),
+            )
+    except Exception as e:
+        logger.error(f"register_order_closed error: {e}")
+
+
+def get_last_interaction(phone):
+    if not phone:
+        return None
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT last_interaction FROM memory_index WHERE phone=?", (phone,))
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    except Exception as e:
+        logger.error(f"get_last_interaction error: {e}")
+        return None
+
+
+def get_order_closed_at(phone):
+    if not phone:
+        return None
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT order_closed_at FROM memory_index WHERE phone=?", (phone,))
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    except Exception as e:
+        logger.error(f"get_order_closed_at error: {e}")
+        return None
+
+
+def clear_memory(phone):
+    if not phone:
+        return
+    try:
+        with get_db_connection() as conn:
+            conn.execute("DELETE FROM last_search WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM search_history WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM memory WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM conversations WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM interactions WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM conversation_phase WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
+            conn.execute("DELETE FROM memory_index WHERE phone=?", (phone,))
+    except Exception as e:
+        logger.error(f"clear_memory error: {e}")
+
+
 def get_history_since(phone, days=7, limit=2000):
     if not phone:
         return []
@@ -1988,21 +2093,60 @@ def get_search_history(phone, limit=5):
         return []
 
 
-def save_last_search(phone, products, query):
-    if not phone or not products:
+def get_recent_searches(phone, limit=3, minutes=10080):
+    if not phone:
+        return []
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT data_json, timestamp
+                FROM memory
+                WHERE phone = ? AND timestamp >= datetime('now', ? || ' minutes')
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (phone, -minutes, limit),
+            )
+            rows = cur.fetchall()
+            results = []
+            for row in rows:
+                try:
+                    results.append(json.loads(row[0]))
+                except Exception:
+                    continue
+            return results
+    except Exception as e:
+        logger.error(f"get_recent_searches error: {e}")
+        return []
+
+
+def save_last_search(phone, data, query=None):
+    if not phone or not data:
         return
+
+    payload = data if isinstance(data, dict) else {"products": data, "query": query}
+    products = payload.get("products") or []
+    query_text = (payload.get("query") or query or "").strip()
+    timestamp = payload.get("timestamp") or datetime.now().isoformat()
+    payload.setdefault("timestamp", timestamp)
+    payload.setdefault("intent", payload.get("intent", "product_search"))
+
     meta = {
         "products": products,
-        "query": query,
-        "timestamp": datetime.now().isoformat(),
+        "query": query_text,
+        "timestamp": timestamp,
         "summary": f"{len(products)} productos",
         "top_category": max(
             set(p.get("category", "") for p in products),
             key=lambda c: sum(1 for p in products if p.get("category") == c),
-            default=""
+            default="",
         ),
-        "total_value": sum(float(p.get("price_ars", 0)) for p in products)
+        "total_value": sum(float(p.get("price_ars", 0)) for p in products),
+        "intent": payload.get("intent", ""),
     }
+
     try:
         with get_db_connection() as conn:
             conn.execute(
@@ -2013,7 +2157,18 @@ def save_last_search(phone, products, query):
                   query=excluded.query,
                   timestamp=excluded.timestamp,
                   metadata=excluded.metadata""",
-                (phone, json.dumps(meta["products"], ensure_ascii=False), query, meta["timestamp"], json.dumps(meta, ensure_ascii=False))
+                (
+                    phone,
+                    json.dumps(meta["products"], ensure_ascii=False),
+                    query_text,
+                    meta["timestamp"],
+                    json.dumps(meta, ensure_ascii=False),
+                ),
+            )
+
+            conn.execute(
+                "INSERT INTO memory (phone, data_json, timestamp) VALUES (?, ?, ?)",
+                (phone, json.dumps(payload, ensure_ascii=False), timestamp),
             )
     except Exception as e:
         logger.error(f"save_last_search error: {e}")
@@ -2033,8 +2188,8 @@ def get_last_search(phone):
             timestamp = datetime.fromisoformat(row[3])
             age_minutes = (datetime.now() - timestamp).total_seconds() / 60
 
-            # Si pasaron más de 10 minutos, no usar ese contexto
-            if age_minutes > 10:
+            # Si pasaron más de 7 días, no usar ese contexto
+            if age_minutes > 10080:
                 logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
                 return None
 
@@ -2066,6 +2221,7 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
                 (order_id, phone, customer_name, customer_address, json.dumps(items), total_ars, "confirmed", datetime.now().isoformat())
             )
             conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
+        register_order_closed(phone)
         return order_id
     except Exception as e:
         logger.error(f"Error creando orden: {e}")
@@ -2808,9 +2964,10 @@ def hybrid_search(
     else:
         filtered_by_moto_sorted = []
         if intent == "product_search" and merged_results:
-            logger.info(
-                f"[SEARCH] Moto filter empty, using merged_results fallback ({len(merged_results)})"
+            logger.warning(
+                f"[MOTO] Fallback → using unfiltered merged results ({len(merged_results)})"
             )
+            filtered_by_moto_sorted = merged_results
 
     if filtered_by_moto_sorted:
         final_results = filtered_by_moto_sorted[:top_k]
@@ -4799,6 +4956,21 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         f"[STEP 1] Normalized: '{normalized_query}' | Intent: {primary_intent} | Corrections: {understanding.get('corrections')}"
     )
 
+    recent_searches = get_recent_searches(phone)
+    recent_products: list[dict] = []
+    for search in recent_searches:
+        if isinstance(search, dict) and search.get("products"):
+            recent_products.extend(search.get("products") or [])
+
+    deduped = {}
+    for p in recent_products:
+        key = p.get("code") or p.get("codigo") or p.get("name")
+        if key:
+            deduped[key] = p
+    recent_products = list(deduped.values())
+
+    logger.info(f"[MEMORY] Recovered {len(recent_products)} recent products")
+
     # ============================================
     # STEP 2: SEARCH
     # ============================================
@@ -4806,6 +4978,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     candidates: list = []
     search_results: dict | list = {}
+
+    use_memory = True
 
     if primary_intent == "social":
         logger.info("[STEP 2] Bypass search for social intent")
@@ -4857,7 +5031,23 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         save_message(phone, cart_reply, "assistant")
         return cart_reply
     else:
-        logger.info(f"[STEP 2] No product search needed for intent: {primary_intent}")
+        if use_memory and recent_products:
+            candidates = recent_products
+            logger.info(f"[STEP 2] Using memory: {len(candidates)} products")
+        else:
+            candidates = []
+            logger.info("[STEP 2] Memory empty — no candidates")
+
+    clean_candidates = [
+        p
+        for p in candidates
+        if (p.get("familia") or p.get("family") or p.get("family_name"))
+        and str(p.get("familia") or p.get("family") or p.get("family_name")).strip()
+    ]
+    if clean_candidates:
+        candidates = clean_candidates
+
+    logger.info(f"[CLEAN] final candidates: {len(candidates)}")
 
     # ============================================
     # STEP 3: PRODUCT SELECTION (LLM)
@@ -4899,10 +5089,20 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         selected_products = [
             p for p in selection_candidates if p.get("code") in selected_codes
         ]
-    else:
-        selected_products = []
+    elif primary_intent in {"clarification", "tech_question", "follow_up"}:
+        if len(recent_products) >= 2:
+            selected_products = recent_products[:7]
+            logger.info(f"[COMPARE] Providing {len(selected_products)} products from memory")
+        else:
+            selected_products = candidates[:7]
         selection = {
-            "selected_products": [],
+            "selected_products": selected_products,
+            "analysis": {"customer_type": "recurrente", "interest_level": "medio", "key_arguments": []},
+        }
+    else:
+        selected_products = candidates[:7]
+        selection = {
+            "selected_products": selected_products,
             "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
         }
 
@@ -4950,6 +5150,16 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
             reply = format_search_results(candidates[:5])
             reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
+
+    save_last_search(
+        phone,
+        {
+            "products": selected_products,
+            "query": normalized_query,
+            "intent": primary_intent,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
 
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, primary_intent, len(selected_products))
@@ -5440,6 +5650,20 @@ def whatsapp_webhook():
             return Response("<Response></Response>", mimetype="text/xml")
 
         logger.info(f"Mensaje sanitizado: {message_body}")
+
+        last_seen = get_last_interaction(from_number)
+        if last_seen:
+            age_minutes = minutes_since(last_seen)
+            if age_minutes and age_minutes > 10080:
+                clear_memory(from_number)
+
+        closed_at = get_order_closed_at(from_number)
+        if closed_at:
+            closed_age = minutes_since(closed_at)
+            if closed_age and closed_age > 10080:
+                clear_memory(from_number)
+
+        update_last_interaction(from_number)
 
         if is_duplicate_message(from_number, message_body):
             logger.info(f"Mensaje duplicado ignorado de {from_number}")
