@@ -187,6 +187,39 @@ def test_code_lookup(monkeypatch, sample_catalog, caplog):
     assert "[DEBUG][Resumen]" in caplog.text
 
 
+@pytest.mark.usefixtures("fake_embeddings")
+def test_moto_filter_fallback(monkeypatch, sample_catalog, caplog):
+    prepare_indexes(monkeypatch, sample_catalog, include_bm25=True, include_faiss=True)
+    monkeypatch.setattr(app, "RELEVANCE_MIN_SCORE", 0)
+
+    def empty_filter(catalog, parsed):
+        return []
+
+    monkeypatch.setattr(app, "filter_catalog", empty_filter)
+
+    with caplog.at_level(logging.INFO):
+        filtered = app.run_allowed_products_search("Tenés bujía NGK para Honda Wave?", intent="product_search")
+
+    assert isinstance(filtered, list)
+    assert filtered  # fallback to merged_results when moto filter removes all
+    assert any("merged_results" in record.message for record in caplog.records)
+    assert any("Moto filter empty" in record.message for record in caplog.records)
+
+
+def test_cart_action_exact_code(monkeypatch, sample_catalog):
+    prepare_indexes(monkeypatch, sample_catalog, include_bm25=False, include_faiss=False)
+    added = {}
+
+    monkeypatch.setattr(app, "cart_add", lambda *args, **kwargs: added.setdefault("payload", args) or True)
+    monkeypatch.setattr(app, "cart_get", lambda phone, max_age_hours=168: [])
+    monkeypatch.setattr(app, "get_last_search", lambda phone: {})
+
+    reply = app.handle_cart_action("123", "Agregame 1179/00035-038 al carrito")
+
+    assert "agregué" in reply.lower()
+    assert added.get("payload")[1] == "1179/00035-038"
+
+
 def test_moto_filter(sample_catalog, caplog):
     parsed = {
         "brands": [],
