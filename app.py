@@ -98,10 +98,10 @@ WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
 TWILIO_CHUNK_LIMIT = 1600
 
-# Nuevos parámetros de calidad (ajustados)
-RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "65.0"))
-QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "70.0"))
-QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "60.0"))
+# Nuevos parámetros de calidad (ajustados para búsquedas más permisivas)
+RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "40.0"))
+QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "55.0"))
+QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "45.0"))
 
 INSTANT_THRESHOLD = 15
 ASYNC_QUICK = 40
