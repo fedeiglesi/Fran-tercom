@@ -94,9 +94,9 @@ _safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace("."
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
-MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
+TWILIO_CHUNK_LIMIT = 1600
 
 # Nuevos parámetros de calidad (ajustados)
 RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "65.0"))
@@ -119,12 +119,13 @@ QUERY_UNDERSTANDING_SCHEMA = {
     "description": """
     Sos Fran 3.16, asistente mayorista argentino 100% LLM-first.
 
-    Detectá todas las intenciones presentes en el mensaje SIN reglas hardcodeadas
-    y devolvé spans exactos del texto original.
+    Detectá TODAS las intenciones presentes en el mensaje (pueden venir varias
+    en un solo texto) sin reglas hardcodeadas y devolvé spans exactos del texto
+    original.
 
     Reglas críticas:
     - Siempre devolvé intents como array de objetos.
-    - type SOLO puede ser: product_search, cart_action, social, tech_question, order_flow.
+    - type SOLO puede ser: product_search, cart_action, social, clarification, tech_question, order_flow.
     - span es obligatorio y debe copiar literalmente el fragmento original.
     - confidence es una probabilidad 0.0–1.0 basada en comprensión semántica.
     - data incluye solo datos estructurados útiles (query, product, brand, model,
@@ -149,6 +150,7 @@ QUERY_UNDERSTANDING_SCHEMA = {
                                 "product_search",
                                 "cart_action",
                                 "social",
+                                "clarification",
                                 "tech_question",
                                 "order_flow",
                             ],
@@ -279,6 +281,7 @@ RESPONSE_GENERATION_SCHEMA = {
     6. Mensajes sociales, saludos, agradecimientos o conversación ligera (social, small_talk, rapport, etc.): ignorá allowed_products. No generes listados ni pidas marca/modelo/año. Respondé en máximo 1–3 líneas, tono humano. products_cited = [].
     7. Mensaje final: en el último bloque de productos (o en el único mensaje) agregá: "Decime si querés que compare opciones o te arme el carrito."
     8. Restricciones generales: nunca inventes productos, ni derivados, ni modifiques códigos. Nunca respondas fuera de la estructura JSON del schema.
+    9. Autoverificación: confirmá que cada mensaje realmente responde al span/intención correspondiente; si falta información, pedí una aclaración puntual en lugar de inventar.
 
     ESTILO GENERAL:
     - Humano, directo, cercano
@@ -493,6 +496,8 @@ REGLAS:
 
             result = json.loads(resp.choices[0].message.content)
             validate_schema(result, template["output_schema"])
+            if template_name == "query_understanding" and not (result.get("intents") or []):
+                raise ValueError("Schema validation failed: intents array vacío")
             log_template_execution(template_name, context, result, time.time() - start_time)
             return result
 
@@ -683,10 +688,18 @@ def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE
 # ------------------------------------------------------------
 # NUEVO: CONTEXT QUALITY ASSESSMENT
 # ------------------------------------------------------------
-def assess_context_quality(query: str, products: list) -> dict:
+def assess_context_quality(query: str, products: list, intent_type: str | None = None) -> dict:
     """
     Evalúa si el contexto recuperado es suficiente para responder.
     """
+    if intent_type == "social":
+        return {
+            "sufficient": True,
+            "reason": "social_intent",
+            "action": "proceed",
+            "confidence": "high",
+        }
+
     if not products:
         return {
             "sufficient": False,
@@ -838,6 +851,9 @@ def validate_and_fix_response(reply: str, allowed_products: list, phone: str, ex
     """
     Valida la respuesta y la regenera si tiene alucinaciones.
     """
+    if execution_context.get("intent_detected") not in {"product_search", "busqueda_catalogo"}:
+        return reply
+
     code_validation = validate_response_codes(reply, allowed_products)
     name_validation = validate_mentioned_names(reply, allowed_products)
 
@@ -3350,7 +3366,7 @@ def run_planning_unificado(
 
         # Compactar productos permitidos para el prompt (no mandamos todo el catálogo crudo)
         productos_contexto = []
-        for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]:
+        for p in allowed_products:
             productos_contexto.append({
                 "code": p.get("code", ""),
                 "name": p.get("name", ""),
@@ -3523,7 +3539,7 @@ def maybe_requery_and_replan(
 
         # Filtrar por relevancia y calidad
         filtered = filter_by_relevance(new_query, search_results, min_score=RELEVANCE_MIN_SCORE)
-        allowed_products = filtered[:MAX_PRODUCTS_FOR_LLM]
+        allowed_products = filtered
         context_quality = assess_context_quality(new_query, allowed_products)
 
         execution_context["requery_done"] = True
@@ -3564,7 +3580,7 @@ def build_customer_output_context(
     meta_razonamiento = plan.get("meta_razonamiento") or {}
 
     productos_contexto = []
-    for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]:
+    for p in allowed_products:
         productos_contexto.append({
             "code": p.get("code", ""),
             "name": p.get("name", ""),
@@ -4177,7 +4193,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
                 if isinstance(semantic_results, dict):
                     semantic_results = []
-                productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+                productos_permitidos = [p for p, _ in semantic_results]
                 execution_context["search_query"] = nueva_query
                 memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
                 contexto_prev.update({
@@ -4350,6 +4366,47 @@ def format_search_results(products):
         extra_txt = f" - {' / '.join(extra)}" if extra else ""
         lines.append(f"{emoji} {i}. {name[:50]} ({code}){extra_txt}\n   {price}")
     return "\n\n".join(lines)
+
+
+def chunk_message_for_twilio(text: str, limit: int = TWILIO_CHUNK_LIMIT) -> list[str]:
+    if not text:
+        return []
+
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for paragraph in paragraphs:
+        candidate = "\n\n".join(current + [paragraph]).strip()
+        if candidate and len(candidate) <= limit:
+            current.append(paragraph)
+            continue
+
+        if current:
+            chunks.append("\n\n".join(current).strip())
+            current = []
+
+        if len(paragraph) <= limit:
+            current.append(paragraph)
+            continue
+
+        sentences = re.split(r"(?<=[.!?])\s+", paragraph)
+        sentence_buffer: list[str] = []
+        for sentence in sentences:
+            candidate_sentence = " ".join(sentence_buffer + [sentence]).strip()
+            if candidate_sentence and len(candidate_sentence) <= limit:
+                sentence_buffer.append(sentence)
+            else:
+                if sentence_buffer:
+                    chunks.append(" ".join(sentence_buffer).strip())
+                sentence_buffer = [sentence]
+        if sentence_buffer:
+            current.append(" ".join(sentence_buffer).strip())
+
+    if current:
+        chunks.append("\n\n".join(current).strip())
+
+    return chunks or [text]
 
 
 def format_multi_search_response(results: dict) -> str | None:
@@ -4534,7 +4591,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                         "model": p.get("model", ""),
                         "category": p.get("category", ""),
                     }
-                    for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
+                    for p in allowed_products
                 ],
                 "conversation_context": {
                     "cart_items": len(cart_get(phone)),
@@ -4591,27 +4648,13 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     logger.info(f"[STEP 5] Validating response...")
 
     if primary_intent == "product_search":
-        allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+        allowed_codes = {p.get("code") for p in allowed_products if p.get("code")}
         hallucinated = set(products_cited) - allowed_codes
 
         if hallucinated:
             logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
             reply = format_search_results(allowed_products[:5])
             reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
-
-        if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
-            remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
-            if remaining_products:
-                chunks = [
-                    remaining_products[i : i + PRODUCTS_PER_CHUNK]
-                    for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
-                ]
-
-                for idx, chunk in enumerate(chunks, 1):
-                    chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
-                    chunk_text += format_search_results(chunk)
-                    time.sleep(0.5)
-                    send_long_message(phone, chunk_text)
 
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, primary_intent, len(selected_products))
@@ -4716,7 +4759,7 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
                     "model": p.get("model", ""),
                     "category": p.get("category", ""),
                 }
-                for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
+                for p in allowed_products
             ],
             "conversation_context": {
                 "cart_items": len(cart_get(phone)),
@@ -4749,7 +4792,7 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
 
     reply = response.get("message", "")
     products_cited = response.get("products_cited", [])
-    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    allowed_codes = {p.get("code") for p in allowed_products if p.get("code")}
     hallucinated = set(products_cited) - allowed_codes
 
     if hallucinated:
@@ -4801,7 +4844,7 @@ def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> 
         buckets.setdefault(intent_type, []).append(cleaned)
 
     ordered_parts: list[str] = []
-    for key in ("social", "cart_action", "product_search", "clarification", "tech_question", "order_flow"):
+    for key in ("social", "clarification", "cart_action", "product_search", "tech_question", "order_flow"):
         ordered_parts.extend(buckets.get(key, []))
 
     if ordered_parts:
@@ -4812,9 +4855,8 @@ def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> 
             ordered_parts.append(closing)
 
     message = "\n\n".join(ordered_parts)
-    if len(message) > 1800:
-        message = message[:1797] + "..."
-    return message
+    chunks = chunk_message_for_twilio(message, TWILIO_CHUNK_LIMIT)
+    return "\n\n".join(chunks)
 
 
 def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
@@ -4843,7 +4885,7 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         },
     )
 
-    allowed_types = {"product_search", "cart_action", "social", "tech_question", "order_flow"}
+    allowed_types = {"product_search", "cart_action", "social", "clarification", "tech_question", "order_flow"}
     intents = [
         intent
         for intent in (understanding.get("intents") or [])
@@ -4862,9 +4904,9 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
 
     priority = {
         "social": 0,
-        "cart_action": 1,
+        "clarification": 1,
         "product_search": 2,
-        "clarification": 3,
+        "cart_action": 3,
         "tech_question": 4,
         "order_flow": 5,
     }
@@ -5029,9 +5071,9 @@ def orquestar_fran(mensaje_usuario, phone):
             for p in products[:150]
         ], query_for_search)
 
-    execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
+    execution_context["products_shown_to_llm"] = len(products)
 
-    if len(products) > MAX_PRODUCTS_FOR_LLM:
+    if len(products) > PRODUCTS_PER_CHUNK:
         execution_context["will_send_chunks"] = True
         num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
         execution_context["chunk_info"] = {
@@ -5043,7 +5085,7 @@ def orquestar_fran(mensaje_usuario, phone):
     result = generate_smart_ai_reply_v2(
         phone,
         user_message,
-        products[:MAX_PRODUCTS_FOR_LLM],
+        products,
         execution_context,
         system_prompt=CITATION_ENFORCED_PROMPT
     )
@@ -5053,11 +5095,10 @@ def orquestar_fran(mensaje_usuario, phone):
     real_intent = plan.get("real_intent", "unknown")
     execution_context["intent_detected"] = real_intent
 
-    if products:
-        allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
-        reply = validate_and_fix_response(reply, allowed_products, phone, execution_context)
+    if products and real_intent == "product_search":
+        reply = validate_and_fix_response(reply, products, phone, execution_context)
 
-    if execution_context["will_send_chunks"] and products:
+    if execution_context.get("will_send_chunks") and products:
         chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
         for idx, chunk in enumerate(chunks, 1):
             chunk_text = f"━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
@@ -5085,7 +5126,7 @@ def send_long_message(phone, text, chunk_size=1600):
         return False
 
     try:
-        parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        parts = chunk_message_for_twilio(text, chunk_size)
         logger.info(f"Enviando {len(parts)} chunks a {phone}")
 
         for idx, part in enumerate(parts):
@@ -5163,7 +5204,7 @@ def whatsapp_webhook():
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
 
-        if len(reply) <= WHATSAPP_MSG_LIMIT:
+        if len(reply) <= TWILIO_CHUNK_LIMIT:
             logger.info("Mensaje corto, usando TwiML")
             resp = MessagingResponse()
             resp.message(reply)

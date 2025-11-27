@@ -61,7 +61,7 @@ def test_orchestrate_respects_priority(dummy_llm):
         aplicar_accion_carrito=lambda text: f"cart({text})",
     )
 
-    # Order: social -> cart_action -> product_search
+    # Order: social -> product_search -> cart_action
     assert "LLM(El usuario está en modo de charla social" in replies
-    assert replies.index("cart(sumalas)") > 0
-    assert "LLM(El usuario está consultando sobre productos" in replies
+    assert replies.index("LLM(El usuario está consultando sobre productos") > replies.index("LLM(El usuario está en modo de charla social")
+    assert replies.index("cart(sumalas)") > replies.index("LLM(El usuario está consultando sobre productos")

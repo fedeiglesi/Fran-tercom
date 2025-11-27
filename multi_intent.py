@@ -101,8 +101,8 @@ def orchestrate(
     prioridad = {
         "social": 0,
         "clarification": 1,
-        "cart_action": 2,
-        "product_search": 3,
+        "product_search": 2,
+        "cart_action": 3,
         "tech_question": 4,
         "order_flow": 5,
     }
