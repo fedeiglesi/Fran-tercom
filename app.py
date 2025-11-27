@@ -68,7 +68,7 @@ logger.info("✅ Imports completos")
 # ------------------------------------------------------------
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
+    logger.error("Falta OPENAI_API_KEY – el LLM está deshabilitado")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
@@ -353,11 +353,26 @@ http_client = HttpClient(
     logger=logger,
     breaker=CircuitBreaker(failure_threshold=3, recovery_time=120),
 )
-llm_client = LLMClient(
-    client,
-    logger=logger,
-    breaker=CircuitBreaker(failure_threshold=2, recovery_time=90),
+class _UnavailableLLMClient:
+    def completion(self, *_, **__):  # noqa: D401
+        """Stub que informa la falta de API key."""
+        raise RuntimeError("OPENAI_API_KEY no configurada")
+
+
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+llm_client = (
+    LLMClient(
+        client,
+        logger=logger,
+        breaker=CircuitBreaker(failure_threshold=2, recovery_time=90),
+    )
+    if client
+    else _UnavailableLLMClient()
 )
+
+
+def is_llm_available() -> bool:
+    return bool(OPENAI_API_KEY)
 cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
@@ -4405,6 +4420,11 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
+    if not is_llm_available():
+        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
+        save_message(phone, reply, "assistant")
+        return reply
+
     logger.info(f"[STEP 1] Understanding query: {user_message}")
 
     understanding = complete_template(
@@ -4630,6 +4650,11 @@ def orquestar_fran(mensaje_usuario, phone):
 
     if not rate_limit_check(phone):
         reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    if not is_llm_available():
+        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
         save_message(phone, reply, "assistant")
         return reply
 
