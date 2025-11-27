@@ -1145,9 +1145,13 @@ def filter_catalog(catalog, parsed):
         if motos_detectadas:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
+
+            # Si el producto NO tiene info de moto, considerarlo universal
             if not p_moto_brand or not p_moto_model:
-                return False
-            if not any(
+                # Producto universal - pasa el filtro
+                pass
+            # Si tiene info de moto, verificar compatibilidad
+            elif not any(
                 normalize_search_query(m.get("brand", "")) in p_moto_brand and
                 normalize_search_query(m.get("model", "")) in p_moto_model
                 for m in motos_detectadas
