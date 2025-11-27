@@ -32,6 +32,7 @@ from cachetools import LRUCache
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+import multi_intent
 
 load_dotenv()
 app = Flask(__name__)
@@ -130,6 +131,14 @@ QUERY_UNDERSTANDING_SCHEMA = {
     - "sanella" → "Zanella"
     - "bateria" → "batería"
 
+    IMPORTANTE - DETECCIÓN DE MÚLTIPLES INTENTS:
+    - Un mensaje puede tener MÁS DE UNA intención.
+    - Ejemplo: "Bien gracias. Necesito baterías" tiene:
+      * intent social: "Bien gracias"
+      * intent product_search: "Necesito baterías"
+    - Si detectás múltiples intents, marcá has_multiple_intents=true y listá cada uno con su span.
+    - Para product_search, normalized_query debe contener SOLO la parte técnica (sin saludos).
+
     Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
     """,
     "output_schema": {
@@ -141,8 +150,8 @@ QUERY_UNDERSTANDING_SCHEMA = {
                 "description": "Query original del usuario"
             },
             "normalized_query": {
-                "type": "string", 
-                "description": "Query corregida y lista para búsqueda"
+                "type": "string",
+                "description": "Query corregida y lista para búsqueda (SOLO parte técnica, sin saludos/social)"
             },
             "entities": {
                 "type": "object",
@@ -169,7 +178,19 @@ QUERY_UNDERSTANDING_SCHEMA = {
             "intent": {
                 "type": "string",
                 "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"],
-                "description": "Intención detectada"
+                "description": "Intención PRINCIPAL detectada"
+            },
+            "has_multiple_intents": {
+                "type": "boolean",
+                "description": "True si el mensaje tiene más de una intención"
+            },
+            "all_intents": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"]
+                },
+                "description": "Lista de TODAS las intenciones detectadas en el mensaje"
             },
             "confidence": {
                 "type": "number",
@@ -269,12 +290,21 @@ RESPONSE_GENERATION_SCHEMA = {
     "description": """
     Generá la respuesta final para WhatsApp como Fran.
 
-    SI EL INTENT ES "social":
+    MANEJO DE MÚLTIPLES INTENTS (MUY IMPORTANTE):
+    - Si has_multiple_intents=true, el mensaje tiene VARIAS intenciones.
+    - Ejemplo: "Bien gracias. Necesito baterías" tiene social + product_search.
+    - En estos casos:
+      1. Primero, respondé brevemente al intent social (1 línea)
+      2. Luego, pasá a los productos
+      3. Ejemplo: "¡Me alegra! Tengo estas baterías: [productos]"
+    - NO ignorés el product_search solo porque hay social.
+
+    SI EL INTENT ES "social" (Y NO HAY OTROS INTENTS):
     - Ignorá allowed_products por completo.
     - No generes listados ni pidas marca/modelo/año.
     - Respondé en tono humano, cálido, vendedor mayorista real.
     - La respuesta debe ser breve (1–3 líneas).
-    - Podés mantener continuidad (“¡Me alegra que te haya servido!”, “¿Todo tranqui por ahí?”).
+    - Podés mantener continuidad ("¡Me alegra que te haya servido!", "¿Todo tranqui por ahí?").
     - No menciones sistemas, búsquedas, catálogos ni procesos internos.
     - products_cited debe ser siempre [].
     - La respuesta debe ser 100% independiente del catálogo.
@@ -4425,8 +4455,15 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     normalized_query = understanding.get("normalized_query") or user_message
     intent = understanding.get("intent") or "product_search"
 
+    # Detectar múltiples intents
+    all_intents = understanding.get("all_intents", [intent])
+    has_multiple_intents = understanding.get("has_multiple_intents", False)
+    has_product_search = "product_search" in all_intents or intent == "product_search"
+    has_social = "social" in all_intents or intent == "social"
+
     logger.info(
-        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | "
+        f"All intents: {all_intents} | Multi: {has_multiple_intents} | Corrections: {understanding.get('corrections')}"
     )
 
     # ============================================
@@ -4437,12 +4474,17 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     allowed_products = []
     quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
 
-    if intent in ["social", "greeting", "small_talk", "conversation"]:
-        allowed_products = []
-        logger.info("[STEP 2] Bypass search for social intent")
-    else:
+    # Solo hacer bypass si NO hay product_search en ninguno de los intents
+    if has_product_search:
+        logger.info("[STEP 2] Product search detected, running search...")
         allowed_products = run_allowed_products_search(normalized_query, phone=phone)
         logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
+    elif intent in ["social", "greeting", "small_talk", "conversation"]:
+        allowed_products = []
+        logger.info("[STEP 2] Bypass search - only social intent detected")
+
+    # Procesamiento de resultados si hay product_search
+    if has_product_search:
 
         if isinstance(allowed_products, dict):
             if allowed_products.get("error") == "too_many_combinations":
@@ -4504,8 +4546,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 3] Selecting best products...")
 
-    if intent in ["social", "greeting", "small_talk", "conversation"]:
-        logger.info("[STEP 3] Skipping product selection for social intent")
+    if not has_product_search:
+        logger.info("[STEP 3] Skipping product selection - no product_search intent detected")
         selected_products = []
         selection = {
             "selected_products": [],
@@ -4561,6 +4603,9 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         {
             "phone": phone,
             "intent": intent,
+            "all_intents": all_intents,
+            "has_multiple_intents": has_multiple_intents,
+            "has_social": has_social,
             "selected_products": selected_products,
             "customer_analysis": selection.get("analysis", {}),
             "query_context": {
