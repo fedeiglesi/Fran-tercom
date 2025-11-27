@@ -147,7 +147,7 @@ def test_bm25_individual(monkeypatch, sample_catalog, caplog):
         results = app.hybrid_search("bujia honda wave", top_k=5)
 
     assert results
-    assert results[0][0]["code"] == "C1"
+    assert results["final_results"][0]["code"] == "C1"
     assert "[DEBUG][BM25]" in caplog.text
 
 
@@ -158,7 +158,7 @@ def test_faiss_individual(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         results = app.hybrid_search("pastillas suzuki gn", top_k=5)
 
-    assert results
+    assert results["final_results"]
     assert any("[DEBUG][FAISS]" in record.message for record in caplog.records)
 
 
@@ -169,8 +169,8 @@ def test_rrf_individual(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         results = app.hybrid_search("amortiguador wave", top_k=5)
 
-    assert results
-    assert app.LAST_SEARCH_DEBUG.get("rrf_count", 0) >= len(results)
+    assert results["final_results"]
+    assert app.LAST_SEARCH_DEBUG.get("rrf_count", 0) >= len(results["final_results"])
     assert "[DEBUG][RRF]" in caplog.text
 
 
