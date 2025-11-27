@@ -65,3 +65,47 @@ def test_orchestrate_respects_priority(dummy_llm):
     assert "LLM(El usuario está en modo de charla social" in replies
     assert replies.index("LLM(El usuario está consultando sobre productos") > replies.index("LLM(El usuario está en modo de charla social")
     assert replies.index("cart(sumalas)") > replies.index("LLM(El usuario está consultando sobre productos")
+
+
+@pytest.fixture
+def four_intents_llm():
+    def _llm(prompt: str) -> str:
+        if "intents" in prompt or "intenciones" in prompt.lower():
+            return json.dumps(
+                {
+                    "intents": [
+                        {"type": "social", "span": "hola buen día", "confidence": 0.9, "data": {}},
+                        {"type": "clarification", "span": "qué motos tenés", "confidence": 0.85, "data": {}},
+                        {
+                            "type": "product_search",
+                            "span": "necesito pastillas de freno",
+                            "confidence": 0.8,
+                            "data": {"query": "pastillas"},
+                        },
+                        {
+                            "type": "cart_action",
+                            "span": "sumalas al carrito",
+                            "confidence": 0.75,
+                            "data": {"action": "add"},
+                        },
+                    ]
+                }
+            )
+        return f"LLM({prompt.strip()})"
+
+    return _llm
+
+
+def test_orchestrate_handles_four_intents_same_message(four_intents_llm):
+    replies = orchestrate(
+        four_intents_llm,
+        "hola buen día, necesito pastillas de freno, sumalas al carrito y decime qué motos tenés",
+        run_allowed_products_search=lambda span: ["p1", "p2"],
+        aplicar_accion_carrito=lambda text: f"cart({text})",
+    )
+
+    # Priority: social -> clarification -> product_search -> cart_action
+    assert replies.index("LLM(El usuario está en modo de charla social") == 0
+    assert replies.index("LLM(El usuario necesita aclarar algo") > replies.index("LLM(El usuario está en modo de charla social")
+    assert replies.index("LLM(El usuario está consultando sobre productos") > replies.index("LLM(El usuario necesita aclarar algo")
+    assert replies.endswith("cart(sumalas al carrito)")
