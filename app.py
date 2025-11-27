@@ -64,6 +64,16 @@ if not logger.handlers:
 
 logger.info("✅ Imports completos")
 
+FRAN_DEBUG = os.environ.get("FRAN_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
+LAST_SEARCH_DEBUG: dict = {}
+LAST_FILTER_CATALOG_DEBUG: dict = {}
+LAST_RELEVANCE_DEBUG: dict = {}
+
+
+def debug_log(message: str):
+    if FRAN_DEBUG:
+        logger.info(message)
+
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
@@ -678,12 +688,35 @@ def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE
     if not products or not query:
         return []
     scored = []
+    rejected = 0
     for p in products:
         score = calculate_relevance_score(query, p)
         if score >= min_score:
             scored.append((p, score))
+        else:
+            rejected += 1
     scored.sort(key=lambda x: x[1], reverse=True)
-    return [p for p, score in scored]
+    filtered = [p for p, score in scored]
+
+    if FRAN_DEBUG:
+        LAST_RELEVANCE_DEBUG.clear()
+        LAST_RELEVANCE_DEBUG.update(
+            {
+                "query": query,
+                "threshold": min_score,
+                "accepted": len(filtered),
+                "rejected": rejected,
+                "scored": scored[:20],
+            }
+        )
+        debug_log(
+            f"[DEBUG][Relevancia] umbral={min_score} aceptados={len(filtered)} rechazados={rejected} "
+            + ", ".join(
+                f"{idx+1}. {p.get('code', p.get('name',''))} score={s:.2f}" for idx, (p, s) in enumerate(scored[:20])
+            )
+        )
+
+    return filtered
 
 # ------------------------------------------------------------
 # NUEVO: CONTEXT QUALITY ASSESSMENT
@@ -1130,85 +1163,152 @@ def filter_catalog(catalog, parsed):
     motos_detectadas = parsed.get("motos_detectadas") or []
     displacement = parsed.get("displacement")
     final_category = parsed.get("final_category")
+    rejection_reasons = Counter()
+    filtered = []
+
+    if FRAN_DEBUG:
+        debug_log(
+            "[DEBUG][Filtro] Criterios: "
+            f"brands={sorted(brands)} models={sorted(models)} "
+            f"moto_brands={sorted(moto_brands)} moto_models={sorted(moto_models)} "
+            f"motos_detectadas={motos_detectadas} families={sorted(families)} "
+            f"categories={cats} displacement={displacement} final_category={final_category}"
+        )
 
     def _match(p):
         if brands:
             p_brand = normalize_search_query(p.get("brand", ""))
             if not any(b in p_brand for b in brands):
+                rejection_reasons["brand_mismatch"] += 1
                 return False
 
         if moto_brands:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             if not any(b in p_moto_brand for b in moto_brands):
+                rejection_reasons["moto_brand_mismatch"] += 1
                 return False
 
         if models:
             p_model = normalize_search_query(p.get("model", ""))
             if not any(m in p_model for m in models):
+                rejection_reasons["model_mismatch"] += 1
                 return False
 
         if moto_models:
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
             if not any(m in p_moto_model for m in moto_models):
+                rejection_reasons["moto_model_mismatch"] += 1
                 return False
 
         if motos_detectadas:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
             if not p_moto_brand or not p_moto_model:
+                rejection_reasons["moto_detection_missing"] += 1
                 return False
             if not any(
                 normalize_search_query(m.get("brand", "")) in p_moto_brand and
                 normalize_search_query(m.get("model", "")) in p_moto_model
                 for m in motos_detectadas
             ):
+                rejection_reasons["moto_detection_mismatch"] += 1
                 return False
 
         if families:
             p_family = normalize_search_query(p.get("family_name", ""))
             if not p_family:
+                rejection_reasons["family_missing"] += 1
                 return False
             if not any(f in p_family for f in families):
+                rejection_reasons["family_mismatch"] += 1
                 return False
 
         if cats:
             p_cat = normalize_search_query(p.get("category", ""))
 
-            # Batería tiene reglas especiales
             if "bateria" in cats:
                 name_norm = normalize_search_query(p.get("name", ""))
                 if any(x in name_norm for x in ["ytx", "yb", "yt", "gel", "agm", "litio", "12v"]):
                     pass
                 else:
                     if not any(v in p_cat for v in CATEGORY_MAP.get("bateria", ["bateria"])):
+                        rejection_reasons["category_mismatch"] += 1
                         return False
 
-            # Otras categorías
             other_cats = [c for c in cats if c != "bateria"]
             if other_cats:
                 if not any(
                     any(v in p_cat for v in CATEGORY_MAP.get(c, [c]))
                     for c in other_cats
                 ):
+                    rejection_reasons["category_mismatch"] += 1
                     return False
 
         if final_category:
             p_final_cat = normalize_search_query(p.get("final_category", "") or p.get("category", ""))
             if not p_final_cat:
+                rejection_reasons["final_category_missing"] += 1
                 return False
             if final_category not in p_final_cat:
+                rejection_reasons["final_category_mismatch"] += 1
                 return False
 
         if displacement:
             p_disp = normalize_search_query(p.get("displacement", ""))
             if not p_disp:
+                rejection_reasons["displacement_missing"] += 1
                 return False
             if displacement not in p_disp:
+                rejection_reasons["displacement_mismatch"] += 1
                 return False
 
         return True
 
-    return [p for p in catalog if _match(p)]
+    for p in catalog:
+        if _match(p):
+            filtered.append(p)
+
+    if FRAN_DEBUG:
+        total = len(catalog)
+        moto_rejected = sum(
+            rejection_reasons.get(k, 0)
+            for k in [
+                "brand_mismatch",
+                "moto_brand_mismatch",
+                "model_mismatch",
+                "moto_model_mismatch",
+                "moto_detection_missing",
+                "moto_detection_mismatch",
+                "displacement_missing",
+                "displacement_mismatch",
+            ]
+        )
+        family_rejected = rejection_reasons.get("family_missing", 0) + rejection_reasons.get("family_mismatch", 0)
+        category_rejected = (
+            rejection_reasons.get("category_mismatch", 0)
+            + rejection_reasons.get("final_category_missing", 0)
+            + rejection_reasons.get("final_category_mismatch", 0)
+        )
+
+        LAST_FILTER_CATALOG_DEBUG.clear()
+        LAST_FILTER_CATALOG_DEBUG.update(
+            {
+                "total": total,
+                "filtered": len(filtered),
+                "rejections": dict(rejection_reasons),
+                "after_moto_filter": max(total - moto_rejected, 0),
+                "after_family_filter": max(total - moto_rejected - family_rejected, 0),
+                "after_category_filter": max(total - moto_rejected - family_rejected - category_rejected, 0),
+            }
+        )
+
+        debug_log(
+            "[DEBUG][Filtro] Rechazos: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(rejection_reasons.items()))
+            + f" | Total aceptados={len(filtered)}/{total}"
+        )
+
+    return filtered
 
 # ------------------------------------------------------------
 # PENDING ACTIONS (MEJORADAS EN 3.13)
@@ -2422,6 +2522,31 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
 
     parsed = parse_query_v2(query, phone=phone)
 
+    if FRAN_DEBUG:
+        LAST_SEARCH_DEBUG.clear()
+        LAST_SEARCH_DEBUG.update(
+            {
+                "query": query,
+                "initial_count": len(catalog),
+                "parsed": parsed,
+            }
+        )
+
+    def _log_ranked(stage, results, include_rank=True, limit=20):
+        if not FRAN_DEBUG:
+            return
+        lines = []
+        for idx, item in enumerate(results[:limit], 1):
+            if include_rank:
+                product, score, rank = item
+            else:
+                product, score = item
+                rank = idx
+            lines.append(
+                f"{rank}. {product.get('code', product.get('name',''))} | {product.get('name','').strip()} | score={score:.4f}"
+            )
+        debug_log(f"[DEBUG][{stage}] Top {min(limit, len(results))}: " + "; ".join(lines))
+
     if metadata_filters:
         def _norm_list(val):
             if val is None:
@@ -2457,6 +2582,8 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             for rank, idx in enumerate(ranked_indices[:k_bm25], 1):
                 if 0 <= idx < len(catalog):
                     bm25_results.append((catalog[idx], float(scores[idx]), rank))
+            LAST_SEARCH_DEBUG["bm25_count"] = len(bm25_results)
+            _log_ranked("BM25", bm25_results, include_rank=True)
         except Exception as e:
             logger.error(f"Error en búsqueda BM25: {e}", exc_info=True)
     else:
@@ -2477,6 +2604,8 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             for rank, (dist, idx) in enumerate(zip(D[0], I[0]), 1):
                 if 0 <= idx < len(catalog):
                     faiss_results.append((catalog[idx], float(dist), rank))
+            LAST_SEARCH_DEBUG["faiss_count"] = len(faiss_results)
+            _log_ranked("FAISS", faiss_results, include_rank=True)
         except Exception as e:
             logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
     else:
@@ -2503,7 +2632,16 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
     fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
 
+    LAST_SEARCH_DEBUG["rrf_count"] = len(fused)
+    _log_ranked("RRF", fused, include_rank=False)
+
     products_only = [p for p, _ in fused]
+
+    if FRAN_DEBUG:
+        debug_log(
+            "[DEBUG][Pipeline] IDs antes de filtrar allowed_products: "
+            + ", ".join(p.get("code", p.get("name", "")) for p in products_only[:50])
+        )
 
     cats = parsed.get("categories") or []
     motos = parsed.get("motos_detectadas") or []
@@ -2577,6 +2715,22 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             results = fused
 
     results.sort(key=lambda x: x[1], reverse=True)
+
+    if FRAN_DEBUG:
+        after_moto = LAST_FILTER_CATALOG_DEBUG.get("after_moto_filter", len(products_only)) if LAST_FILTER_CATALOG_DEBUG else len(products_only)
+        after_family = LAST_FILTER_CATALOG_DEBUG.get("after_family_filter", len(filtered_products)) if LAST_FILTER_CATALOG_DEBUG else len(filtered_products)
+        LAST_SEARCH_DEBUG.update(
+            {
+                "after_moto_filter": after_moto,
+                "after_family_filter": after_family,
+                "after_filter_catalog": len(filtered_products),
+            }
+        )
+        debug_log(
+            "[DEBUG][Pipeline] Conteo tras filtros -> "
+            f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_products)}"
+        )
+
     return results[:top_k]
 
 
@@ -2590,8 +2744,27 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None)
         return semantic_results
 
     products = [p for p, _ in semantic_results]
+    if FRAN_DEBUG:
+        debug_log(
+            "[DEBUG][Pipeline] Productos antes de filtro_final: "
+            + ", ".join(p.get("code", p.get("name", "")) for p in products[:50])
+        )
 
-    return filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+    filtered = filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+
+    if FRAN_DEBUG:
+        summary = (
+            f"Inicial {LAST_SEARCH_DEBUG.get('initial_count', 0)} "
+            f"→ Tras BM25 {LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
+            f"→ Tras FAISS {LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
+            f"→ Tras RRF {LAST_SEARCH_DEBUG.get('rrf_count', 0)} "
+            f"→ Tras filtro_motos {LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
+            f"→ Tras filtro_familias {LAST_SEARCH_DEBUG.get('after_family_filter', len(products))} "
+            f"→ Tras filtro_final {len(filtered)}"
+        )
+        debug_log(f"[DEBUG][Resumen] {summary}")
+
+    return filtered
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
