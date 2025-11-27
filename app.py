@@ -117,24 +117,20 @@ MAX_BULK_ITEMS = 150
 QUERY_UNDERSTANDING_SCHEMA = {
     "task": "understand_query",
     "description": """
-    Sos Fran 3.15, asistente mayorista argentino 100% LLM-first.
+    Sos Fran 3.16, asistente mayorista argentino 100% LLM-first.
 
-    Identificá TODAS las intenciones presentes en un mismo mensaje sin hardcodear
-    reglas ni palabras. No asumas que vienen separadas: puede haber saludo,
-    agradecimiento, carrito y nuevas búsquedas todo junto. Segmentá en spans
-    exactos del usuario, sin alterar ni inventar texto.
+    Detectá todas las intenciones presentes en el mensaje SIN reglas hardcodeadas
+    y devolvé spans exactos del texto original.
 
-    Intenciones válidas (solo estas): product_search, cart_action, social,
-    tech_question, order_flow.
-
-    Reglas clave:
-    - Siempre devolvé un array intents con TODOS los spans detectados.
-    - type debe ser exactamente uno de los valores del enum.
-    - span es obligatorio y debe ser el texto literal asociado a la intención.
+    Reglas críticas:
+    - Siempre devolvé intents como array de objetos.
+    - type SOLO puede ser: product_search, cart_action, social, tech_question, order_flow.
+    - span es obligatorio y debe copiar literalmente el fragmento original.
     - confidence es una probabilidad 0.0–1.0 basada en comprensión semántica.
-    - data es flexible: usá campos como query, product, brand, model, category,
-      action, quantity o notes solo si aportan claridad (sin inventar datos).
-    - Respondé SOLO JSON válido según el schema.
+    - data incluye solo datos estructurados útiles (query, product, brand, model,
+      category, action, quantity, notes) sin inventar valores.
+    - No uses greeting, small_talk ni conversation como type porque no existen en el schema.
+    - Respondé únicamente JSON válido según el schema.
     """,
     "output_schema": {
         "type": "object",
@@ -400,7 +396,7 @@ TEMPLATE_FALLBACKS = {
     "query_understanding": {
         "intents": [
             {
-                "type": "product_search",
+                "type": "social",
                 "span": "",
                 "confidence": 0.5,
                 "data": {},
@@ -4637,6 +4633,22 @@ def handle_social_intent(intent: dict, phone: str) -> str:
     return llm_text_response(system_prompt, user_prompt, temperature=0.5)
 
 
+def handle_social_intents_only(intents: list[dict], phone: str) -> str:
+    quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
+    _ = quality  # Se mantiene explícito para evitar recalcular calidad en sociales
+
+    social_intents = [i for i in intents if i.get("type") == "social"]
+    if not social_intents:
+        fallback_span = (intents[0].get("span") if intents else "") or ""
+        social_intents = [{"type": "social", "span": fallback_span, "confidence": 1.0, "data": {}}]
+
+    responses: list[tuple[str, str]] = []
+    for intent in social_intents:
+        responses.append(("social", handle_social_intent(intent, phone)))
+
+    return combine_responses(responses, social_intents)
+
+
 def handle_clarification_intent(intent: dict, phone: str) -> str:
     span = intent.get("span", "")
     data = intent.get("data", {}) or {}
@@ -4652,7 +4664,7 @@ def handle_clarification_intent(intent: dict, phone: str) -> str:
     return llm_text_response(system_prompt, user_prompt, temperature=0.4)
 
 
-def handle_cart_intent(intent: dict, phone: str) -> str:
+def handle_cart_action_intent(intent: dict, phone: str) -> str:
     span = intent.get("span", "")
     data = intent.get("data", {}) or {}
     enriched = span
@@ -4788,17 +4800,14 @@ def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> 
         seen.add(cleaned)
         buckets.setdefault(intent_type, []).append(cleaned)
 
-    ordered_parts = (
-        buckets.get("social", [])
-        + buckets.get("clarification", [])
-        + buckets.get("cart_action", [])
-        + buckets.get("product_search", [])
-        + buckets.get("tech_question", [])
-        + buckets.get("order_flow", [])
-    )
+    ordered_parts: list[str] = []
+    for key in ("social", "cart_action", "product_search", "clarification", "tech_question", "order_flow"):
+        ordered_parts.extend(buckets.get(key, []))
 
-    if buckets.get("social"):
-        closing = "Gracias por escribir. Cualquier cosa, acá estoy."
+    if ordered_parts:
+        closing = "Decime si querés que deje todo listo o busco algo más."
+        if buckets.get("social"):
+            closing = "¡Quedo atento a lo que necesites!"
         if closing not in ordered_parts:
             ordered_parts.append(closing)
 
@@ -4834,15 +4843,28 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         },
     )
 
-    intents = understanding.get("intents") or []
+    allowed_types = {"product_search", "cart_action", "social", "tech_question", "order_flow"}
+    intents = [
+        intent
+        for intent in (understanding.get("intents") or [])
+        if intent.get("type") in allowed_types and (intent.get("span") or "").strip()
+    ]
     if not intents:
         intents = [{"type": "social", "span": user_message, "confidence": 0.5, "data": {}}]
 
+    has_product_intent = any(i.get("type") == "product_search" for i in intents)
+    if not has_product_intent:
+        reply = handle_social_intents_only(intents, phone)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "multi_intent", 0)
+        log_performance(phone, "multi_intent", time.time() - start_time, 0)
+        return reply
+
     priority = {
         "social": 0,
-        "clarification": 1,
-        "cart_action": 2,
-        "product_search": 3,
+        "cart_action": 1,
+        "product_search": 2,
+        "clarification": 3,
         "tech_question": 4,
         "order_flow": 5,
     }
@@ -4858,7 +4880,7 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         elif itype == "clarification":
             responses.append((itype, handle_clarification_intent(intent, phone)))
         elif itype == "cart_action":
-            responses.append((itype, handle_cart_intent(intent, phone)))
+            responses.append((itype, handle_cart_action_intent(intent, phone)))
         elif itype == "product_search":
             reply, products = handle_product_search_intent(intent, phone)
             responses.append((itype, reply))
