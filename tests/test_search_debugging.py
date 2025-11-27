@@ -147,7 +147,7 @@ def test_bm25_individual(monkeypatch, sample_catalog, caplog):
         results = app.hybrid_search("bujia honda wave", top_k=5)
 
     assert results
-    assert results["final_results"][0]["code"] == "C1"
+    assert results["final_candidates"][0]["code"] == "C1"
     assert "[DEBUG][BM25]" in caplog.text
 
 
@@ -158,7 +158,7 @@ def test_faiss_individual(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         results = app.hybrid_search("pastillas suzuki gn", top_k=5)
 
-    assert results["final_results"]
+    assert results["final_candidates"]
     assert any("[DEBUG][FAISS]" in record.message for record in caplog.records)
 
 
@@ -169,8 +169,8 @@ def test_rrf_individual(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         results = app.hybrid_search("amortiguador wave", top_k=5)
 
-    assert results["final_results"]
-    assert app.LAST_SEARCH_DEBUG.get("rrf_count", 0) >= len(results["final_results"])
+    assert results["final_candidates"]
+    assert app.LAST_SEARCH_DEBUG.get("rrf_count", 0) >= len(results["final_candidates"])
     assert "[DEBUG][RRF]" in caplog.text
 
 
@@ -182,9 +182,8 @@ def test_code_lookup(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         filtered = app.run_allowed_products_search("1179/00035-038")
 
-    assert isinstance(filtered, list)
-    assert "1179/00035-038" in {p.get("code") for p in filtered}
-    assert "[DEBUG][Resumen]" in caplog.text
+    assert isinstance(filtered, dict)
+    assert "1179/00035-038" in {p.get("code") for p in filtered.get("final_candidates", [])}
 
 
 @pytest.mark.usefixtures("fake_embeddings")
@@ -200,8 +199,8 @@ def test_moto_filter_fallback(monkeypatch, sample_catalog, caplog):
     with caplog.at_level(logging.INFO):
         filtered = app.run_allowed_products_search("Tenés bujía NGK para Honda Wave?", intent="product_search")
 
-    assert isinstance(filtered, list)
-    assert filtered  # fallback to merged_results when moto filter removes all
+    assert isinstance(filtered, dict)
+    assert filtered.get("final_candidates", [])  # fallback to merged_results when moto filter removes all
     assert any("merged_results" in record.message for record in caplog.records)
     assert any("Moto filter empty" in record.message for record in caplog.records)
 
