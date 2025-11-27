@@ -813,9 +813,9 @@ def extract_mentioned_codes(response_text: str) -> set:
     return codes
 
 
-def validate_response_codes(response_text: str, allowed_products: list) -> dict:
+def validate_response_codes(response_text: str, final_results: list) -> dict:
     mentioned = extract_mentioned_codes(response_text)
-    allowed = {p.get('code', '') for p in allowed_products if p.get('code')}
+    allowed = {p.get('code', '') for p in final_results if p.get('code')}
 
     hallucinated = mentioned - allowed
 
@@ -844,8 +844,8 @@ def validate_response_codes(response_text: str, allowed_products: list) -> dict:
     }
 
 
-def validate_mentioned_names(response_text: str, allowed_products: list) -> dict:
-    if not allowed_products:
+def validate_mentioned_names(response_text: str, final_results: list) -> dict:
+    if not final_results:
         return {"valid": True}
 
     mentioned_names = []
@@ -864,7 +864,7 @@ def validate_mentioned_names(response_text: str, allowed_products: list) -> dict
 
     allowed_names_normalized = [
         normalize_search_query(p.get("name", ""))
-        for p in allowed_products if p.get("name")
+        for p in final_results if p.get("name")
     ]
 
     hallucinated_names = []
@@ -895,15 +895,15 @@ def validate_mentioned_names(response_text: str, allowed_products: list) -> dict
     return {"valid": True}
 
 
-def validate_and_fix_response(reply: str, allowed_products: list, phone: str, execution_context: dict) -> str:
+def validate_and_fix_response(reply: str, final_results: list, phone: str, execution_context: dict) -> str:
     """
     Valida la respuesta y la regenera si tiene alucinaciones.
     """
     if execution_context.get("intent_detected") not in {"product_search", "busqueda_catalogo"}:
         return reply
 
-    code_validation = validate_response_codes(reply, allowed_products)
-    name_validation = validate_mentioned_names(reply, allowed_products)
+    code_validation = validate_response_codes(reply, final_results)
+    name_validation = validate_mentioned_names(reply, final_results)
 
     execution_context["validation"] = {
         "codes": code_validation,
@@ -2854,65 +2854,32 @@ def hybrid_search(
     }
 
 
-def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> list | dict:
+def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> dict:
     """
-    Ejecuta la búsqueda híbrida y filtra por relevancia para generar allowed_products.
+    Ejecuta la búsqueda híbrida y devuelve los resultados finales.
     """
-    semantic_results = hybrid_search(
+    search_results = hybrid_search(
         normalized_query,
         phone=phone,
         top_k=MAX_SEARCH_RESULTS,
         intent=intent,
     )
 
-    if isinstance(semantic_results, dict):
-        products = semantic_results.get("final_results", [])
+    if isinstance(search_results, dict):
+        final_results = search_results.get("final_results", [])
     else:
-        products = semantic_results
+        final_results = search_results or []
+        search_results = {"final_results": final_results}
+
+    logger.info(f"[PIPELINE] received {len(final_results)} final_results from hybrid_search")
+
     if FRAN_DEBUG:
         debug_log(
-            "[DEBUG][Pipeline] Productos antes de filtro_final: "
-            + ", ".join(p.get("code", p.get("name", "")) for p in products[:50])
+            "[DEBUG][Pipeline] Productos finales: "
+            + ", ".join(p.get("code", p.get("name", "")) for p in final_results[:50])
         )
 
-    relevance_threshold = RELEVANCE_MIN_SCORE
-    if LAST_SEARCH_DEBUG.get("fallback_used"):
-        relevance_threshold = 0.0
-    filtered = filter_by_relevance(normalized_query, products, min_score=relevance_threshold)
-
-    logger.info(
-        "[SEARCH] Summary → "
-        f"FAISS={LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
-        f"BM25={LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
-        f"merged={LAST_SEARCH_DEBUG.get('merged_count', len(products))} "
-        f"after_moto_filter={LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
-        f"final_results={LAST_SEARCH_DEBUG.get('final_results', len(products))} "
-        f"post_relevance={len(filtered)}"
-    )
-
-    logger.info(
-        "[SEARCH] Summary → "
-        f"FAISS={LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
-        f"BM25={LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
-        f"merged={LAST_SEARCH_DEBUG.get('merged_count', len(products))} "
-        f"after_moto_filter={LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
-        f"final_results={LAST_SEARCH_DEBUG.get('final_results', len(products))} "
-        f"post_relevance={len(filtered)}"
-    )
-
-    if FRAN_DEBUG:
-        summary = (
-            f"Inicial {LAST_SEARCH_DEBUG.get('initial_count', 0)} "
-            f"→ Tras BM25 {LAST_SEARCH_DEBUG.get('bm25_count', 0)} "
-            f"→ Tras FAISS {LAST_SEARCH_DEBUG.get('faiss_count', 0)} "
-            f"→ Tras RRF {LAST_SEARCH_DEBUG.get('rrf_count', 0)} "
-            f"→ Tras filtro_motos {LAST_SEARCH_DEBUG.get('after_moto_filter', len(products))} "
-            f"→ Tras filtro_familias {LAST_SEARCH_DEBUG.get('after_family_filter', len(products))} "
-            f"→ Tras filtro_final {len(filtered)}"
-        )
-        debug_log(f"[DEBUG][Resumen] {summary}")
-
-    return filtered
+    return search_results
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -4842,13 +4809,14 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 2] Searching products...")
 
-    allowed_products = []
+    final_results: list = []
+    search_results: dict | list = {}
 
     if primary_intent == "social":
         quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
         logger.info("[STEP 2] Bypass search for social intent")
     elif primary_intent == "product_search":
-        allowed_products = run_allowed_products_search(
+        search_results = run_allowed_products_search(
             normalized_query, phone=phone, intent=primary_intent
         )
         logger.info(
@@ -4859,23 +4827,23 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             LAST_SEARCH_DEBUG.get("after_moto_filter", 0),
             LAST_SEARCH_DEBUG.get("final_results", 0),
         )
-        logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
-
-        if isinstance(allowed_products, dict):
-            if allowed_products.get("error") == "too_many_combinations":
-                reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
+        if isinstance(search_results, dict):
+            if search_results.get("error") == "too_many_combinations":
+                reply = search_results.get("message", "Pasame una sola moto o categoría.")
                 save_message(phone, reply, "assistant")
                 return reply
 
-            reply = format_multi_search_response(allowed_products)
+            reply = format_multi_search_response(search_results)
             if reply:
                 save_message(phone, reply, "assistant")
                 return reply
-            allowed_products = []
+            final_results = search_results.get("final_results", [])
+        else:
+            final_results = search_results or []
 
-        logger.info(f"[STEP 2] Returned products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
+        logger.info(f"[STEP 2] Returned products: {len(final_results)}")
 
-        quality = assess_context_quality(normalized_query, allowed_products)
+        quality = assess_context_quality(normalized_query, final_results)
 
         if not quality["sufficient"]:
             if quality["action"] == "ask_clarification":
@@ -4896,7 +4864,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
             save_message(phone, reply, "assistant")
             log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
-            log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
+            log_performance(phone, "low_quality", time.time() - start_time, len(final_results))
             return reply
 
         save_last_search(
@@ -4909,13 +4877,13 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                     "price_usd": p.get("price_usd"),
                     "qty": 1,
                 }
-                for p in allowed_products[:MAX_ITEMS]
+                for p in final_results[:MAX_ITEMS]
             ],
             normalized_query,
         )
 
         logger.info(
-            f"[STEP 2] Found {len(allowed_products)} relevant products | Quality: {quality.get('confidence')}"
+            f"[STEP 2] Found {len(final_results)} relevant products | Quality: {quality.get('confidence')}"
         )
     elif primary_intent == "cart_action":
         cart_reply = handle_cart_action(phone, user_message)
@@ -4954,7 +4922,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                         "model": p.get("model", ""),
                         "category": p.get("category", ""),
                     }
-                    for p in allowed_products
+                    for p in final_results
                 ],
                 "conversation_context": {
                     "cart_items": len(cart_get(phone)),
@@ -5011,17 +4979,17 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     logger.info(f"[STEP 5] Validating response...")
 
     if primary_intent == "product_search":
-        allowed_codes = {p.get("code") for p in allowed_products if p.get("code")}
+        allowed_codes = {p.get("code") for p in final_results if p.get("code")}
         hallucinated = set(products_cited) - allowed_codes
 
         if hallucinated:
             logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-            reply = format_search_results(allowed_products[:5])
+            reply = format_search_results(final_results[:5])
             reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, primary_intent, len(selected_products))
-    log_performance(phone, primary_intent, time.time() - start_time, len(allowed_products))
+    log_performance(phone, primary_intent, time.time() - start_time, len(final_results))
     update_sales_phase_from_intent(phone, primary_intent)
 
     logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
@@ -5086,13 +5054,17 @@ def handle_cart_action_intent(intent: dict, phone: str) -> str:
 
 def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
     query_span = intent.get("span", "")
-    allowed_products = run_allowed_products_search(query_span, phone=phone, intent=intent.get("type"))
+    search_results = run_allowed_products_search(query_span, phone=phone, intent=intent.get("type"))
 
-    if isinstance(allowed_products, dict):
-        reply = format_multi_search_response(allowed_products)
-        return reply or "Pasame una sola moto o categoría para buscar bien.", []
+    if isinstance(search_results, dict):
+        reply = format_multi_search_response(search_results)
+        final_results = search_results.get("final_results", []) if not reply else []
+        if reply:
+            return reply or "Pasame una sola moto o categoría para buscar bien.", []
+    else:
+        final_results = search_results or []
 
-    quality = assess_context_quality(query_span, allowed_products)
+    quality = assess_context_quality(query_span, final_results)
     if not quality["sufficient"]:
         if quality.get("action") == "ask_clarification":
             return quality.get("message") or "Necesito marca/modelo/año para buscar bien.", []
@@ -5108,7 +5080,7 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
             f"{suggestions}\n\n"
             "¿Te sirve alguna o dame más detalles?"
         )
-        return reply, allowed_products
+        return reply, final_results
 
     selection = complete_template(
         "product_selection",
@@ -5122,7 +5094,7 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
                     "model": p.get("model", ""),
                     "category": p.get("category", ""),
                 }
-                for p in allowed_products
+                for p in final_results
             ],
             "conversation_context": {
                 "cart_items": len(cart_get(phone)),
@@ -5134,7 +5106,7 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
 
     if selection.get("action") == "ask_clarification":
         reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
-        return reply, allowed_products
+        return reply, final_results
 
     selected_products = selection.get("selected_products", [])
 
@@ -5155,16 +5127,16 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
 
     reply = response.get("message", "")
     products_cited = response.get("products_cited", [])
-    allowed_codes = {p.get("code") for p in allowed_products if p.get("code")}
+    allowed_codes = {p.get("code") for p in final_results if p.get("code")}
     hallucinated = set(products_cited) - allowed_codes
 
     if hallucinated:
         logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-        reply = format_search_results(allowed_products[:5])
+        reply = format_search_results(final_results[:5])
         reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    save_last_search(phone, allowed_products, query_span)
-    return reply, allowed_products
+    save_last_search(phone, final_results, query_span)
+    return reply, final_results
 
 
 def handle_tech_question_intent(intent: dict) -> str:
