@@ -119,28 +119,21 @@ QUERY_UNDERSTANDING_SCHEMA = {
     "description": """
     Sos Fran 3.15, asistente mayorista argentino 100% LLM-first.
 
-    Debés identificar TODAS las intenciones presentes en un mismo mensaje, sin
-    hardcodear palabras ni reglas. No asumas que las intenciones vienen separadas:
-    puede haber saludo, agradecimiento, referencias a búsquedas previas, pedidos de
-    carrito y nuevas búsquedas todo junto. Segmentá en fragmentos (spans) exactos
-    del usuario, sin alterar ni inventar texto.
+    Identificá TODAS las intenciones presentes en un mismo mensaje sin hardcodear
+    reglas ni palabras. No asumas que vienen separadas: puede haber saludo,
+    agradecimiento, carrito y nuevas búsquedas todo junto. Segmentá en spans
+    exactos del usuario, sin alterar ni inventar texto.
 
-    Intenciones válidas (solo estas):
-    - "social": saludo, agradecimiento, rapport, humor o cierre humano.
-    - "product_search": interés en buscar, comparar o cotizar productos/repuestos.
-    - "cart_action": agregar, quitar o modificar cantidades en el carrito.
-    - "clarification": cuando el usuario pide o ofrece aclarar datos faltantes.
-    - "tech_question": consultas técnicas o de compatibilidad que requieran
-      explicación.
-    - "order_flow": pasos de compra, envío o pago.
+    Intenciones válidas (solo estas): product_search, cart_action, social,
+    tech_question, order_flow.
 
     Reglas clave:
-    - Devolvé spans exactos del texto original, sin reordenar ni corregir.
-    - Cada intención debe incluir probabilidad (confidence 0.0–1.0) basada en
-      sentido semántico, no en keywords.
-    - Usá el campo "data" para estructurar detalles útiles (query, product, brand,
-      model, action, quantity, category, notes). Podés agregar campos relevantes
-      si son coherentes con la intención, pero nunca datos inventados.
+    - Siempre devolvé un array intents con TODOS los spans detectados.
+    - type debe ser exactamente uno de los valores del enum.
+    - span es obligatorio y debe ser el texto literal asociado a la intención.
+    - confidence es una probabilidad 0.0–1.0 basada en comprensión semántica.
+    - data es flexible: usá campos como query, product, brand, model, category,
+      action, quantity o notes solo si aportan claridad (sin inventar datos).
     - Respondé SOLO JSON válido según el schema.
     """,
     "output_schema": {
@@ -157,10 +150,9 @@ QUERY_UNDERSTANDING_SCHEMA = {
                         "type": {
                             "type": "string",
                             "enum": [
-                                "social",
                                 "product_search",
                                 "cart_action",
-                                "clarification",
+                                "social",
                                 "tech_question",
                                 "order_flow",
                             ],
@@ -4428,16 +4420,21 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         },
     )
 
+    intents = understanding.get("intents") or []
+    primary_intent = intents[0].get("type") if intents else "product_search"
+    primary_span = intents[0].get("span") if intents else user_message
+
     if understanding.get("needs_clarification"):
         reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
         save_message(phone, reply, "assistant")
         return reply
 
-    normalized_query = understanding.get("normalized_query") or user_message
-    intent = understanding.get("intent") or "product_search"
+    normalized_query = understanding.get("normalized_query") or (
+        primary_span if primary_intent == "product_search" else user_message
+    )
 
     logger.info(
-        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {primary_intent} | Corrections: {understanding.get('corrections')}"
     )
 
     # ============================================
@@ -4446,12 +4443,11 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     logger.info(f"[STEP 2] Searching products...")
 
     allowed_products = []
-    quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
 
-    if intent in ["social", "greeting", "small_talk", "conversation"]:
-        allowed_products = []
+    if primary_intent == "social":
+        quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
         logger.info("[STEP 2] Bypass search for social intent")
-    else:
+    elif primary_intent == "product_search":
         allowed_products = run_allowed_products_search(normalized_query, phone=phone)
         logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
 
@@ -4509,21 +4505,22 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         logger.info(
             f"[STEP 2] Found {len(allowed_products)} relevant products | Quality: {quality.get('confidence')}"
         )
+    else:
+        quality = {"sufficient": True, "confidence": 1.0, "reason": f"{primary_intent}_intent"}
 
     # ============================================
     # STEP 3: PRODUCT SELECTION (LLM)
     # ============================================
     logger.info(f"[STEP 3] Selecting best products...")
 
-    if intent in ["social", "greeting", "small_talk", "conversation"]:
+    if primary_intent == "social":
         logger.info("[STEP 3] Skipping product selection for social intent")
         selected_products = []
         selection = {
             "selected_products": [],
             "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
-            "action": "show_products",
         }
-    else:
+    elif primary_intent == "product_search":
         selection = complete_template(
             "product_selection",
             {
@@ -4531,7 +4528,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
                 "normalized_query": normalized_query,
                 "original_query": user_message,
                 "entities": understanding.get("entities", {}),
-                "intent": intent,
+                "intent": primary_intent,
                 "allowed_products": [
                     {
                         "code": p.get("code", ""),
@@ -4557,6 +4554,9 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             return reply
 
         selected_products = selection.get("selected_products", [])
+    else:
+        selected_products = []
+        selection = {"selected_products": [], "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []}}
 
     logger.info(
         f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
@@ -4571,7 +4571,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         "response_generation",
         {
             "phone": phone,
-            "intent": intent,
+            "intent": primary_intent,
             "selected_products": selected_products,
             "customer_analysis": selection.get("analysis", {}),
             "query_context": {
@@ -4594,32 +4594,33 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 5] Validating response...")
 
-    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
-    hallucinated = set(products_cited) - allowed_codes
+    if primary_intent == "product_search":
+        allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+        hallucinated = set(products_cited) - allowed_codes
 
-    if hallucinated:
-        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-        reply = format_search_results(allowed_products[:5])
-        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
+        if hallucinated:
+            logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
+            reply = format_search_results(allowed_products[:5])
+            reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
-        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
-        if remaining_products:
-            chunks = [
-                remaining_products[i : i + PRODUCTS_PER_CHUNK]
-                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
-            ]
+        if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
+            remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
+            if remaining_products:
+                chunks = [
+                    remaining_products[i : i + PRODUCTS_PER_CHUNK]
+                    for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
+                ]
 
-            for idx, chunk in enumerate(chunks, 1):
-                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
-                chunk_text += format_search_results(chunk)
-                time.sleep(0.5)
-                send_long_message(phone, chunk_text)
+                for idx, chunk in enumerate(chunks, 1):
+                    chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
+                    chunk_text += format_search_results(chunk)
+                    time.sleep(0.5)
+                    send_long_message(phone, chunk_text)
 
     save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, intent, len(selected_products))
-    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
-    update_sales_phase_from_intent(phone, intent)
+    log_interaction(phone, user_message, primary_intent, len(selected_products))
+    log_performance(phone, primary_intent, time.time() - start_time, len(allowed_products))
+    update_sales_phase_from_intent(phone, primary_intent)
 
     logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
 
@@ -4756,19 +4757,52 @@ def handle_tech_question_intent(intent: dict) -> str:
     return llm_text_response(system_prompt, f"Consulta técnica: {span}", temperature=0.3)
 
 
+def handle_order_flow_intent(intent: dict, phone: str) -> str:
+    span = intent.get("span", "")
+    total, _ = cart_totals(phone)
+    cart_context = f"Carrito estimado: {format_price(total)}." if total else "Carrito aún vacío."
+    system_prompt = (
+        "Guiá al cliente por pasos de compra, pago o envío en tono mayorista, breve y directo."
+    )
+    user_prompt = f"Consulta sobre pedido/envío: '{span}'. Contexto: {cart_context}"
+    return llm_text_response(system_prompt, user_prompt, temperature=0.35)
+
+
 def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> str:
-    ordered = []
+    buckets: dict[str, list[str]] = {
+        "social": [],
+        "clarification": [],
+        "cart_action": [],
+        "product_search": [],
+        "tech_question": [],
+        "order_flow": [],
+    }
+
+    seen = set()
     for intent_type, text in responses:
         if not text:
             continue
         cleaned = text.strip()
-        if cleaned and cleaned not in ordered:
-            ordered.append(cleaned)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        buckets.setdefault(intent_type, []).append(cleaned)
 
-    message = "\n\n".join(ordered)
-    if any(i[0] == "social" for i in responses) and "😊" not in message:
-        message = f"{message}\n\n😊"
+    ordered_parts = (
+        buckets.get("social", [])
+        + buckets.get("clarification", [])
+        + buckets.get("cart_action", [])
+        + buckets.get("product_search", [])
+        + buckets.get("tech_question", [])
+        + buckets.get("order_flow", [])
+    )
 
+    if buckets.get("social"):
+        closing = "Gracias por escribir. Cualquier cosa, acá estoy."
+        if closing not in ordered_parts:
+            ordered_parts.append(closing)
+
+    message = "\n\n".join(ordered_parts)
     if len(message) > 1800:
         message = message[:1797] + "..."
     return message
@@ -4801,6 +4835,9 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
     )
 
     intents = understanding.get("intents") or []
+    if not intents:
+        intents = [{"type": "social", "span": user_message, "confidence": 0.5, "data": {}}]
+
     priority = {
         "social": 0,
         "clarification": 1,
@@ -4829,7 +4866,7 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         elif itype == "tech_question":
             responses.append((itype, handle_tech_question_intent(intent)))
         elif itype == "order_flow":
-            responses.append((itype, llm_text_response("Guiá pasos de compra o envío en tono mayorista y breve.", intent.get("span", ""))))
+            responses.append((itype, handle_order_flow_intent(intent, phone)))
 
     final_reply = combine_responses(responses, intents_sorted)
 
