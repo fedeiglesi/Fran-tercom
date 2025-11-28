@@ -1108,6 +1108,159 @@ def detect_families_in_query(query: str):
     return selected[:5]
 
 # ------------------------------------------------------------
+# SEMANTIC INTENT OVERRIDE (LINGUISTIC + HEURISTIC LAYER)
+# ------------------------------------------------------------
+PURCHASE_VERBS = {
+    "necesito",
+    "busco",
+    "quiero",
+    "tenes",
+    "tenés",
+    "vendes",
+    "vendés",
+    "vende",
+    "conseguis",
+    "consigues",
+    "recomendame",
+    "recomendas",
+    "recomendás",
+}
+
+SOCIAL_MARKERS = {
+    "hola",
+    "buenas",
+    "gracias",
+    "cómo estás",
+    "como estas",
+    "buen dia",
+    "buen día",
+    "que tal",
+    "qué tal",
+    "buenas tardes",
+    "buenas noches",
+}
+
+FOLLOW_UP_MARKERS = {
+    "de nuevo",
+    "otra vez",
+    "lo de antes",
+    "como te decia",
+    "como te decía",
+    "sobre las",
+    "sobre los",
+    "ahora",
+    "ademas",
+    "además",
+}
+
+TECH_LEXICAL_ROOTS = AUTOCORRECT_VOCAB | {
+    "repuesto",
+    "respuesto",
+    "repuestos",
+    "pieza",
+    "pieza",
+    "piezas",
+    "parte",
+    "partes",
+    "codigo",
+    "código",
+    "códigos",
+    "codigos",
+    "amortiguadores",
+    "bujias",
+    "pastillas",
+}
+
+
+def detect_semantic_entities(message: str) -> dict:
+    """Detect technical entities and discourse markers without catalog hardcodes.
+
+    Combines token similarity, fuzzy brand/model detection and purchase verbs to
+    decide whether the query contains product-seeking evidence. Also surfaces
+    social/follow-up cues so the orchestrator can build compound intents.
+    """
+
+    normalized = normalize_search_query(message)
+    tokens = [t for t in re.split(r"[^\wáéíóúüñ]+", normalized) if t]
+
+    purchase_hits = [v for v in PURCHASE_VERBS if re.search(rf"\b{v}\b", normalized)]
+    social_hits = [s for s in SOCIAL_MARKERS if re.search(rf"\b{s}\b", normalized)]
+    follow_up_hits = [s for s in FOLLOW_UP_MARKERS if re.search(rf"\b{s}\b", normalized)]
+
+    technical_tokens = [t for t in tokens if t in TECH_LEXICAL_ROOTS]
+    numeric_codes = [t for t in tokens if _looks_like_code_or_number(t)]
+
+    fuzzy_brands = []
+    fuzzy_models = []
+    for tok in tokens:
+        if len(tok) < 3:
+            continue
+        try:
+            brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
+            model_match = process.extractOne(tok, _MODELS_NORMALIZED, scorer=fuzz.partial_ratio)
+        except Exception:
+            brand_match = None
+            model_match = None
+
+        if brand_match and brand_match[1] >= 88:
+            fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
+        if model_match and model_match[1] >= 88:
+            fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
+
+    has_technical = bool(
+        technical_tokens
+        or purchase_hits
+        or fuzzy_brands
+        or fuzzy_models
+        or numeric_codes
+    )
+
+    return {
+        "tokens": tokens,
+        "technical_tokens": list(set(technical_tokens)),
+        "purchase_verbs": list(set(purchase_hits)),
+        "brands": list(set(fuzzy_brands)),
+        "models": list(set(fuzzy_models)),
+        "codes": numeric_codes,
+        "social_markers": list(set(social_hits)),
+        "follow_up_markers": list(set(follow_up_hits)),
+        "has_technical": has_technical,
+    }
+
+
+def merge_intents_with_semantics(semantic_signals: dict, llm_intent: str | None) -> list[str]:
+    """Fuse deterministic semantic evidence with the LLM intent guess.
+
+    - If technical entities are present, product_search is mandatory and the
+      social-only path is disabled.
+    - Social/follow_up markers are preserved to build compound replies.
+    - The LLM remains for disambiguation but cannot suppress product intents
+      when evidence is strong.
+    """
+
+    intents: list[str] = []
+
+    if semantic_signals.get("social_markers"):
+        intents.append("social")
+    if semantic_signals.get("follow_up_markers"):
+        intents.append("follow_up")
+    if semantic_signals.get("has_technical"):
+        intents.append("product_search")
+
+    if llm_intent:
+        if llm_intent == "social" and semantic_signals.get("has_technical"):
+            # keep social context but enforce product search
+            if "social" not in intents:
+                intents.append("social")
+        elif llm_intent not in intents:
+            intents.append(llm_intent)
+
+    if not intents:
+        intents.append(llm_intent or "product_search")
+
+    return intents
+
+# ------------------------------------------------------------
 # QUERY PARSING
 # ------------------------------------------------------------
 def parse_query_v2(query: str, phone: str | None = None) -> dict:
@@ -4797,6 +4950,8 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
+    semantic_signals = detect_semantic_entities(user_message)
+
     # ============================================
     # FASE 1: UNDERSTANDING (Template 3.15)
     # ============================================
@@ -4821,21 +4976,24 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     intent = understanding.get("intent") or "product_search"
     entities = understanding.get("entities", {})
 
+    intents_detected = merge_intents_with_semantics(semantic_signals, intent)
+    primary_intent = "product_search" if "product_search" in intents_detected else intents_detected[0]
+
     logger.info(
-        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Semantic intents: {intents_detected} | Corrections: {understanding.get('corrections')}"
     )
 
     # ============================================
     # FASE 2: SKIP LOGIC PARA INTENTS SOCIALES
     # ============================================
-    if intent in ["social", "greeting", "small_talk", "conversation"]:
-        logger.info("[v3.16 - FASE 2] Social intent detected, usando respuesta directa")
-
-        response = complete_template(
+    social_intro = None
+    if "social" in intents_detected:
+        logger.info("[v3.16 - FASE 2] Social markers detected, generando saludo")
+        social_response = complete_template(
             "response_generation",
             {
                 "phone": phone,
-                "intent": intent,
+                "intent": "social",
                 "selected_products": [],
                 "customer_analysis": {
                     "customer_type": "nuevo",
@@ -4853,12 +5011,14 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
                 },
             },
         )
+        social_intro = social_response.get("message", "")
 
-        reply = response.get("message", "¿En qué te puedo ayudar?")
+    if "product_search" not in intents_detected and primary_intent in ["social", "greeting", "small_talk", "conversation"]:
+        reply = social_intro or "¿En qué te puedo ayudar?"
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, intent, 0)
+        log_interaction(phone, user_message, primary_intent, 0)
         log_performance(phone, "social_direct", time.time() - start_time, 0)
-        update_sales_phase_from_intent(phone, intent)
+        update_sales_phase_from_intent(phone, primary_intent)
 
         logger.info(f"[v3.16 - DONE] Social response | Duration: {time.time()-start_time:.2f}s")
         return reply
@@ -4936,7 +5096,8 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     primer_mensaje = len(short_history) == 0
 
     execution_context = {
-        "intent_detected": intent,
+        "intent_detected": primary_intent,
+        "intents_detected": intents_detected,
         "search_query": normalized_query,
         "entities": entities,
     }
@@ -5062,7 +5223,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         "response_generation",
         {
             "phone": phone,
-            "intent": intent,
+            "intent": primary_intent,
             "selected_products": selected_for_template,
             "customer_analysis": sales_analysis,
             "query_context": {
@@ -5079,6 +5240,18 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
 
     reply = response.get("message", "")
     products_cited = response.get("products_cited", [])
+
+    reply_segments = []
+    if social_intro:
+        reply_segments.append(social_intro)
+
+    if "follow_up" in intents_detected and "product_search" in intents_detected:
+        reply_segments.append("Sigo con lo que mencionaste y te comparto opciones:")
+
+    if reply:
+        reply_segments.append(reply)
+
+    reply = "\n\n".join([seg for seg in reply_segments if seg.strip()]) or reply
 
     # ============================================
     # FASE 6: VALIDACIÓN ANTI-ALUCINACIÓN
@@ -5109,9 +5282,9 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
                 send_long_message(phone, chunk_text)
 
     save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, intent, len(selected_for_template))
-    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
-    update_sales_phase_from_intent(phone, intent)
+    log_interaction(phone, user_message, primary_intent, len(selected_for_template))
+    log_performance(phone, primary_intent, time.time() - start_time, len(allowed_products))
+    update_sales_phase_from_intent(phone, primary_intent)
 
     logger.info(f"[v3.16 - DONE] Hybrid architecture complete | Duration: {time.time()-start_time:.2f}s")
 
