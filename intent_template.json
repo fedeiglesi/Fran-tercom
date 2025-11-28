@@ -1,0 +1,12 @@
+{
+  "intents": [
+    {"name": "product_search", "data": {"notes": "", "quantity": 1}},
+    {"name": "cart_action", "data": {"notes": "", "quantity": 1}},
+    {"name": "social", "data": {"notes": "", "quantity": 1}},
+    {"name": "clarification", "data": {"notes": "", "quantity": 1}},
+    {"name": "tech_question", "data": {"notes": "", "quantity": 1}},
+    {"name": "order_flow", "data": {"notes": "", "quantity": 1}},
+    {"name": "follow_up", "data": {"notes": "", "quantity": 1}},
+    {"name": "compare", "data": {"notes": "string", "quantity": 1}}
+  ]
+}
