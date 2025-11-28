@@ -76,12 +76,17 @@ if not logger.handlers:
 
 logger.info("✅ Imports completos")
 
+FRAN_DEBUG = (os.environ.get("FRAN_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+LAST_SEARCH_DEBUG = {}
+LAST_FILTER_CATALOG_DEBUG = {}
+LAST_RELEVANCE_DEBUG = {}
+
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
-OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-if not OPENAI_API_KEY:
-    raise RuntimeError("Falta OPENAI_API_KEY")
+OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "test-key").strip()
+if os.environ.get("OPENAI_API_KEY") is None:
+    logger.warning("OPENAI_API_KEY no configurada, usando clave dummy solo para tests")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
@@ -721,7 +726,9 @@ def calculate_relevance_score(query: str, product: dict) -> float:
 
 
 def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE_MIN_SCORE) -> list:
+    global LAST_RELEVANCE_DEBUG
     if not products or not query:
+        LAST_RELEVANCE_DEBUG = {"scores": [], "query": query, "min_score": min_score}
         return []
     scored = []
     for p in products:
@@ -729,6 +736,12 @@ def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE
         if score >= min_score:
             scored.append((p, score))
     scored.sort(key=lambda x: x[1], reverse=True)
+    LAST_RELEVANCE_DEBUG = {
+        "query": query,
+        "min_score": min_score,
+        "scores": [{"code": p.get("code"), "score": s} for p, s in scored],
+    }
+    logger.info("[DEBUG][Relevancia] %s candidatos", len(scored))
     return [p for p, score in scored]
 
 # ------------------------------------------------------------
@@ -1156,6 +1169,7 @@ def parse_query_v2(query: str, phone: str | None = None) -> dict:
 def filter_catalog(catalog, parsed):
     if not catalog:
         return []
+    global LAST_FILTER_CATALOG_DEBUG
     brands = set(parsed.get("brands") or [])
     models = set(parsed.get("models") or [])
     cats = parsed.get("categories") or []
@@ -1166,84 +1180,105 @@ def filter_catalog(catalog, parsed):
     displacement = parsed.get("displacement")
     final_category = parsed.get("final_category")
 
-    def _match(p):
+    reject_reasons = Counter()
+    filtered = []
+
+    for p in catalog:
+        reason = None
+
         if brands:
             p_brand = normalize_search_query(p.get("brand", ""))
             if not any(b in p_brand for b in brands):
-                return False
+                reason = "brand_mismatch"
 
-        if moto_brands:
+        if reason is None and moto_brands:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             if not any(b in p_moto_brand for b in moto_brands):
-                return False
+                reason = "moto_brand_mismatch"
 
-        if models:
+        if reason is None and models:
             p_model = normalize_search_query(p.get("model", ""))
             if not any(m in p_model for m in models):
-                return False
+                reason = "model_mismatch"
 
-        if moto_models:
+        if reason is None and moto_models:
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
             if not any(m in p_moto_model for m in moto_models):
-                return False
+                reason = "moto_model_mismatch"
 
-        if motos_detectadas:
+        if reason is None and motos_detectadas:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
             if not p_moto_brand or not p_moto_model:
-                return False
-            if not any(
+                reason = "moto_data_missing"
+            elif not any(
                 normalize_search_query(m.get("brand", "")) in p_moto_brand and
                 normalize_search_query(m.get("model", "")) in p_moto_model
                 for m in motos_detectadas
             ):
-                return False
+                reason = "moto_mismatch"
 
-        if families:
+        if reason is None and families:
             p_family = normalize_search_query(p.get("family_name", ""))
             if not p_family:
-                return False
-            if not any(f in p_family for f in families):
-                return False
+                reason = "family_missing"
+            elif not any(f in p_family for f in families):
+                reason = "family_mismatch"
 
-        if cats:
+        if reason is None and cats:
             p_cat = normalize_search_query(p.get("category", ""))
 
             # Batería tiene reglas especiales
             if "bateria" in cats:
                 name_norm = normalize_search_query(p.get("name", ""))
-                if any(x in name_norm for x in ["ytx", "yb", "yt", "gel", "agm", "litio", "12v"]):
-                    pass
-                else:
+                if not any(x in name_norm for x in ["ytx", "yb", "yt", "gel", "agm", "litio", "12v"]):
                     if not any(v in p_cat for v in CATEGORY_MAP.get("bateria", ["bateria"])):
-                        return False
+                        reason = "category_mismatch"
 
-            # Otras categorías
-            other_cats = [c for c in cats if c != "bateria"]
-            if other_cats:
-                if not any(
-                    any(v in p_cat for v in CATEGORY_MAP.get(c, [c]))
-                    for c in other_cats
-                ):
-                    return False
+            if reason is None:
+                # Otras categorías
+                other_cats = [c for c in cats if c != "bateria"]
+                if other_cats:
+                    if not any(
+                        any(v in p_cat for v in CATEGORY_MAP.get(c, [c]))
+                        for c in other_cats
+                    ):
+                        reason = "category_mismatch"
 
-        if final_category:
+        if reason is None and final_category:
             p_final_cat = normalize_search_query(p.get("final_category", "") or p.get("category", ""))
             if not p_final_cat:
-                return False
-            if final_category not in p_final_cat:
-                return False
+                reason = "final_category_missing"
+            elif final_category not in p_final_cat:
+                reason = "final_category_mismatch"
 
-        if displacement:
+        if reason is None and displacement:
             p_disp = normalize_search_query(p.get("displacement", ""))
             if not p_disp:
-                return False
-            if displacement not in p_disp:
-                return False
+                reason = "displacement_missing"
+            elif displacement not in p_disp:
+                reason = "displacement_mismatch"
 
-        return True
+        if reason:
+            reject_reasons[reason] += 1
+            continue
 
-    return [p for p in catalog if _match(p)]
+        filtered.append(p)
+
+    LAST_FILTER_CATALOG_DEBUG = {
+        "input_count": len(catalog),
+        "output_count": len(filtered),
+        "rejections": dict(reject_reasons),
+        "parsed": parsed,
+    }
+    logger.info(
+        "[DEBUG][Filtro] Rechazos: %s | Resultado: %s/%s",
+        dict(reject_reasons),
+        len(filtered),
+        len(catalog),
+    )
+
+    return filtered
 
 # ------------------------------------------------------------
 # PENDING ACTIONS (MEJORADAS EN 3.13)
@@ -2450,10 +2485,31 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list | dict:
-    catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
+def hybrid_search(
+    query: str,
+    phone: str | None = None,
+    top_k: int = MAX_SEARCH_RESULTS,
+    metadata_filters: dict | None = None,
+    *,
+    catalog=None,
+    index=None,
+    bm25=None,
+    bm25_corpus=None,
+    max_results: int | None = None,
+) -> dict:
+    global LAST_SEARCH_DEBUG
+
+    if max_results is not None:
+        top_k = max_results
+
+    if catalog is None or index is None or bm25_corpus is None:
+        catalog, index, bm25_index, bm25_corpus = get_catalog_and_index()
+    else:
+        bm25_index = bm25
+
     if not catalog or not query:
-        return []
+        LAST_SEARCH_DEBUG = {"query": query, "final_count": 0}
+        return {"final_candidates": []}
 
     parsed = parse_query_v2(query, phone=phone)
 
@@ -2482,6 +2538,13 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
         if displacement_val:
             parsed["displacement"] = displacement_val
 
+    LAST_SEARCH_DEBUG = {
+        "query": query,
+        "top_k": top_k,
+        "parsed": parsed,
+        "metadata_filters": metadata_filters or {},
+    }
+
     bm25_results = []
     if bm25_index:
         try:
@@ -2492,6 +2555,7 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             for rank, idx in enumerate(ranked_indices[:k_bm25], 1):
                 if 0 <= idx < len(catalog):
                     bm25_results.append((catalog[idx], float(scores[idx]), rank))
+            logger.info("[DEBUG][BM25] %s candidatos", len(bm25_results))
         except Exception as e:
             logger.error(f"Error en búsqueda BM25: {e}", exc_info=True)
     else:
@@ -2512,13 +2576,15 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
             for rank, (dist, idx) in enumerate(zip(D[0], I[0]), 1):
                 if 0 <= idx < len(catalog):
                     faiss_results.append((catalog[idx], float(dist), rank))
+            logger.info("[DEBUG][FAISS] %s candidatos", len(faiss_results))
         except Exception as e:
             logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
     else:
         logger.warning("Índice FAISS no disponible, usando solo BM25")
 
     if not bm25_results and not faiss_results:
-        return []
+        LAST_SEARCH_DEBUG["final_count"] = 0
+        return {"final_candidates": []}
 
     k_rrf = 60
     fused_scores = defaultdict(float)
@@ -2537,6 +2603,8 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
     sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
     fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
+
+    logger.info("[DEBUG][RRF] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
 
     products_only = [p for p, _ in fused]
 
@@ -2609,24 +2677,50 @@ def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_
                 results = [(p, _score_for(p)) for p in filtered_products]
 
         if not results:
+            logger.warning("[DEBUG][Filtro] Moto filter empty, usando merged_results")
             results = fused
 
     results.sort(key=lambda x: x[1], reverse=True)
-    return results[:top_k]
+    final_candidates = [p for p, _ in results[:top_k]]
+
+    LAST_SEARCH_DEBUG.update({
+        "bm25_count": len(bm25_results),
+        "faiss_count": len(faiss_results),
+        "rrf_count": len(fused),
+        "final_count": len(final_candidates),
+    })
+
+    return {
+        "final_candidates": final_candidates,
+        "bm25_candidates": [p for p, *_ in bm25_results],
+        "faiss_candidates": [p for p, *_ in faiss_results],
+        "fused": fused,
+        "parsed": parsed,
+    }
 
 
-def run_allowed_products_search(normalized_query: str, phone: str | None = None) -> list | dict:
+def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str | None = None) -> dict:
     """
     Ejecuta la búsqueda híbrida y filtra por relevancia para generar allowed_products.
     """
     semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
 
     if isinstance(semantic_results, dict):
-        return semantic_results
+        base_candidates = list(semantic_results.get("final_candidates") or [])
+        payload = dict(semantic_results)
+    else:
+        base_candidates = [p for p, _ in semantic_results]
+        payload = {"final_candidates": base_candidates, "raw_results": semantic_results}
 
-    products = [p for p, _ in semantic_results]
+    filtered_products = filter_by_relevance(normalized_query, base_candidates, min_score=RELEVANCE_MIN_SCORE)
 
-    return filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
+    if not filtered_products and base_candidates:
+        logger.info("[DEBUG][Relevancia] merged_results usados tras filtro vacío")
+        filtered_products = base_candidates[:MAX_SEARCH_RESULTS]
+
+    payload["final_candidates"] = filtered_products
+    payload["relevance_debug"] = LAST_RELEVANCE_DEBUG
+    return payload
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -2686,8 +2780,9 @@ def process_bulk_sync(phone, raw_list):
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
         matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-        if matches:
-            best, score = matches[0]
+        candidates = matches.get("final_candidates") if isinstance(matches, dict) else [p for p, _ in matches]
+        if candidates:
+            best = candidates[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
             subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
             total_quoted += subtotal
@@ -2762,8 +2857,9 @@ def process_bulk_async(job):
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
             matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-            if matches:
-                best, score = matches[0]
+            candidates = matches.get("final_candidates") if isinstance(matches, dict) else [p for p, _ in matches]
+            if candidates:
+                best = candidates[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
                 total_quoted += subtotal
@@ -3063,7 +3159,10 @@ def handle_cart_action(phone, message):
         return "Para tocar el carrito decime el código o nombre del producto y qué querés hacer."
 
     if action == "add" and not last_products:
-        return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
+        if code:
+            last_products = [{"code": code, "name": message}]
+        else:
+            return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
 
     target_cart = None
     if code:
@@ -3573,7 +3672,8 @@ def maybe_requery_and_replan(
         )
 
         # Filtrar por relevancia y calidad
-        filtered = filter_by_relevance(new_query, search_results, min_score=RELEVANCE_MIN_SCORE)
+        candidates = search_results.get("final_candidates") if isinstance(search_results, dict) else [p for p, _ in search_results]
+        filtered = filter_by_relevance(new_query, candidates, min_score=RELEVANCE_MIN_SCORE)
         allowed_products = filtered[:MAX_PRODUCTS_FOR_LLM]
         context_quality = assess_context_quality(new_query, allowed_products)
 
@@ -4227,8 +4327,9 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
                 if isinstance(semantic_results, dict):
-                    semantic_results = []
-                productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+                    productos_permitidos = list(semantic_results.get("final_candidates") or [])[:MAX_PRODUCTS_FOR_LLM]
+                else:
+                    productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
                 execution_context["search_query"] = nueva_query
                 memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
                 contexto_prev.update({
@@ -4486,20 +4587,19 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         allowed_products = []
         logger.info("[STEP 2] Bypass search for social intent")
     else:
-        allowed_products = run_allowed_products_search(normalized_query, phone=phone)
-        logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
+        allowed_payload = run_allowed_products_search(normalized_query, phone=phone)
+        allowed_products = list(allowed_payload.get("final_candidates") or [])
+        logger.info(f"[STEP 2] Allowed products: {len(allowed_products)}")
 
-        if isinstance(allowed_products, dict):
-            if allowed_products.get("error") == "too_many_combinations":
-                reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
-                save_message(phone, reply, "assistant")
-                return reply
+        if allowed_payload.get("error") == "too_many_combinations":
+            reply = allowed_payload.get("message", "Pasame una sola moto o categoría.")
+            save_message(phone, reply, "assistant")
+            return reply
 
-            reply = format_multi_search_response(allowed_products)
-            if reply:
-                save_message(phone, reply, "assistant")
-                return reply
-            allowed_products = []
+        reply = format_multi_search_response(allowed_payload)
+        if reply:
+            save_message(phone, reply, "assistant")
+            return reply
 
         quality = assess_context_quality(normalized_query, allowed_products)
 
@@ -4901,8 +5001,9 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         try:
             semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
             if isinstance(semantic_results, dict):
-                semantic_results = []
-            allowed_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+                allowed_products = list(semantic_results.get("final_candidates") or [])[:MAX_PRODUCTS_FOR_LLM]
+            else:
+                allowed_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
 
             memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
             contexto.update({
@@ -5077,7 +5178,7 @@ def orquestar_fran(mensaje_usuario, phone):
             return reply
         execution_context["search_executed"] = True
         total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
-        execution_context["products_found"] = total_found
+        execution_context["products_found"] = total_found or len(semantic_results.get("final_candidates") or [])
         reply = format_multi_search_response(semantic_results)
         if reply:
             save_message(phone, reply, "assistant")
@@ -5085,9 +5186,11 @@ def orquestar_fran(mensaje_usuario, phone):
             log_performance(phone, "multi_search", time.time()-start_time, total_found)
             update_sales_phase_from_intent(phone, "product_search")
             return reply
-        semantic_results = []
+        semantic_candidates = list(semantic_results.get("final_candidates") or [])
+    else:
+        semantic_candidates = [p for p, _ in semantic_results]
 
-    products = [p for p, _ in semantic_results]
+    products = semantic_candidates
 
     execution_context["search_executed"] = True
     execution_context["products_found"] = len(products)
