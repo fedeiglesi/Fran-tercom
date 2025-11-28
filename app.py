@@ -1,13 +1,26 @@
 # =========================================================
-# Fran 3.14 – Bot Mayorista Inteligente
+# Fran 3.16 – Bot Mayorista Inteligente (Arquitectura Híbrida)
 # =========================================================
-# Basado en Fran 3.12/3.13 (estructura completa que pasó tests),
-# con mejoras:
-# - Doble llamada al LLM: razonamiento interno + respuesta final
-# - Orquestador único (orquestar_fran) para todo el flujo de conversación
-# - Plan interno estructurado y validación de búsqueda con reintento guiado
-# - Se mantiene toda la infraestructura previa (FAISS+BM25, familias,
-#   pending actions, fases, post-validaciones, chunks, etc.)
+# Combina lo mejor de Fran 3.14 y 3.15 en una arquitectura unificada:
+#
+# ARQUITECTURA HÍBRIDA:
+# - Templates estructurados (3.15) para Understanding y Response
+# - Intent detection temprano con skip logic para intents sociales
+# - Razonamiento explícito con re-query capability (3.14)
+# - Structured Outputs nativos de OpenAI
+# - Fallbacks automáticos por fase
+#
+# VERSIONES DISPONIBLES (A/B/C Testing):
+# - Fran 3.16: Arquitectura híbrida (40% de usuarios)
+# - Fran 3.15: Templates estructurados (30% de usuarios)
+# - Fran 3.14: Doble LLM con reasoning (30% de usuarios)
+#
+# INFRAESTRUCTURA COMPARTIDA:
+# - Búsqueda híbrida FAISS+BM25 con RRF
+# - Memory enrichment y contexto de conversación
+# - Validación anti-alucinación en dos capas
+# - Circuit breakers y observabilidad
+# - Manejo de listas masivas y chunks para WhatsApp
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -535,16 +548,48 @@ REGLAS:
 
 def should_use_v315(phone: str) -> bool:
     """
-    Decidir si usar Fran 3.15 o 3.14 (rollout gradual)
+    DEPRECATED: Usar get_orchestrator_version() en su lugar.
+    Mantenido para compatibilidad hacia atrás.
     """
-    if os.environ.get("USE_FRAN_315", "false").lower() == "true":
-        return True
+    version = get_orchestrator_version(phone)
+    return version == "3.15"
 
+
+def get_orchestrator_version(phone: str) -> str:
+    """
+    Determina qué versión del orquestador usar: "3.14", "3.15", o "3.16"
+
+    Estrategia de rollout:
+    - USE_FRAN_316=true → todos a 3.16
+    - USE_FRAN_315=true → todos a 3.15
+    - BETA_PHONES → 3.16
+    - Hash-based split: 40% → 3.16, 30% → 3.15, 30% → 3.14
+
+    Returns:
+        str: "3.14", "3.15", o "3.16"
+    """
+    # Force v3.16 globally
+    if os.environ.get("USE_FRAN_316", "false").lower() == "true":
+        return "3.16"
+
+    # Force v3.15 globally
+    if os.environ.get("USE_FRAN_315", "false").lower() == "true":
+        return "3.15"
+
+    # Beta phones get v3.16
     beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
     if beta_phones and phone in beta_phones:
-        return True
+        return "3.16"
 
-    return int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100 < 50
+    # Hash-based A/B/C split (40% v3.16, 30% v3.15, 30% v3.14)
+    phone_hash = int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100
+
+    if phone_hash < 40:
+        return "3.16"  # 40% get hybrid architecture
+    elif phone_hash < 70:
+        return "3.15"  # 30% get templates
+    else:
+        return "3.14"  # 30% get dual LLM
 
 # ------------------------------------------------------------
 # UTILS
@@ -4621,6 +4666,357 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     return reply
 
 # =========================================================
+# ORQUESTADOR FRAN – VERSIÓN 3.16 (ARQUITECTURA HÍBRIDA)
+# =========================================================
+def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
+    """
+    Orquestador híbrido que combina lo mejor de Fran 3.14 y 3.15.
+
+    ARQUITECTURA:
+    1. Understanding con Template estructurado (3.15)
+    2. Intent detection temprano con skip logic para sociales
+    3. Búsqueda híbrida (compartida)
+    4. Reasoning con re-query capability (3.14)
+    5. Response con Template estructurado (3.15)
+    6. Validación anti-alucinación (compartida)
+
+    VENTAJAS:
+    - Structured outputs nativos (más rápido, confiable)
+    - Razonamiento explícito para casos complejos
+    - Re-búsqueda adaptativa
+    - Skip de reasoning para intents sociales (optimización de latencia y costo)
+    - Fallbacks automáticos por fase
+    """
+    start_time = time.time()
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+
+    if not rate_limit_check(phone):
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    save_message(phone, user_message, "user")
+
+    # ============================================
+    # FASE 1: UNDERSTANDING (Template 3.15)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 1] Understanding query: {user_message}")
+
+    understanding = complete_template(
+        "query_understanding",
+        {
+            "phone": phone,
+            "user_message": user_message,
+            "conversation_history": get_history_since(phone, days=1, limit=5),
+            "last_search_query": (get_last_search(phone) or {}).get("query", "")
+        },
+    )
+
+    if understanding.get("needs_clarification"):
+        reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
+        save_message(phone, reply, "assistant")
+        return reply
+
+    normalized_query = understanding.get("normalized_query") or user_message
+    intent = understanding.get("intent") or "product_search"
+    entities = understanding.get("entities", {})
+
+    logger.info(
+        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+    )
+
+    # ============================================
+    # FASE 2: SKIP LOGIC PARA INTENTS SOCIALES
+    # ============================================
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        logger.info("[v3.16 - FASE 2] Social intent detected, usando respuesta directa")
+
+        response = complete_template(
+            "response_generation",
+            {
+                "phone": phone,
+                "intent": intent,
+                "selected_products": [],
+                "customer_analysis": {
+                    "customer_type": "nuevo",
+                    "interest_level": "bajo",
+                    "key_arguments": []
+                },
+                "query_context": {
+                    "original": user_message,
+                    "normalized": normalized_query,
+                    "corrections": understanding.get("corrections", []),
+                },
+                "conversation_state": {
+                    "sales_phase": get_sales_phase(phone),
+                    "cart_total": format_price(cart_totals(phone)[0]),
+                },
+            },
+        )
+
+        reply = response.get("message", "¿En qué te puedo ayudar?")
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, intent, 0)
+        log_performance(phone, "social_direct", time.time() - start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
+
+        logger.info(f"[v3.16 - DONE] Social response | Duration: {time.time()-start_time:.2f}s")
+        return reply
+
+    # ============================================
+    # FASE 3: BÚSQUEDA HÍBRIDA (compartida)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 3] Hybrid search for product intent...")
+
+    allowed_products = run_allowed_products_search(normalized_query, phone=phone)
+    logger.info(f"[v3.16 - FASE 3] Found: {len(allowed_products) if isinstance(allowed_products, list) else 'multi-search'}")
+
+    if isinstance(allowed_products, dict):
+        if allowed_products.get("error") == "too_many_combinations":
+            reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
+            save_message(phone, reply, "assistant")
+            return reply
+
+        reply = format_multi_search_response(allowed_products)
+        if reply:
+            save_message(phone, reply, "assistant")
+            return reply
+        allowed_products = []
+
+    quality = assess_context_quality(normalized_query, allowed_products)
+
+    if not quality["sufficient"]:
+        if quality["action"] == "ask_clarification":
+            reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
+        else:
+            top_products = quality.get("top_products", [])[:3]
+            suggestions = "\n".join(
+                [
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in top_products
+                ]
+            )
+            reply = (
+                "No encontré coincidencia perfecta. Tengo:\n\n"
+                f"{suggestions}\n\n"
+                "¿Te sirve alguna o dame más detalles?"
+            )
+
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
+        log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
+        return reply
+
+    save_last_search(
+        phone,
+        [
+            {
+                "code": p["code"],
+                "name": p.get("name", ""),
+                "price_ars": p.get("price_ars"),
+                "price_usd": p.get("price_usd"),
+                "qty": 1,
+            }
+            for p in allowed_products[:150]
+        ],
+        normalized_query,
+    )
+
+    logger.info(f"[v3.16 - FASE 3] Quality: {quality.get('confidence')} | Products: {len(allowed_products)}")
+
+    # ============================================
+    # FASE 4: REASONING CON RE-QUERY (estilo 3.14)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 4] Internal reasoning with re-query capability...")
+
+    history = get_history_since(phone, days=1, limit=12)
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
+        history = history[:-1]
+    short_history = history[-8:]
+    primer_mensaje = len(short_history) == 0
+
+    execution_context = {
+        "intent_detected": intent,
+        "search_query": normalized_query,
+        "entities": entities,
+    }
+
+    memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
+
+    contexto = {
+        "mensaje_usuario": user_message,
+        "search_query": normalized_query,
+        "historial": [{"role": h["role"], "content": h["content"]} for h in short_history],
+        "metadata_catalogo": {"productos_total": len(allowed_products or [])},
+        "memoria_viva": memory,
+        "pending_actions": memory.get("pending_action"),
+        "cart_state": memory.get("cart_state", []),
+        "most_recent_bike": memory.get("most_recent_bike", ""),
+    }
+
+    # Análisis comercial
+    historial_comercial = short_history[-6:] if short_history else []
+    conversacion_completa = [h.get("content", "") for h in historial_comercial]
+
+    sales_result = run_sales_analysis_llm(
+        conversacion_completa=conversacion_completa,
+        productos_disponibles=allowed_products,
+        contexto_cliente=memory,
+        perfil_cliente=memory.get("perfil_cliente", {}),
+    )
+
+    parsed_sales = sales_result or {}
+    sales = parsed_sales.get("sales_analysis", {}) or {}
+
+    sales_analysis = {
+        "tipo_de_cliente": sales.get("tipo_de_cliente", ""),
+        "nivel_de_interes": sales.get("nivel_de_interes", "medio"),
+        "senales_de_cierre": sales.get("senales_de_cierre", []),
+        "producto_recomendado": sales.get("producto_recomendado", ""),
+        "argumentos_clave": sales.get("argumentos_clave", []),
+        "alternativas_seguras": sales.get("alternativas_seguras", []),
+        "tono_sugerido": sales.get("tono_sugerido", "concise"),
+        "nivel_de_confianza": float(sales.get("nivel_de_confianza", 0.0) or 0.0),
+    }
+
+    contexto["sales_analysis"] = sales_analysis
+
+    # Razonamiento interno
+    plan_interno = pensar_con_llm(
+        PLANNING_UNIFIED_PROMPT,
+        contexto,
+        allowed_products[:MAX_PRODUCTS_FOR_LLM],
+    )
+
+    parsed_plan = validate_reasoning_json(plan_interno, allowed_products[:MAX_PRODUCTS_FOR_LLM])
+
+    # Re-query si es necesario (capacidad de 3.14)
+    max_requery_attempts = 1
+    requery_count = 0
+    while parsed_plan and parsed_plan.get("requery", {}).get("NEED_REQUERY") and requery_count < max_requery_attempts:
+        requery_count += 1
+        nueva_query = parsed_plan.get("requery", {}).get("new_query")
+        logger.info(f"[v3.16 - FASE 4] Re-query triggered: {nueva_query}")
+
+        try:
+            semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+            if isinstance(semantic_results, dict):
+                semantic_results = []
+            allowed_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
+
+            memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
+            contexto.update({
+                "search_query": nueva_query,
+                "memoria_viva": memory,
+                "metadata_catalogo": {"productos_total": len(allowed_products)},
+                "cart_state": memory.get("cart_state", []),
+            })
+
+            plan_interno = pensar_con_llm(
+                PLANNING_UNIFIED_PROMPT,
+                contexto,
+                allowed_products,
+            )
+            parsed_plan = validate_reasoning_json(plan_interno, allowed_products)
+        except Exception as e:
+            logger.error(f"Error en re-query: {e}")
+            break
+
+    if not parsed_plan:
+        logger.warning("[v3.16 - FASE 4] Plan parsing failed, usando fallback")
+        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
+        save_message(phone, reply, "assistant")
+        return reply
+
+    # Ejecutar plan
+    plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, allowed_products[:MAX_PRODUCTS_FOR_LLM])
+
+    if not plan_ejecutado:
+        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
+        save_message(phone, reply, "assistant")
+        return reply
+
+    productos_finales = plan_ejecutado.get("productos_finales", [])
+    customer_state = plan_ejecutado.get("customer_state", {})
+
+    logger.info(f"[v3.16 - FASE 4] Reasoning complete | Selected: {len(productos_finales)} products")
+
+    # ============================================
+    # FASE 5: RESPONSE GENERATION (Template 3.15)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 5] Generating response with template...")
+
+    # Convertir productos_finales a formato para template
+    selected_for_template = [
+        {
+            "code": p.get("code", ""),
+            "reason": p.get("razon", ""),
+            "rank": p.get("rol", "principal"),
+            "compatibility": 1.0 if p.get("rol") == "principal" else 0.8
+        }
+        for p in productos_finales
+    ]
+
+    response = complete_template(
+        "response_generation",
+        {
+            "phone": phone,
+            "intent": intent,
+            "selected_products": selected_for_template,
+            "customer_analysis": sales_analysis,
+            "query_context": {
+                "original": user_message,
+                "normalized": normalized_query,
+                "corrections": understanding.get("corrections", []),
+            },
+            "conversation_state": {
+                "sales_phase": get_sales_phase(phone),
+                "cart_total": format_price(cart_totals(phone)[0]),
+            },
+        },
+    )
+
+    reply = response.get("message", "")
+    products_cited = response.get("products_cited", [])
+
+    # ============================================
+    # FASE 6: VALIDACIÓN ANTI-ALUCINACIÓN
+    # ============================================
+    logger.info(f"[v3.16 - FASE 6] Anti-hallucination validation...")
+
+    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    hallucinated = set(products_cited) - allowed_codes
+
+    if hallucinated:
+        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
+        reply = format_search_results(allowed_products[:5])
+        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
+
+    # Manejar productos restantes (chunks)
+    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
+        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
+        if remaining_products:
+            chunks = [
+                remaining_products[i : i + PRODUCTS_PER_CHUNK]
+                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
+            ]
+
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
+                chunk_text += format_search_results(chunk)
+                time.sleep(0.5)
+                send_long_message(phone, chunk_text)
+
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, intent, len(selected_for_template))
+    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
+    update_sales_phase_from_intent(phone, intent)
+
+    logger.info(f"[v3.16 - DONE] Hybrid architecture complete | Duration: {time.time()-start_time:.2f}s")
+
+    return reply
+
+# =========================================================
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
 # =========================================================
 def orquestar_fran(mensaje_usuario, phone):
@@ -4872,9 +5268,15 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        if should_use_v315(from_number):
+        # A/B/C routing entre versiones 3.14, 3.15 y 3.16
+        version = get_orchestrator_version(from_number)
+        logger.info(f"Using orchestrator version: {version} for {from_number}")
+
+        if version == "3.16":
+            reply = orquestar_fran_v316(message_body, from_number)
+        elif version == "3.15":
             reply = orquestar_fran_v315(message_body, from_number)
-        else:
+        else:  # 3.14
             reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
@@ -4907,9 +5309,14 @@ def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.14",
+        "version": "3.16",
         "catalog_size": len(catalog) if catalog else 0,
-        "architecture": "claude_inspired_families_hybrid_intents_context_v2",
+        "architecture": "hybrid_templates_reasoning_v316",
+        "orchestrators": {
+            "v3.16": "hybrid (templates + reasoning + re-query)",
+            "v3.15": "structured templates",
+            "v3.14": "dual LLM reasoning"
+        },
         "features": [
             "context_quality_check",
             "relevance_scoring",
