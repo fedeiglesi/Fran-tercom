@@ -135,7 +135,7 @@ QUERY_UNDERSTANDING_SCHEMA = {
 
     Reglas críticas:
     - Siempre devolvé intents como array de objetos.
-    - type SOLO puede ser: product_search, cart_action, social, clarification, tech_question, order_flow.
+    - type SOLO puede ser: product_search, compare, cart_action, checkout, clarification, general_chat.
     - span es obligatorio y debe copiar literalmente el fragmento original.
     - confidence es una probabilidad 0.0–1.0 basada en comprensión semántica.
     - data incluye solo datos estructurados útiles (query, product, brand, model,
@@ -158,13 +158,11 @@ QUERY_UNDERSTANDING_SCHEMA = {
                             "type": "string",
                             "enum": [
                                 "product_search",
-                                "cart_action",
-                                "social",
-                                "clarification",
-                                "tech_question",
-                                "follow_up",
-                                "order_flow",
                                 "compare",
+                                "cart_action",
+                                "checkout",
+                                "clarification",
+                                "general_chat",
                             ],
                         },
                         "span": {"type": "string"},
@@ -278,7 +276,7 @@ RESPONSE_GENERATION_SCHEMA = {
     "description": """
     Generá la respuesta final para WhatsApp como Fran.
 
-    SI EL INTENT ES "social":
+    SI EL INTENT ES "general_chat":
     - No generes listados ni pidas marca/modelo/año.
     - Respondé en tono humano, cálido, vendedor mayorista real.
     - La respuesta debe ser breve (1–3 líneas).
@@ -1489,9 +1487,11 @@ def set_sales_phase(phone, phase):
 def update_sales_phase_from_intent(phone, intent):
     phase_map = {
         "product_search": "search",
+        "compare": "search",
         "cart_action": "cart",
         "view_cart": "cart",
         "order_flow": "checkout",
+        "checkout": "checkout",
         "payment": "payment",
         "shipping": "shipping",
         "tech_expert": "advice",
@@ -2010,6 +2010,87 @@ def clear_memory(phone):
             conn.execute("DELETE FROM memory_index WHERE phone=?", (phone,))
     except Exception as e:
         logger.error(f"clear_memory error: {e}")
+
+
+def default_context():
+    return {
+        "last_intent": "",
+        "last_query": "",
+        "last_products": [],
+        "last_compare_products": [],
+        "last_cart_action": "",
+        "cart_state": [],
+        "last_motorcycle_detected": "",
+        "timestamp": datetime.now().isoformat(),
+        "order_closed_at": None,
+    }
+
+
+def _normalize_context(ctx: dict) -> dict:
+    base = default_context()
+    if not isinstance(ctx, dict):
+        return base
+    merged = {**base, **ctx}
+    for key in ("last_products", "last_compare_products", "cart_state"):
+        if merged.get(key) is None:
+            merged[key] = []
+    if merged.get("timestamp") is None:
+        merged["timestamp"] = datetime.now().isoformat()
+    return merged
+
+
+def load_context(phone: str, last_7_days: bool = True) -> dict:
+    if not phone:
+        return default_context()
+    try:
+        cutoff = (datetime.now() - timedelta(days=7)).isoformat()
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            if last_7_days:
+                cur.execute(
+                    """
+                    SELECT data_json, timestamp FROM memory
+                    WHERE phone=? AND timestamp >= ?
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    (phone, cutoff),
+                )
+            else:
+                cur.execute(
+                    "SELECT data_json, timestamp FROM memory WHERE phone=? ORDER BY timestamp DESC LIMIT 1",
+                    (phone,),
+                )
+            row = cur.fetchone()
+            if not row:
+                ctx = default_context()
+                logger.info(f"[MEMORY] Loaded context: {ctx}")
+                return ctx
+            loaded = json.loads(row[0]) if row[0] else {}
+            ctx = _normalize_context(loaded)
+            logger.info(f"[MEMORY] Loaded context: {ctx}")
+            return ctx
+    except Exception as e:
+        logger.error(f"load_context error: {e}")
+        ctx = default_context()
+        logger.info(f"[MEMORY] Loaded context: {ctx}")
+        return ctx
+
+
+def save_context(phone: str, context: dict):
+    if not phone:
+        return
+    try:
+        ctx = _normalize_context(context or {})
+        ctx["timestamp"] = datetime.now().isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO memory (phone, data_json, timestamp) VALUES (?, ?, ?)",
+                (phone, json.dumps(ctx, ensure_ascii=False), ctx["timestamp"]),
+            )
+        logger.info(f"[MEMORY] Updated context: {ctx}")
+    except Exception as e:
+        logger.error(f"save_context error: {e}")
 
 
 def get_history_since(phone, days=7, limit=2000):
@@ -3429,7 +3510,7 @@ def find_product_by_code_in_catalog(code: str):
     return next((p for p in catalog if str(p.get("code", "")).strip() == target), None)
 
 
-def handle_cart_action(phone, message):
+def handle_cart_action(phone, message, context_products=None):
     msg_norm = strip_accents((message or "")).lower()
     if not msg_norm:
         return "Necesito que me indiques qué producto toco del carrito."
@@ -3441,7 +3522,7 @@ def handle_cart_action(phone, message):
     ]
 
     last_search = get_last_search(phone) or {}
-    last_products = last_search.get("products") or []
+    last_products = context_products or last_search.get("products") or []
 
     code = extract_code_from_text(message)
     explicit_qty = bool(EXPLICIT_QTY_PATTERN.search(msg_norm))
@@ -4925,6 +5006,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
+    context = load_context(phone, last_7_days=True)
+
     if not is_llm_available():
         reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
         save_message(phone, reply, "assistant")
@@ -4948,31 +5031,40 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         or (intents[0].get("span") if intents else user_message)
         or user_message
     )
-    normalized_lower = (normalized_candidate or "").lower()
+    normalized_lower = strip_accents((normalized_candidate or "").lower())
+    heuristics_intent = None
+
+    if any(w in normalized_lower for w in ["compar", "vs", "versus", "diferencia", "cual conviene", "cuál conviene"]):
+        heuristics_intent = "compare"
+    elif any(w in normalized_lower for w in ["medida", "stock", "compatibles", "cuanto", "cuánto"]):
+        heuristics_intent = "clarification"
+    elif re.search(r"\bsku\b", normalized_lower) or "agregame" in normalized_lower or re.search(r"\d{4}/\d{5}-\d{3}", normalized_lower):
+        heuristics_intent = "cart_action"
+    elif any(w in normalized_lower for w in ["cerrar", "listo", "enviame total", "enviame el total"]):
+        heuristics_intent = "checkout"
+
+    allowed_types = {"product_search", "compare", "cart_action", "checkout", "clarification", "general_chat"}
 
     updated_intents = []
     for intent in intents:
         data = intent.get("data", {}) or {}
         intent_name = intent.get("type") or ""
 
-        if intent_name in {"clarification", "tech_question", "follow_up"}:
-            if any(
-                w in normalized_lower
-                for w in [
-                    "compar",
-                    "comparame",
-                    "compará",
-                    "diferencia",
-                    "distinto",
-                    "vs",
-                    "versus",
-                    "cuál conviene",
-                ]
-            ):
-                intent_name = "compare"
-                intent["type"] = "compare"
-                data["notes"] = normalized_candidate
-                data["quantity"] = 1
+        if intent_name == "social":
+            intent_name = "general_chat"
+        elif intent_name in {"tech_question", "follow_up"}:
+            intent_name = "clarification"
+        elif intent_name == "order_flow":
+            intent_name = "checkout"
+
+        if heuristics_intent and intent_name not in allowed_types:
+            intent_name = heuristics_intent
+
+        if intent_name not in allowed_types:
+            intent_name = heuristics_intent or "general_chat"
+
+        if heuristics_intent and intent_name in {"clarification", "general_chat"}:
+            intent_name = heuristics_intent
 
         if "notes" not in data or data.get("notes") is None:
             data["notes"] = ""
@@ -4981,14 +5073,27 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             data["quantity"] = 1
 
         intent["data"] = data
-        intent["type"] = intent_name or intent.get("type")
+        intent["type"] = intent_name or "general_chat"
         updated_intents.append(intent)
 
     intents = updated_intents
+    if not intents:
+        intents = [
+            {
+                "type": heuristics_intent or "general_chat",
+                "span": user_message,
+                "confidence": 0.5,
+                "data": {"notes": "", "quantity": 1},
+            }
+        ]
+
     understanding["intents"] = intents
 
-    primary_intent = intents[0].get("type") if intents else "product_search"
+    primary_intent = intents[0].get("type") if intents else "general_chat"
+    if not primary_intent:
+        primary_intent = "general_chat"
     primary_span = intents[0].get("span") if intents else user_message
+    logger.info(f"[INTENT] Assigned intent={primary_intent}")
 
     if understanding.get("needs_clarification"):
         reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
@@ -4998,6 +5103,15 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     normalized_query = understanding.get("normalized_query") or (
         primary_span if primary_intent == "product_search" else user_message
     )
+
+    moto_detected = ""
+    try:
+        parsed_query = parse_query_v2(normalized_query, phone=phone)
+        if parsed_query.get("motos_detectadas"):
+            moto = parsed_query.get("motos_detectadas")[0]
+            moto_detected = f"{moto.get('brand', '')} {moto.get('model', '')}".strip()
+    except Exception:
+        moto_detected = context.get("last_motorcycle_detected", "")
 
     logger.info(
         f"[STEP 1] Normalized: '{normalized_query}' | Intent: {primary_intent} | Corrections: {understanding.get('corrections')}"
@@ -5024,12 +5138,25 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     logger.info(f"[STEP 2] Searching products...")
 
     candidates: list = []
+    selected_products: list = []
+    selection: dict = {"selected_products": [], "analysis": {}}
+    reply: str | None = None
     search_results: dict | list = {}
 
     use_memory = True
+    context_products = context.get("last_products") or []
+    if context_products:
+        recent_products = context_products + recent_products
+        deduped_recent = {}
+        for p in recent_products:
+            key = p.get("code") or p.get("codigo") or p.get("name")
+            if key:
+                deduped_recent[key] = p
+        recent_products = list(deduped_recent.values())
 
-    if primary_intent == "social":
-        logger.info("[STEP 2] Bypass search for social intent")
+    if primary_intent == "general_chat":
+        logger.info("[STEP 2] Bypass search for general chat intent")
+        reply = handle_general_chat_intent({"span": user_message}, phone, context)
     elif primary_intent == "product_search":
         search_results = hybrid_search(
             normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS, intent=primary_intent
@@ -5045,38 +5172,36 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         if isinstance(search_results, dict):
             if search_results.get("error") == "too_many_combinations":
                 reply = search_results.get("message", "Pasame una sola moto o categoría.")
-                save_message(phone, reply, "assistant")
-                return reply
-
-            reply = format_multi_search_response(search_results)
-            if reply:
-                save_message(phone, reply, "assistant")
-                return reply
-            candidates = search_results.get("final_candidates", [])
+            else:
+                formatted = format_multi_search_response(search_results)
+                if formatted:
+                    reply = formatted
+                candidates = search_results.get("final_candidates", [])
         else:
             candidates = search_results or []
             search_results = {"final_candidates": candidates, "final_results": candidates}
 
         logger.info(f"[STEP 2] Final candidates: {len(candidates)}")
 
-        save_last_search(
-            phone,
-            [
-                {
-                    "code": p.get("code", ""),
-                    "name": p.get("name", ""),
-                    "price_ars": p.get("price_ars"),
-                    "price_usd": p.get("price_usd"),
-                    "qty": 1,
-                }
-                for p in candidates[:MAX_ITEMS]
-            ],
-            normalized_query,
-        )
+        if candidates:
+            save_last_search(
+                phone,
+                [
+                    {
+                        "code": p.get("code", ""),
+                        "name": p.get("name", ""),
+                        "price_ars": p.get("price_ars"),
+                        "price_usd": p.get("price_usd"),
+                        "qty": 1,
+                    }
+                    for p in candidates[:MAX_ITEMS]
+                ],
+                normalized_query,
+            )
     elif primary_intent == "cart_action":
-        cart_reply = handle_cart_action(phone, user_message)
-        save_message(phone, cart_reply, "assistant")
-        return cart_reply
+        reply = handle_cart_action(phone, user_message, context_products=context_products)
+    elif primary_intent == "checkout":
+        reply = handle_checkout_intent({"span": user_message}, phone)
     else:
         if use_memory and recent_products:
             candidates = recent_products
@@ -5101,14 +5226,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 3] Selecting best products...")
 
-    if primary_intent == "social":
-        logger.info("[STEP 3] Skipping product selection for social intent")
-        selected_products = []
-        selection = {
-            "selected_products": [],
-            "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
-        }
-    elif primary_intent == "product_search":
+    if reply is None and primary_intent == "product_search":
         selection_candidates = candidates[:MAX_ITEMS]
         if len(selection_candidates) > 50:
             block_size = 18
@@ -5136,8 +5254,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         selected_products = [
             p for p in selection_candidates if p.get("code") in selected_codes
         ]
-    elif primary_intent in {"clarification", "tech_question", "follow_up", "compare"}:
-        if len(recent_products) >= 2:
+    elif reply is None and primary_intent in {"clarification", "compare"}:
+        if len(recent_products) >= 1:
             selected_products = recent_products[:7]
             logger.info(f"[COMPARE] Providing {len(selected_products)} products from memory")
         else:
@@ -5147,11 +5265,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             "analysis": {"customer_type": "recurrente", "interest_level": "medio", "key_arguments": []},
         }
     else:
-        selected_products = candidates[:7]
-        selection = {
-            "selected_products": selected_products,
-            "analysis": {"customer_type": "nuevo", "interest_level": "bajo", "key_arguments": []},
-        }
+        selection = selection or {"selected_products": selected_products, "analysis": {}}
 
     logger.info(
         f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
@@ -5162,27 +5276,49 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     # ============================================
     logger.info(f"[STEP 4] Generating response...")
 
-    response = complete_template(
-        "response_generation",
-        {
-            "phone": phone,
-            "intent": primary_intent,
-            "selected_products": selected_products,
-            "customer_analysis": selection.get("analysis", {}),
-            "query_context": {
-                "original": user_message,
-                "normalized": normalized_query,
-                "corrections": understanding.get("corrections", []),
-            },
-            "conversation_state": {
-                "sales_phase": get_sales_phase(phone),
-                "cart_total": format_price(cart_totals(phone)[0]),
-            },
-        },
-    )
+    if reply is None:
+        if primary_intent == "clarification" and not selected_products:
+            reply = "Necesito más detalles de la moto o el repuesto para ayudarte bien."
+        elif primary_intent == "compare" and not selected_products:
+            reply = "Decime cuáles de los últimos productos querés comparar o pasame los códigos."
+        elif primary_intent == "product_search" and not candidates:
+            reply = "No encontré resultados con esa descripción. Probá indicarme la categoría o la moto y te muestro opciones."
+        elif primary_intent == "general_chat":
+            reply = handle_general_chat_intent({"span": user_message}, phone, context)
 
-    reply = response.get("message", "")
-    products_cited = response.get("products_cited", [])
+    if reply is None:
+        memory_context = {}
+        if primary_intent in {"compare", "clarification"}:
+            memory_context = {
+                "last_products": context.get("last_products", []),
+                "last_motorcycle_detected": context.get("last_motorcycle_detected", ""),
+                "cart_state": context.get("cart_state", []),
+            }
+
+        response = complete_template(
+            "response_generation",
+            {
+                "phone": phone,
+                "intent": primary_intent,
+                "selected_products": selected_products,
+                "customer_analysis": selection.get("analysis", {}),
+                "query_context": {
+                    "original": user_message,
+                    "normalized": normalized_query,
+                    "corrections": understanding.get("corrections", []),
+                },
+                "conversation_state": {
+                    "sales_phase": get_sales_phase(phone),
+                    "cart_total": format_price(cart_totals(phone)[0]),
+                },
+                "memory_context": memory_context,
+            },
+        )
+
+        reply = response.get("message", "")
+        products_cited = response.get("products_cited", [])
+    else:
+        products_cited = []
 
     # ============================================
     # STEP 5: POST-VALIDATION
@@ -5198,15 +5334,56 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             reply = format_search_results(candidates[:5])
             reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    save_last_search(
-        phone,
+    if selected_products or candidates:
+        save_last_search(
+            phone,
+            {
+                "products": selected_products or candidates,
+                "query": normalized_query,
+                "intent": primary_intent,
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
+
+    cart_snapshot = [
         {
-            "products": selected_products,
-            "query": normalized_query,
-            "intent": primary_intent,
-            "timestamp": datetime.now().isoformat(),
-        },
-    )
+            "code": code,
+            "qty": qty,
+            "name": name,
+            "price": float(to_decimal_money(price)),
+        }
+        for code, qty, name, price in cart_get(phone)
+    ]
+
+    context["cart_state"] = cart_snapshot
+    context["last_intent"] = primary_intent
+
+    if primary_intent in {"product_search", "clarification", "compare"}:
+        context["last_query"] = normalized_query
+
+    if primary_intent == "product_search":
+        context["last_products"] = selected_products or candidates
+        context["last_compare_products"] = []
+        context["last_cart_action"] = ""
+        if moto_detected:
+            context["last_motorcycle_detected"] = moto_detected
+    elif primary_intent == "compare":
+        if selected_products:
+            context["last_compare_products"] = selected_products
+        if candidates and not context.get("last_products"):
+            context["last_products"] = candidates
+    elif primary_intent == "clarification":
+        context["last_compare_products"] = context.get("last_compare_products", [])
+    elif primary_intent == "cart_action":
+        context["last_cart_action"] = user_message
+    elif primary_intent == "checkout":
+        context["last_cart_action"] = "checkout"
+        context["order_closed_at"] = datetime.now().isoformat()
+
+    if primary_intent == "general_chat" and not context.get("last_query"):
+        context["last_query"] = user_message
+
+    save_context(phone, context)
 
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, primary_intent, len(selected_products))
@@ -5228,18 +5405,51 @@ def handle_social_intent(intent: dict, phone: str) -> str:
     return llm_text_response(system_prompt, user_prompt, temperature=0.5)
 
 
+def handle_general_chat_intent(intent: dict, phone: str, context: dict) -> str:
+    span = intent.get("span", "")
+    hints = []
+    if context.get("last_motorcycle_detected"):
+        hints.append(f"Última moto: {context.get('last_motorcycle_detected')}")
+    if context.get("last_query"):
+        hints.append(f"Última consulta: {context.get('last_query')}")
+    if context.get("cart_state"):
+        hints.append(f"Items en carrito: {len(context.get('cart_state', []))}")
+    memory_hint = " | ".join([h for h in hints if h])
+    system_prompt = (
+        "Sos Fran, asistente mayorista humano y cercano. Contestá breve (1-2 líneas), "
+        "en tono cálido, sin catálogo ni listas."
+    )
+    user_prompt = f"Mensaje del cliente: '{span}'. Contexto previo: {memory_hint}"
+    return llm_text_response(system_prompt, user_prompt, temperature=0.5)
+
+
+def handle_checkout_intent(intent: dict, phone: str) -> str:
+    span = intent.get("span", "")
+    items = cart_get(phone)
+    total, discount = cart_totals(phone)
+    if not items:
+        return "Tu carrito está vacío. Decime qué agrego y te paso el total."
+    lines = [f"{qty}x {name} ({code})" for code, qty, name, _ in items]
+    discount_text = f" con descuento de {format_price(discount)}" if discount else ""
+    register_order_closed(phone)
+    return (
+        f"Listo, cierro el pedido: {format_price(total)}{discount_text}. "
+        f"Detalle: {'; '.join(lines)}. {span}".strip()
+    )
+
+
 def handle_social_intents_only(intents: list[dict], phone: str) -> str:
     quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
     _ = quality  # Se mantiene explícito para evitar recalcular calidad en sociales
 
-    social_intents = [i for i in intents if i.get("type") == "social"]
+    social_intents = [i for i in intents if i.get("type") in {"social", "general_chat"}]
     if not social_intents:
         fallback_span = (intents[0].get("span") if intents else "") or ""
-        social_intents = [{"type": "social", "span": fallback_span, "confidence": 1.0, "data": {}}]
+        social_intents = [{"type": "general_chat", "span": fallback_span, "confidence": 1.0, "data": {}}]
 
     responses: list[tuple[str, str]] = []
     for intent in social_intents:
-        responses.append(("social", handle_social_intent(intent, phone)))
+        responses.append(("general_chat", handle_general_chat_intent(intent, phone, load_context(phone, last_7_days=True))))
 
     return combine_responses(responses, social_intents)
 
@@ -5339,12 +5549,12 @@ def handle_order_flow_intent(intent: dict, phone: str) -> str:
 
 def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> str:
     buckets: dict[str, list[str]] = {
-        "social": [],
+        "general_chat": [],
         "clarification": [],
         "cart_action": [],
         "product_search": [],
-        "tech_question": [],
-        "order_flow": [],
+        "compare": [],
+        "checkout": [],
     }
 
     seen = set()
@@ -5358,12 +5568,12 @@ def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> 
         buckets.setdefault(intent_type, []).append(cleaned)
 
     ordered_parts: list[str] = []
-    for key in ("social", "clarification", "cart_action", "product_search", "tech_question", "order_flow"):
+    for key in ("general_chat", "clarification", "cart_action", "product_search", "compare", "checkout"):
         ordered_parts.extend(buckets.get(key, []))
 
     if ordered_parts:
         closing = "Decime si querés que deje todo listo o busco algo más."
-        if buckets.get("social"):
+        if buckets.get("general_chat"):
             closing = "¡Quedo atento a lo que necesites!"
         if closing not in ordered_parts:
             ordered_parts.append(closing)
@@ -5399,14 +5609,14 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         },
     )
 
-    allowed_types = {"product_search", "cart_action", "social", "clarification", "tech_question", "order_flow"}
+    allowed_types = {"product_search", "cart_action", "general_chat", "clarification", "compare", "checkout"}
     intents = [
         intent
         for intent in (understanding.get("intents") or [])
         if intent.get("type") in allowed_types and (intent.get("span") or "").strip()
     ]
     if not intents:
-        intents = [{"type": "social", "span": user_message, "confidence": 0.5, "data": {}}]
+        intents = [{"type": "general_chat", "span": user_message, "confidence": 0.5, "data": {}}]
 
     has_product_intent = any(i.get("type") == "product_search" for i in intents)
     if not has_product_intent:
@@ -5417,12 +5627,12 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
         return reply
 
     priority = {
-        "social": 0,
+        "general_chat": 0,
         "clarification": 1,
-        "product_search": 2,
-        "cart_action": 3,
-        "tech_question": 4,
-        "order_flow": 5,
+        "compare": 2,
+        "product_search": 3,
+        "cart_action": 4,
+        "checkout": 5,
     }
     intents_sorted = sorted(intents, key=lambda x: priority.get(x.get("type", "z"), 9))
 
@@ -5431,8 +5641,8 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
 
     for intent in intents_sorted:
         itype = intent.get("type")
-        if itype == "social":
-            responses.append((itype, handle_social_intent(intent, phone)))
+        if itype == "general_chat":
+            responses.append((itype, handle_general_chat_intent(intent, phone, load_context(phone, last_7_days=True))))
         elif itype == "clarification":
             responses.append((itype, handle_clarification_intent(intent, phone)))
         elif itype == "cart_action":
@@ -5441,10 +5651,10 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
             reply, products = handle_product_search_intent(intent, phone)
             responses.append((itype, reply))
             all_products.extend(products or [])
-        elif itype == "tech_question":
-            responses.append((itype, handle_tech_question_intent(intent)))
-        elif itype == "order_flow":
-            responses.append((itype, handle_order_flow_intent(intent, phone)))
+        elif itype == "compare":
+            responses.append((itype, handle_clarification_intent(intent, phone)))
+        elif itype == "checkout":
+            responses.append((itype, handle_checkout_intent(intent, phone)))
 
     final_reply = combine_responses(responses, intents_sorted)
 
