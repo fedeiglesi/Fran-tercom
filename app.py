@@ -1,13 +1,26 @@
 # =========================================================
-# Fran 3.15 – Bot Mayorista Inteligente
+# Fran 3.16 – Bot Mayorista Inteligente (Arquitectura Híbrida)
 # =========================================================
-# Basado en Fran 3.12/3.13 (estructura completa que pasó tests),
-# con mejoras:
-# - Doble llamada al LLM: razonamiento interno + respuesta final
-# - Orquestador único (orquestar_fran) para todo el flujo de conversación
-# - Plan interno estructurado y validación de búsqueda con reintento guiado
-# - Se mantiene toda la infraestructura previa (FAISS+BM25, familias,
-#   pending actions, fases, post-validaciones, chunks, etc.)
+# Combina lo mejor de Fran 3.14 y 3.15 en una arquitectura unificada:
+#
+# ARQUITECTURA HÍBRIDA:
+# - Templates estructurados (3.15) para Understanding y Response
+# - Intent detection temprano con skip logic para intents sociales
+# - Razonamiento explícito con re-query capability (3.14)
+# - Structured Outputs nativos de OpenAI
+# - Fallbacks automáticos por fase
+#
+# VERSIONES DISPONIBLES (A/B/C Testing):
+# - Fran 3.16: Arquitectura híbrida (40% de usuarios)
+# - Fran 3.15: Templates estructurados (30% de usuarios)
+# - Fran 3.14: Doble LLM con reasoning (30% de usuarios)
+#
+# INFRAESTRUCTURA COMPARTIDA:
+# - Búsqueda híbrida FAISS+BM25 con RRF
+# - Memory enrichment y contexto de conversación
+# - Validación anti-alucinación en dos capas
+# - Circuit breakers y observabilidad
+# - Manejo de listas masivas y chunks para WhatsApp
 # =========================================================
 
 import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
@@ -29,7 +42,6 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 from cachetools import LRUCache
-from jsonschema import Draft7Validator
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
@@ -64,33 +76,18 @@ if not logger.handlers:
 
 logger.info("✅ Imports completos")
 
-FRAN_DEBUG = os.environ.get("FRAN_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"}
-LAST_SEARCH_DEBUG: dict = {}
-LAST_FILTER_CATALOG_DEBUG: dict = {}
-LAST_RELEVANCE_DEBUG: dict = {}
-
-
-def debug_log(message: str):
-    if FRAN_DEBUG:
-        logger.info(message)
-
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 if not OPENAI_API_KEY:
-    logger.error("Falta OPENAI_API_KEY – el LLM está deshabilitado")
+    raise RuntimeError("Falta OPENAI_API_KEY")
 
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
 MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
 MODEL_OUTPUT = os.environ.get("MODEL_OUTPUT", MODEL_RESPONSE)
-
-# Configuración de versiones de Fran
-USE_FRAN_316 = os.environ.get("USE_FRAN_316", "false").strip().lower() in {"true", "1", "yes", "on"}
-BETA_PHONES_316 = os.environ.get("BETA_PHONES_316", "").strip().split(",")
-BETA_PHONES_316 = [p.strip() for p in BETA_PHONES_316 if p.strip()]
 
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
@@ -109,14 +106,14 @@ _safe_catalog_hash = CATALOG_URL.replace("/", "_").replace(":", "_").replace("."
 EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
+MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
 WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
-TWILIO_CHUNK_LIMIT = 1600
 
 # Nuevos parámetros de calidad (ajustados)
-RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "40.0"))
-QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "55.0"))
-QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "45.0"))
+RELEVANCE_MIN_SCORE = float(os.environ.get("RELEVANCE_MIN_SCORE", "65.0"))
+QUALITY_HIGH_THRESHOLD = float(os.environ.get("QUALITY_HIGH_THRESHOLD", "70.0"))
+QUALITY_MEDIUM_THRESHOLD = float(os.environ.get("QUALITY_MEDIUM_THRESHOLD", "60.0"))
 
 INSTANT_THRESHOLD = 15
 ASYNC_QUICK = 40
@@ -132,85 +129,89 @@ MAX_BULK_ITEMS = 150
 QUERY_UNDERSTANDING_SCHEMA = {
     "task": "understand_query",
     "description": """
-    Sos Fran 3.16, asistente mayorista argentino 100% LLM-first.
+    Sos un experto en motos argentinas. Analiza el mensaje del cliente y normaliza errores.
+    
+    MARCAS COMUNES (pueden estar mal escritas):
+    - Honda, Yamaha, Zanella, Motomel, Corven, Gilera, Guerrero, Bajaj, Keeway
+    
+    CATEGORÍAS COMUNES:
+    - Batería (ytx, gel, litio), Amortiguador, Filtro, Aceite, Cadena, Bujía, Pastillas
+    
+    CORRECCIONES TÍPICAS:
+    - "gonda" → "Honda"
+    - "iamaha" → "Yamaha"
+    - "sanella" → "Zanella"
+    - "bateria" → "batería"
 
-    Detectá TODAS las intenciones presentes en el mensaje (pueden venir varias
-    en un solo texto) sin reglas hardcodeadas y devolvé spans exactos del texto
-    original.
-
-    Reglas críticas:
-    - Siempre devolvé intents como array de objetos.
-    - type SOLO puede ser: product_search, compare, cart_action, checkout, clarification, general_chat.
-    - span es obligatorio y debe copiar literalmente el fragmento original.
-    - confidence es una probabilidad 0.0–1.0 basada en comprensión semántica.
-    - data incluye solo datos estructurados útiles (query, product, brand, model,
-      category, action, quantity, notes) sin inventar valores.
-    - No uses greeting, small_talk ni conversation como type porque no existen en el schema.
-    - Respondé únicamente JSON válido según el schema.
+    Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
     """,
     "output_schema": {
         "type": "object",
-        "required": ["intents"],
+        "required": ["normalized_query", "entities", "intent", "confidence"],
         "properties": {
-            "intents": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "required": ["type", "span", "confidence", "data"],
-                    "properties": {
-                        "type": {
-                            "type": "string",
-                            "enum": [
-                                "product_search",
-                                "compare",
-                                "cart_action",
-                                "checkout",
-                                "clarification",
-                                "general_chat",
-                            ],
-                        },
-                        "span": {"type": "string"},
-                        "confidence": {
-                            "type": "number",
-                            "minimum": 0,
-                            "maximum": 1,
-                        },
-                        "data": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "product": {"type": "string"},
-                                "brand": {"type": "string"},
-                                "model": {"type": "string"},
-                                "category": {"type": "string"},
-                                "action": {"type": "string"},
-                                "quantity": {"type": "number"},
-                                "notes": {"type": "string"},
-                            },
-                            "additionalProperties": True,
-                        },
+            "original_query": {
+                "type": "string",
+                "description": "Query original del usuario"
+            },
+            "normalized_query": {
+                "type": "string", 
+                "description": "Query corregida y lista para búsqueda"
+            },
+            "entities": {
+                "type": "object",
+                "properties": {
+                    "brand": {
+                        "type": "string",
+                        "description": "Marca de moto detectada (nombre correcto)"
                     },
-                },
+                    "model": {
+                        "type": "string",
+                        "description": "Modelo de moto detectado (nombre correcto)"
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Categoría de repuesto detectada"
+                    }
+                }
+            },
+            "corrections": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Lista de correcciones aplicadas (ej: 'gonda→Honda')"
+            },
+            "intent": {
+                "type": "string",
+                "enum": ["product_search", "cart_action", "social", "tech_question", "order_flow"],
+                "description": "Intención detectada"
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Confianza en la normalización (0.0-1.0)"
+            },
+            "needs_clarification": {
+                "type": "boolean",
+                "description": "True si falta info crítica"
+            },
+            "clarification_question": {
+                "type": "string",
+                "description": "Pregunta para el cliente si needs_clarification=true"
             }
-        },
-    },
+        }
+    }
 }
 
 PRODUCT_SELECTION_SCHEMA = {
     "task": "select_products",
     "description": """
-    Elegí los productos finales directamente desde final_candidates.
-
-    CONTEXTO Y REGLAS MAYORISTAS (FRAN 3.15):
-    - Usa el mensaje original del cliente y la intención detectada para decidir.
-    - Trabajá SOLO con los final_candidates provistos (NO inventes ni busques otros). Cada uno puede traer metadata de bloque.
-    - Si hay más de 50 productos, vendrán marcados con block_number (bloques de 15–20). Podés dosificar la entrega priorizando los primeros bloques.
-    - Si el pedido es cadena + piñón + corona, agrupá las piezas compatibles en un kit.
-    - Si el pedido es múltiple (varias piezas o motos), devolvé cada grupo por separado.
-    - Si hay demasiados resultados, dosificá: elegí un subconjunto representativo y marcá en action si hay más para mostrar.
-    - Si falta información clave, pedí aclaración concreta (pero NO inventes productos nuevos).
-    - Siempre respondé en tono mayorista y nunca inventes códigos.
+    Elegí los mejores productos de la lista para el cliente.
+    
+    REGLAS CRÍTICAS:
+    - SOLO productos de allowed_products (NO inventes códigos)
+    - Prioriza compatibilidad exacta de marca/modelo
+    - Si hay múltiples opciones, explicá diferencias clave
+    - Máximo 5 productos (3 si es primer mensaje)
     """,
     "output_schema": {
         "type": "object",
@@ -218,7 +219,7 @@ PRODUCT_SELECTION_SCHEMA = {
         "properties": {
             "selected_products": {
                 "type": "array",
-                "maxItems": 150,
+                "maxItems": 5,
                 "items": {
                     "type": "object",
                     "required": ["code", "reason", "rank"],
@@ -281,7 +282,8 @@ RESPONSE_GENERATION_SCHEMA = {
     "description": """
     Generá la respuesta final para WhatsApp como Fran.
 
-    SI EL INTENT ES "general_chat":
+    SI EL INTENT ES "social":
+    - Ignorá allowed_products por completo.
     - No generes listados ni pidas marca/modelo/año.
     - Respondé en tono humano, cálido, vendedor mayorista real.
     - La respuesta debe ser breve (1–3 líneas).
@@ -290,15 +292,26 @@ RESPONSE_GENERATION_SCHEMA = {
     - products_cited debe ser siempre [].
     - La respuesta debe ser 100% independiente del catálogo.
 
-    REGLAS PARA RESPUESTA EN BÚSQUEDAS DE PRODUCTO:
-    1. Trabajá SOLO con selected_products provistos por el paso de selección (ya vienen desde final_candidates). No inventes ni filtres en Python.
-    2. Si selected_products está vacío o faltan datos clave, pedí una aclaración concreta (marca/modelo/año o qué pieza quiere).
-    3. Si hay kits de transmisión (cadena + piñón + corona), agrupá en bloques separados por pieza y ofrecé armar kit.
-    4. Si hay muchos resultados, dosificá: usá bloques numerados si llegan como metadata (block_number) y avisá cuántos bloques totales hay.
-    5. Estructura de productos: código TERCOM + descripción limpia. No inventes precios ni códigos.
-    6. products_cited debe listar solo los códigos mencionados.
-    7. Mensaje final: en el último bloque agregá "Decime si querés que compare opciones o te arme el carrito."
-    8. Estilo mayorista, directo y sin rodeos.
+    REGLAS PARA RESPUESTA:
+    1. Validación de coherencia entre lo que pidió el cliente y los productos (brand, model, cylinder, part_category, normalized_query, intent, corrections). Si allowed_products trae productos no coherentes, ignoralos. Si ninguno es coherente, devolvé un mensaje breve pidiendo aclaración. Si allowed_products está vacío o incoherente, devolvé: "No encontré coincidencias claras con lo que pediste. ¿Me pasás más detalles (marca/modelo/año) así lo afino?"
+    2. Manejo de large list (mayorista): si allowed_products tiene más de 10 elementos, no limites el total. Dividí la respuesta en bloques aptos para WhatsApp con 8–12 productos ordenados por relevancia, sin repetir. Tono formal mayorista.
+    3. Límites de Twilio / WhatsApp: cada mensaje < ~3500 caracteres. Ajustá dinámicamente el tamaño de los bloques manteniendo el máximo posible sin exceder el límite. Si hay varios mensajes, generá cada uno por separado manteniendo coherencia y continuidad.
+    4. Estructura de los productos en cada mensaje: cada producto debe listar código TERCOM, descripción limpia y precio. Nunca inventes precios, códigos ni descripciones.
+    5. products_cited: en cada mensaje listar solo los códigos incluidos en ese mensaje. No mezclar códigos de otros bloques. Si el intent NO es product_search, entonces products_cited = [].
+    6. Mensajes sociales, saludos, agradecimientos o conversación ligera (social, small_talk, rapport, etc.): ignorá allowed_products. No generes listados ni pidas marca/modelo/año. Respondé en máximo 1–3 líneas, tono humano. products_cited = [].
+    7. Mensaje final: en el último bloque de productos (o en el único mensaje) agregá: "Decime si querés que compare opciones o te arme el carrito."
+    8. Restricciones generales: nunca inventes productos, ni derivados, ni modifiques códigos. Nunca respondas fuera de la estructura JSON del schema.
+
+    ESTILO GENERAL:
+    - Humano, directo, cercano
+    - Máximo 3-4 líneas
+    - Nunca digas “soy Fran”, “soy un asistente”, ni menciones sistemas
+    - Si el intent es product_search, ahí sí incluir productos y códigos
+
+    ESTRUCTURA PARA RESPUESTAS NORMALES:
+    1. Confirmación breve
+    2. Productos con código TERCOM (máx 3)
+    3. Call-to-action suave
     """,
     "output_schema": {
         "type": "object",
@@ -326,154 +339,10 @@ RESPONSE_GENERATION_SCHEMA = {
     }
 }
 
-# ============================================================
-# NUEVOS SCHEMAS - FRAN 3.16
-# ============================================================
-
-REASONING_SCHEMA = {
-    "task": "reason_about_query",
-    "description": """
-    Sos un experto en ventas de repuestos de motos. Analiza la situación
-    y razona qué acción tomar.
-
-    Piensa paso por paso sobre:
-    1. ¿Qué está pidiendo realmente el usuario?
-    2. ¿Tengo suficiente información del contexto?
-    3. ¿Qué estrategia de búsqueda es más apropiada?
-    4. ¿Debería usar información previa (carrito, última búsqueda)?
-    5. ¿Cuál es el mejor resultado esperado?
-
-    Genera un plan claro de acción.
-    """,
-    "output_schema": {
-        "type": "object",
-        "required": ["reasoning_steps", "decision", "confidence"],
-        "properties": {
-            "reasoning_steps": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Pasos del razonamiento (para logging)"
-            },
-            "decision": {
-                "type": "object",
-                "required": ["action_type", "search_strategy"],
-                "properties": {
-                    "action_type": {
-                        "type": "string",
-                        "enum": ["search", "cart_operation", "social", "clarification"],
-                        "description": "Tipo de acción a ejecutar"
-                    },
-                    "search_strategy": {
-                        "type": "string",
-                        "enum": ["hybrid", "semantic_only", "keyword_only", "family_based", "none"],
-                        "description": "Estrategia de búsqueda a usar"
-                    },
-                    "use_last_search": {
-                        "type": "boolean",
-                        "description": "Si debería usar productos de última búsqueda"
-                    },
-                    "use_cart_context": {
-                        "type": "boolean",
-                        "description": "Si debería considerar el carrito actual"
-                    },
-                    "expected_outcome": {
-                        "type": "string",
-                        "description": "Qué espera lograr con esta acción"
-                    }
-                }
-            },
-            "confidence": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 1,
-                "description": "Confianza en el plan (0.0-1.0)"
-            },
-            "fallback_plan": {
-                "type": "string",
-                "description": "Qué hacer si el plan principal falla"
-            }
-        }
-    }
-}
-
-REFLECTION_SCHEMA = {
-    "task": "reflect_on_results",
-    "description": """
-    Analiza críticamente los resultados de la búsqueda/acción ejecutada.
-
-    Evalúa:
-    1. ¿Los resultados son coherentes con la query?
-    2. ¿La calidad es suficiente?
-    3. ¿Hay problemas que ameriten re-intentar?
-    4. ¿Debería usar una estrategia diferente?
-
-    Sé crítico y honesto. Es mejor re-intentar que dar resultados pobres.
-    """,
-    "output_schema": {
-        "type": "object",
-        "required": ["evaluation", "decision"],
-        "properties": {
-            "evaluation": {
-                "type": "object",
-                "properties": {
-                    "quality_score": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 100,
-                        "description": "Score de calidad general (0-100)"
-                    },
-                    "coherence_check": {
-                        "type": "boolean",
-                        "description": "¿Resultados coherentes con query?"
-                    },
-                    "quantity_appropriate": {
-                        "type": "boolean",
-                        "description": "¿Cantidad de resultados apropiada?"
-                    },
-                    "issues_found": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Problemas específicos detectados"
-                    }
-                }
-            },
-            "decision": {
-                "type": "object",
-                "required": ["should_retry", "proceed_with_results"],
-                "properties": {
-                    "should_retry": {
-                        "type": "boolean",
-                        "description": "Si debería re-intentar la búsqueda"
-                    },
-                    "retry_strategy": {
-                        "type": "string",
-                        "enum": ["broader_search", "narrower_search", "different_keywords", "family_fallback"],
-                        "description": "Estrategia para el retry (si should_retry=true)"
-                    },
-                    "retry_reason": {
-                        "type": "string",
-                        "description": "Por qué se necesita retry"
-                    },
-                    "proceed_with_results": {
-                        "type": "boolean",
-                        "description": "Si puede continuar con resultados actuales"
-                    }
-                }
-            },
-            "reflection_notes": {
-                "type": "string",
-                "description": "Notas adicionales para logging"
-            }
-        }
-    }
-}
-
 TEMPLATES = {
     "query_understanding": QUERY_UNDERSTANDING_SCHEMA,
     "product_selection": PRODUCT_SELECTION_SCHEMA,
-    "response_generation": RESPONSE_GENERATION_SCHEMA,
-    "reasoning": REASONING_SCHEMA,
-    "reflection": REFLECTION_SCHEMA
+    "response_generation": RESPONSE_GENERATION_SCHEMA
 }
 
 # ------------------------------------------------------------
@@ -497,26 +366,11 @@ http_client = HttpClient(
     logger=logger,
     breaker=CircuitBreaker(failure_threshold=3, recovery_time=120),
 )
-class _UnavailableLLMClient:
-    def completion(self, *_, **__):  # noqa: D401
-        """Stub que informa la falta de API key."""
-        raise RuntimeError("OPENAI_API_KEY no configurada")
-
-
-client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
-llm_client = (
-    LLMClient(
-        client,
-        logger=logger,
-        breaker=CircuitBreaker(failure_threshold=2, recovery_time=90),
-    )
-    if client
-    else _UnavailableLLMClient()
+llm_client = LLMClient(
+    client,
+    logger=logger,
+    breaker=CircuitBreaker(failure_threshold=2, recovery_time=90),
 )
-
-
-def is_llm_available() -> bool:
-    return bool(OPENAI_API_KEY)
 cart_lock = Lock()
 exchange_lock = Lock()
 bulk_queue = Queue()
@@ -547,14 +401,14 @@ FAMILIES_INDEX = []
 
 TEMPLATE_FALLBACKS = {
     "query_understanding": {
-        "intents": [
-            {
-                "type": "general_chat",
-                "span": "",
-                "confidence": 0.5,
-                "data": {"notes": "", "quantity": 1},
-            }
-        ]
+        "original_query": "",
+        "normalized_query": "",
+        "entities": {},
+        "corrections": [],
+        "intent": "product_search",
+        "confidence": 0.5,
+        "needs_clarification": False,
+        "clarification_question": ""
     },
     "product_selection": {
         "selected_products": [],
@@ -571,88 +425,53 @@ TEMPLATE_FALLBACKS = {
         "products_cited": [],
         "tone": "friendly",
         "next_expected_action": "retry"
-    },
-    "reasoning": {
-        "reasoning_steps": ["Fallback por error técnico"],
-        "decision": {
-            "action_type": "clarification",
-            "search_strategy": "none",
-            "use_last_search": False,
-            "use_cart_context": False,
-            "expected_outcome": "Pedir aclaración al usuario"
-        },
-        "confidence": 0.3,
-        "fallback_plan": "Pedir al usuario que reformule su mensaje"
-    },
-    "reflection": {
-        "evaluation": {
-            "quality_score": 0,
-            "coherence_check": False,
-            "quantity_appropriate": False,
-            "issues_found": ["Error técnico en evaluación"]
-        },
-        "decision": {
-            "should_retry": False,
-            "retry_strategy": "broader_search",
-            "retry_reason": "Error técnico",
-            "proceed_with_results": True
-        },
-        "reflection_notes": "Fallback por error en reflection"
     }
 }
 
 
-def normalize_query_intents(result: dict, context: dict | None = None) -> dict:
-    """Normalizar intents para evitar arrays vacíos o campos nulos."""
-
-    context = context or {}
-    intents = result.get("intents") or []
-    user_message = context.get("user_message", "") or ""
-    normalized_candidate = (
-        result.get("normalized_query")
-        or (intents[0].get("span") if intents else "")
-        or user_message
-    )
-
-    if not intents:
-        intents = [
-            {
-                "type": "general_chat",
-                "span": user_message,
-                "confidence": 0.5,
-                "data": {
-                    "notes": normalized_candidate or user_message or "",
-                    "quantity": 1,
-                },
-            }
-        ]
-
-    updated_intents = []
-    for intent in intents:
-        data = intent.get("data") or {}
-        intent_name = intent.get("type") or ""
-
-        if data.get("notes") is None:
-            data["notes"] = ""
-        if data.get("quantity") is None:
-            data["quantity"] = 1
-
-        intent["data"] = data
-        intent["type"] = intent_name or "general_chat"
-        updated_intents.append(intent)
-
-    result["intents"] = updated_intents
-    return result
-
-
 def validate_schema(data: dict, schema: dict) -> bool:
-    validator = Draft7Validator(schema)
-    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.path))
-    if errors:
-        messages = "; ".join(
-            [f"{'.'.join([str(p) for p in err.path])}: {err.message}" for err in errors]
-        )
-        raise ValueError(f"Schema validation failed: {messages}")
+    if data is None:
+        raise ValueError("Schema validation failed: data is None")
+
+    if not isinstance(schema, dict):
+        raise ValueError("Schema validation failed: invalid schema")
+
+    if schema.get("type") == "object":
+        if not isinstance(data, dict):
+            raise ValueError("Schema validation failed: expected object")
+        for key in schema.get("required", []):
+            if key not in data:
+                raise ValueError(f"Schema validation failed: missing '{key}'")
+
+        properties = schema.get("properties", {})
+        for key, value in data.items():
+            if key not in properties:
+                continue
+            expected = properties[key]
+            expected_type = expected.get("type")
+            if expected_type == "object" and value is not None:
+                validate_schema(value, expected)
+            elif expected_type == "array" and value is not None:
+                if not isinstance(value, list):
+                    raise ValueError(f"Schema validation failed: '{key}' should be array")
+                item_schema = expected.get("items")
+                if item_schema:
+                    for item in value:
+                        if item_schema.get("type") == "object" and isinstance(item, dict):
+                            validate_schema(item, item_schema)
+                        elif item_schema.get("type") == "string" and not isinstance(item, str):
+                            raise ValueError(f"Schema validation failed: '{key}' items should be string")
+            elif expected_type == "string" and value is not None and not isinstance(value, str):
+                raise ValueError(f"Schema validation failed: '{key}' should be string")
+            elif expected_type == "number" and value is not None and not isinstance(value, (int, float)):
+                raise ValueError(f"Schema validation failed: '{key}' should be number")
+            elif expected_type == "boolean" and not isinstance(value, bool):
+                raise ValueError(f"Schema validation failed: '{key}' should be boolean")
+
+            enum_values = expected.get("enum")
+            if enum_values and value not in enum_values:
+                raise ValueError(f"Schema validation failed: '{key}' not in enum")
+
     return True
 
 
@@ -700,86 +519,77 @@ REGLAS:
     user_prompt = json.dumps(context, ensure_ascii=False)
     start_time = time.time()
 
-    last_error = None
-    for attempt in range(3):
-        try:
-            with openai_sem:
-                resp = llm_client.completion(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.1,
-                    response_format={"type": "json_object"}
-                )
-
-            result = json.loads(resp.choices[0].message.content)
-            if template_name == "query_understanding":
-                result = normalize_query_intents(result, context)
-            try:
-                validate_schema(result, template["output_schema"])
-                if template_name == "query_understanding" and not (result.get("intents") or []):
-                    raise ValueError("Schema validation failed: intents array vacío")
-            except ValueError as validation_error:
-                if template_name == "query_understanding":
-                    logger.warning(
-                        "Schema validation failed for understanding: %s. Normalizing and retrying.",
-                        validation_error,
-                    )
-                    result = normalize_query_intents(result, context)
-                    validate_schema(result, template["output_schema"])
-                else:
-                    raise
-            log_template_execution(template_name, context, result, time.time() - start_time)
-            return result
-
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Template completion attempt {attempt+1} failed: {e}")
-            time.sleep(0.2)
-
-    logger.error(f"Template completion failed after retries: {last_error}", exc_info=True)
-    if template_name == "query_understanding":
-        fallback = {
-            "normalized_query": (context or {}).get("user_message", "") or "",
-            "intents": [
-                {
-                    "type": "general_chat",
-                    "span": (context or {}).get("user_message", "") or "",
-                    "confidence": 0.5,
-                    "data": {
-                        "notes": (context or {}).get("user_message", "") or "",
-                        "quantity": 1,
-                    },
-                }
-            ],
-        }
-    else:
-        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
-    try:
-        log_template_execution(template_name, context, fallback, time.time() - start_time)
-    except Exception:
-        pass
-    return fallback
-
-
-def llm_text_response(system_prompt: str, user_prompt: str, *, temperature: float = 0.2, model: str = MODEL_OUTPUT) -> str:
     try:
         with openai_sem:
             resp = llm_client.completion(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
+                    {"role": "user", "content": user_prompt}
                 ],
-                temperature=temperature,
+                temperature=0.1,
+                response_format={"type": "json_object"}
             )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"LLM text response failed: {e}")
-        return ""
 
+        result = json.loads(resp.choices[0].message.content)
+        validate_schema(result, template["output_schema"])
+        log_template_execution(template_name, context, result, time.time() - start_time)
+        return result
+
+    except Exception as e:
+        logger.error(f"Template completion failed: {e}", exc_info=True)
+        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+        try:
+            log_template_execution(template_name, context, fallback, time.time() - start_time)
+        except Exception:
+            pass
+        return fallback
+
+
+def should_use_v315(phone: str) -> bool:
+    """
+    DEPRECATED: Usar get_orchestrator_version() en su lugar.
+    Mantenido para compatibilidad hacia atrás.
+    """
+    version = get_orchestrator_version(phone)
+    return version == "3.15"
+
+
+def get_orchestrator_version(phone: str) -> str:
+    """
+    Determina qué versión del orquestador usar: "3.14", "3.15", o "3.16"
+
+    Estrategia de rollout:
+    - USE_FRAN_316=true → todos a 3.16
+    - USE_FRAN_315=true → todos a 3.15
+    - BETA_PHONES → 3.16
+    - Hash-based split: 40% → 3.16, 30% → 3.15, 30% → 3.14
+
+    Returns:
+        str: "3.14", "3.15", o "3.16"
+    """
+    # Force v3.16 globally
+    if os.environ.get("USE_FRAN_316", "false").lower() == "true":
+        return "3.16"
+
+    # Force v3.15 globally
+    if os.environ.get("USE_FRAN_315", "false").lower() == "true":
+        return "3.15"
+
+    # Beta phones get v3.16
+    beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
+    if beta_phones and phone in beta_phones:
+        return "3.16"
+
+    # Hash-based A/B/C split (40% v3.16, 30% v3.15, 30% v3.14)
+    phone_hash = int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100
+
+    if phone_hash < 40:
+        return "3.16"  # 40% get hybrid architecture
+    elif phone_hash < 70:
+        return "3.15"  # 30% get templates
+    else:
+        return "3.14"  # 30% get dual LLM
 
 # ------------------------------------------------------------
 # UTILS
@@ -868,21 +678,6 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 def normalize_search_query(query):
     return strip_accents(query)
 
-
-def _contains_word(text: str, phrase: str) -> bool:
-    if not text or not phrase:
-        return False
-    pattern = rf"\b{re.escape(strip_accents(phrase))}\b"
-    return re.search(pattern, strip_accents(text)) is not None
-
-
-def normalize_moto_model(model: str) -> str | None:
-    if not model:
-        return None
-    key = strip_accents(model).replace("  ", " ").strip()
-    normalized = MOTO_MODEL_NORMALIZATION.get(key)
-    return normalized
-
 # ------------------------------------------------------------
 # NUEVO: RELEVANCE SCORING GENERAL
 # ------------------------------------------------------------
@@ -929,51 +724,20 @@ def filter_by_relevance(query: str, products: list, min_score: float = RELEVANCE
     if not products or not query:
         return []
     scored = []
-    rejected = 0
     for p in products:
         score = calculate_relevance_score(query, p)
         if score >= min_score:
             scored.append((p, score))
-        else:
-            rejected += 1
     scored.sort(key=lambda x: x[1], reverse=True)
-    filtered = [p for p, score in scored]
-
-    if FRAN_DEBUG:
-        LAST_RELEVANCE_DEBUG.clear()
-        LAST_RELEVANCE_DEBUG.update(
-            {
-                "query": query,
-                "threshold": min_score,
-                "accepted": len(filtered),
-                "rejected": rejected,
-                "scored": scored[:20],
-            }
-        )
-        debug_log(
-            f"[DEBUG][Relevancia] umbral={min_score} aceptados={len(filtered)} rechazados={rejected} "
-            + ", ".join(
-                f"{idx+1}. {p.get('code', p.get('name',''))} score={s:.2f}" for idx, (p, s) in enumerate(scored[:20])
-            )
-        )
-
-    return filtered
+    return [p for p, score in scored]
 
 # ------------------------------------------------------------
 # NUEVO: CONTEXT QUALITY ASSESSMENT
 # ------------------------------------------------------------
-def assess_context_quality(query: str, products: list, intent_type: str | None = None) -> dict:
+def assess_context_quality(query: str, products: list) -> dict:
     """
     Evalúa si el contexto recuperado es suficiente para responder.
     """
-    if intent_type == "social":
-        return {
-            "sufficient": True,
-            "reason": "social_intent",
-            "action": "proceed",
-            "confidence": "high",
-        }
-
     if not products:
         return {
             "sufficient": False,
@@ -1039,9 +803,9 @@ def extract_mentioned_codes(response_text: str) -> set:
     return codes
 
 
-def validate_response_codes(response_text: str, final_results: list) -> dict:
+def validate_response_codes(response_text: str, allowed_products: list) -> dict:
     mentioned = extract_mentioned_codes(response_text)
-    allowed = {p.get('code', '') for p in final_results if p.get('code')}
+    allowed = {p.get('code', '') for p in allowed_products if p.get('code')}
 
     hallucinated = mentioned - allowed
 
@@ -1070,8 +834,8 @@ def validate_response_codes(response_text: str, final_results: list) -> dict:
     }
 
 
-def validate_mentioned_names(response_text: str, final_results: list) -> dict:
-    if not final_results:
+def validate_mentioned_names(response_text: str, allowed_products: list) -> dict:
+    if not allowed_products:
         return {"valid": True}
 
     mentioned_names = []
@@ -1090,7 +854,7 @@ def validate_mentioned_names(response_text: str, final_results: list) -> dict:
 
     allowed_names_normalized = [
         normalize_search_query(p.get("name", ""))
-        for p in final_results if p.get("name")
+        for p in allowed_products if p.get("name")
     ]
 
     hallucinated_names = []
@@ -1121,15 +885,12 @@ def validate_mentioned_names(response_text: str, final_results: list) -> dict:
     return {"valid": True}
 
 
-def validate_and_fix_response(reply: str, final_results: list, phone: str, execution_context: dict) -> str:
+def validate_and_fix_response(reply: str, allowed_products: list, phone: str, execution_context: dict) -> str:
     """
     Valida la respuesta y la regenera si tiene alucinaciones.
     """
-    if execution_context.get("intent_detected") not in {"product_search", "busqueda_catalogo"}:
-        return reply
-
-    code_validation = validate_response_codes(reply, final_results)
-    name_validation = validate_mentioned_names(reply, final_results)
+    code_validation = validate_response_codes(reply, allowed_products)
+    name_validation = validate_mentioned_names(reply, allowed_products)
 
     execution_context["validation"] = {
         "codes": code_validation,
@@ -1170,48 +931,13 @@ MODEL_LIST = [
     "dakar", "due", "eco", "en125", "energy", "falcon", "fazer", "fire", "flash", "fly", "fz", "gixxer",
     "gn125", "go", "hd", "hunter", "jet", "jog", "k1", "k2", "k3", "k4", "kmx", "liberty", "luxe", "magic",
     "monkey", "motard", "navi", "ns", "pulsar", "rc", "rks", "road", "rocket", "rouser", "rs", "rx",
-    "sahel", "sempre", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
+    "sahel", "sempre", "sma", "sol", "sonic", "sprinter", "starken", "storm", "styler", "super cub",
     "tiburon", "tiger", "titan", "tornado", "triax", "tricolor", "twister", "vc", "vento", "viggo", "vr",
     "wave", "x3m", "xr", "xtz", "zb", "ztt"
 ]
 
 KNOWN_BRANDS = BRAND_LIST
 KNOWN_MODELS = MODEL_LIST
-
-
-MOTO_MODEL_NORMALIZATION = {
-    "wave": "WAVE 110",
-    "wave 110": "WAVE 110",
-    "wave110": "WAVE 110",
-    "wave110s": "WAVE 110",
-    "wave s": "WAVE 110",
-    "wave 100": "WAVE 100",
-    "cg": "CG 150",
-    "cg 150": "CG 150",
-    "cg150": "CG 150",
-    "cg125": "CG 125",
-    "cg 125": "CG 125",
-    "cg 160": "CG 160",
-    "cg160": "CG 160",
-    "ybr": "YBR 125",
-    "ybr 125": "YBR 125",
-    "ybr125": "YBR 125",
-    "ybr 250": "YBR 250",
-    "ybr250": "YBR 250",
-    "gn": "GN 125",
-    "gn 125": "GN 125",
-    "gn125": "GN 125",
-    "xr": "XR 250",
-    "xr 250": "XR 250",
-    "xr250": "XR 250",
-    "tornado": "TORNADO",
-    "titan": "TITAN",
-    "titan 150": "TITAN",
-    "biz": "BIZ",
-    "biz 110": "BIZ 110",
-    "biz110": "BIZ 110",
-    "crypton": "CRYPTON",
-}
 
 
 def _build_autocorrect_vocab():
@@ -1394,33 +1120,21 @@ def parse_query_v2(query: str, phone: str | None = None) -> dict:
 
     out["category"] = out["categories"][0] if out["categories"] else None
 
-    brand_hits = []
     for b in BRAND_LIST:
-        if _contains_word(q, b):
+        if b in q:
             out["brands"].append(b)
-            brand_hits.append(b)
 
-    model_hits = []
-    for variant, canonical in MOTO_MODEL_NORMALIZATION.items():
-        if _contains_word(q, variant):
-            model_hits.append({"raw": variant, "normalized": canonical})
-            out["models"].append(canonical)
+    for m in MODEL_LIST:
+        if m in q:
+            out["models"].append(m)
 
-    if model_hits:
-        for m in model_hits:
-            logger.info(
-                f"[MOTO] Detectada raw='{m['raw']}' -> normalizada='{m['normalized']}'"
-            )
-
-    if brand_hits and model_hits:
-        for brand in brand_hits:
-            for model in model_hits:
-                moto_data = {
+    for brand in KNOWN_BRANDS:
+        for model in KNOWN_MODELS:
+            if brand in q and model in q:
+                out["motos_detectadas"].append({
                     "brand": brand,
-                    "model": model["normalized"],
-                    "raw_model": model["raw"],
-                }
-                out["motos_detectadas"].append(moto_data)
+                    "model": model
+                })
 
     if "esa moto" in q or "esa misma" in q:
         ctx = get_moto_context(phone)
@@ -1432,18 +1146,6 @@ def parse_query_v2(query: str, phone: str | None = None) -> dict:
     if out["motos_detectadas"]:
         out["moto_brands"] = list({m["brand"] for m in out["motos_detectadas"] if m.get("brand")})
         out["moto_models"] = list({m["model"] for m in out["motos_detectadas"] if m.get("model")})
-
-    if model_hits and not out["moto_models"]:
-        out["moto_models"] = list({m["normalized"] for m in model_hits})
-
-    if out["motos_detectadas"]:
-        logger.info(
-            "[MOTO] Para filtrar: "
-            + "; ".join(
-                f"brand={m.get('brand','').upper()} model={m.get('model','')}"
-                for m in out["motos_detectadas"]
-            )
-        )
 
     for m in out["motos_detectadas"]:
         save_moto_context(phone, m.get("brand", ""), m.get("model", ""))
@@ -1463,163 +1165,85 @@ def filter_catalog(catalog, parsed):
     motos_detectadas = parsed.get("motos_detectadas") or []
     displacement = parsed.get("displacement")
     final_category = parsed.get("final_category")
-    rejection_reasons = Counter()
-    filtered = []
-
-    if FRAN_DEBUG:
-        debug_log(
-            "[DEBUG][Filtro] Criterios: "
-            f"brands={sorted(brands)} models={sorted(models)} "
-            f"moto_brands={sorted(moto_brands)} moto_models={sorted(moto_models)} "
-            f"motos_detectadas={motos_detectadas} families={sorted(families)} "
-            f"categories={cats} displacement={displacement} final_category={final_category}"
-        )
-
-    if motos_detectadas or moto_models or moto_brands:
-        before_codes = [p.get("code", p.get("name", "")) for p in catalog[:30]]
-        logger.info(
-            f"[MOTO][Filtro] Compatibles antes del filtro: {len(catalog)} | Ejemplos: {before_codes}"
-        )
 
     def _match(p):
         if brands:
             p_brand = normalize_search_query(p.get("brand", ""))
             if not any(b in p_brand for b in brands):
-                rejection_reasons["brand_mismatch"] += 1
                 return False
 
         if moto_brands:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             if not any(b in p_moto_brand for b in moto_brands):
-                rejection_reasons["moto_brand_mismatch"] += 1
                 return False
 
         if models:
             p_model = normalize_search_query(p.get("model", ""))
             if not any(m in p_model for m in models):
-                rejection_reasons["model_mismatch"] += 1
                 return False
 
         if moto_models:
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
             if not any(m in p_moto_model for m in moto_models):
-                rejection_reasons["moto_model_mismatch"] += 1
                 return False
 
         if motos_detectadas:
             p_moto_brand = normalize_search_query(p.get("moto_brand", "") or p.get("brand", ""))
             p_moto_model = normalize_search_query(p.get("moto_model", "") or p.get("model", ""))
-
-            if p_moto_brand and p_moto_model:
-                if not any(
-                    normalize_search_query(m.get("brand", "")) in p_moto_brand and
-                    normalize_search_query(m.get("model", "")) in p_moto_model
-                    for m in motos_detectadas
-                ):
-                    rejection_reasons["moto_detection_mismatch"] += 1
-                    return False
+            if not p_moto_brand or not p_moto_model:
+                return False
+            if not any(
+                normalize_search_query(m.get("brand", "")) in p_moto_brand and
+                normalize_search_query(m.get("model", "")) in p_moto_model
+                for m in motos_detectadas
+            ):
+                return False
 
         if families:
             p_family = normalize_search_query(p.get("family_name", ""))
             if not p_family:
-                rejection_reasons["family_missing"] += 1
                 return False
             if not any(f in p_family for f in families):
-                rejection_reasons["family_mismatch"] += 1
                 return False
 
         if cats:
             p_cat = normalize_search_query(p.get("category", ""))
 
+            # Batería tiene reglas especiales
             if "bateria" in cats:
                 name_norm = normalize_search_query(p.get("name", ""))
                 if any(x in name_norm for x in ["ytx", "yb", "yt", "gel", "agm", "litio", "12v"]):
                     pass
                 else:
                     if not any(v in p_cat for v in CATEGORY_MAP.get("bateria", ["bateria"])):
-                        rejection_reasons["category_mismatch"] += 1
                         return False
 
+            # Otras categorías
             other_cats = [c for c in cats if c != "bateria"]
             if other_cats:
                 if not any(
                     any(v in p_cat for v in CATEGORY_MAP.get(c, [c]))
                     for c in other_cats
                 ):
-                    rejection_reasons["category_mismatch"] += 1
                     return False
 
         if final_category:
             p_final_cat = normalize_search_query(p.get("final_category", "") or p.get("category", ""))
             if not p_final_cat:
-                rejection_reasons["final_category_missing"] += 1
                 return False
             if final_category not in p_final_cat:
-                rejection_reasons["final_category_mismatch"] += 1
                 return False
 
         if displacement:
             p_disp = normalize_search_query(p.get("displacement", ""))
             if not p_disp:
-                rejection_reasons["displacement_missing"] += 1
                 return False
             if displacement not in p_disp:
-                rejection_reasons["displacement_mismatch"] += 1
                 return False
 
         return True
 
-    for p in catalog:
-        if _match(p):
-            filtered.append(p)
-
-    if motos_detectadas or moto_models or moto_brands:
-        after_codes = [p.get("code", p.get("name", "")) for p in filtered[:30]]
-        logger.info(
-            f"[MOTO][Filtro] Después del filtro: {len(filtered)} | Ejemplos: {after_codes}"
-        )
-
-    if FRAN_DEBUG:
-        total = len(catalog)
-        moto_rejected = sum(
-            rejection_reasons.get(k, 0)
-            for k in [
-                "brand_mismatch",
-                "moto_brand_mismatch",
-                "model_mismatch",
-                "moto_model_mismatch",
-                "moto_detection_missing",
-                "moto_detection_mismatch",
-                "displacement_missing",
-                "displacement_mismatch",
-            ]
-        )
-        family_rejected = rejection_reasons.get("family_missing", 0) + rejection_reasons.get("family_mismatch", 0)
-        category_rejected = (
-            rejection_reasons.get("category_mismatch", 0)
-            + rejection_reasons.get("final_category_missing", 0)
-            + rejection_reasons.get("final_category_mismatch", 0)
-        )
-
-        LAST_FILTER_CATALOG_DEBUG.clear()
-        LAST_FILTER_CATALOG_DEBUG.update(
-            {
-                "total": total,
-                "filtered": len(filtered),
-                "rejections": dict(rejection_reasons),
-                "after_moto_filter": max(total - moto_rejected, 0),
-                "after_family_filter": max(total - moto_rejected - family_rejected, 0),
-                "after_category_filter": max(total - moto_rejected - family_rejected - category_rejected, 0),
-            }
-        )
-
-        debug_log(
-            "[DEBUG][Filtro] Rechazos: "
-            + ", ".join(f"{k}={v}" for k, v in sorted(rejection_reasons.items()))
-            + f" | Total aceptados={len(filtered)}/{total}"
-        )
-
-    return filtered
+    return [p for p in catalog if _match(p)]
 
 # ------------------------------------------------------------
 # PENDING ACTIONS (MEJORADAS EN 3.13)
@@ -1735,11 +1359,9 @@ def set_sales_phase(phone, phase):
 def update_sales_phase_from_intent(phone, intent):
     phase_map = {
         "product_search": "search",
-        "compare": "search",
         "cart_action": "cart",
         "view_cart": "cart",
         "order_flow": "checkout",
-        "checkout": "checkout",
         "payment": "payment",
         "shipping": "shipping",
         "tech_expert": "advice",
@@ -1952,24 +1574,6 @@ def init_db():
         """)
 
         c.execute("""
-            CREATE TABLE IF NOT EXISTS memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT,
-                data_json TEXT,
-                timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_memory_phone_timestamp ON memory(phone, timestamp DESC)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS memory_index (
-                phone TEXT PRIMARY KEY,
-                last_interaction TEXT,
-                order_closed_at TEXT
-            )
-        """)
-
-        c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
                 customer_address TEXT, items_json TEXT, total_ars TEXT,
@@ -2173,384 +1777,6 @@ def save_message(phone, msg, role):
         logger.error(f"Error guardando mensaje: {e}")
 
 
-def minutes_since(timestamp_str: str) -> float | None:
-    try:
-        dt = datetime.fromisoformat(timestamp_str)
-        return (datetime.now() - dt).total_seconds() / 60
-    except Exception as e:
-        logger.error(f"minutes_since error: {e}")
-        return None
-
-
-def update_last_interaction(phone):
-    if not phone:
-        return
-    try:
-        now = datetime.now().isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO memory_index (phone, last_interaction)
-                VALUES (?, ?)
-                ON CONFLICT(phone) DO UPDATE SET last_interaction=excluded.last_interaction""",
-                (phone, now),
-            )
-    except Exception as e:
-        logger.error(f"update_last_interaction error: {e}")
-
-
-def register_order_closed(phone):
-    if not phone:
-        return
-    try:
-        now = datetime.now().isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO memory_index (phone, order_closed_at)
-                VALUES (?, ?)
-                ON CONFLICT(phone) DO UPDATE SET order_closed_at=excluded.order_closed_at""",
-                (phone, now),
-            )
-    except Exception as e:
-        logger.error(f"register_order_closed error: {e}")
-
-
-def get_last_interaction(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT last_interaction FROM memory_index WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            return row[0] if row and row[0] else None
-    except Exception as e:
-        logger.error(f"get_last_interaction error: {e}")
-        return None
-
-
-def get_order_closed_at(phone):
-    if not phone:
-        return None
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT order_closed_at FROM memory_index WHERE phone=?", (phone,))
-            row = cur.fetchone()
-            return row[0] if row and row[0] else None
-    except Exception as e:
-        logger.error(f"get_order_closed_at error: {e}")
-        return None
-
-
-def clear_memory(phone):
-    if not phone:
-        return
-    try:
-        with get_db_connection() as conn:
-            conn.execute("DELETE FROM last_search WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM search_history WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM memory WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM conversations WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM interactions WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM pending_actions WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM conversation_phase WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-            conn.execute("DELETE FROM memory_index WHERE phone=?", (phone,))
-    except Exception as e:
-        logger.error(f"clear_memory error: {e}")
-
-
-def default_context():
-    return {
-        "last_intent": "",
-        "last_query": "",
-        "last_products": [],
-        "last_compare_products": [],
-        "last_cart_action": "",
-        "cart_state": [],
-        "last_motorcycle_detected": "",
-        "topic": "",
-        "dialogue_stage": "idle",
-        "pending_product": {},
-        "last_product_list": [],
-        "actions_history": [],
-        "timestamp": datetime.now().isoformat(),
-        "order_closed_at": None,
-    }
-
-
-def _normalize_context(ctx: dict) -> dict:
-    base = default_context()
-    if not isinstance(ctx, dict):
-        return base
-    merged = {**base, **ctx}
-    for key in (
-        "last_products",
-        "last_compare_products",
-        "cart_state",
-        "last_product_list",
-        "actions_history",
-    ):
-        if merged.get(key) is None:
-            merged[key] = []
-    if merged.get("pending_product") is None:
-        merged["pending_product"] = {}
-    if merged.get("topic") is None:
-        merged["topic"] = ""
-    if merged.get("dialogue_stage") is None:
-        merged["dialogue_stage"] = "idle"
-    if merged.get("timestamp") is None:
-        merged["timestamp"] = datetime.now().isoformat()
-    return merged
-
-
-class SessionBrain:
-    """Coordina el estado vivo de la sesión para dar continuidad real."""
-
-    SHORT_FOLLOW_UPS = {
-        "si",
-        "sí",
-        "dale",
-        "ok",
-        "oka",
-        "oks",
-        "dalee",
-        "listo",
-        "perfecto",
-        "va",
-        "me sirve",
-        "de una",
-        "joya",
-    }
-
-    def __init__(self, context: dict):
-        normalized = _normalize_context(context or {})
-        self.topic = normalized.get("topic", "")
-        self.stage = normalized.get("dialogue_stage", "idle")
-        self.pending_product = normalized.get("pending_product") or {}
-        self.last_product_list = normalized.get("last_product_list") or normalized.get("last_products") or []
-        self.last_motorcycle = normalized.get("last_motorcycle_detected", "")
-        self.previous_intent = normalized.get("last_intent", "")
-        self.actions_history = normalized.get("actions_history") or []
-        self.topic_switched = False
-
-    def detect_topic_switch(self, moto_detected: str | None, category: str | None = None):
-        moto_detected = (moto_detected or "").strip()
-        if moto_detected and self.last_motorcycle and moto_detected.lower() != self.last_motorcycle.lower():
-            self.topic_switched = True
-            self.stage = "discovery"
-            self.pending_product = {}
-            self.last_product_list = []
-        if moto_detected:
-            self.topic = moto_detected
-            self.last_motorcycle = moto_detected
-        if category and not self.topic:
-            self.topic = category
-
-    def _is_short_follow_up(self, text: str) -> bool:
-        normalized = strip_accents(text.strip().lower())
-        return normalized in self.SHORT_FOLLOW_UPS or len(normalized) <= 4
-
-    def _match_product_in_memory(self, text: str):
-        text_norm = strip_accents(text.lower())
-        for product in self.last_product_list or []:
-            code = strip_accents(str(product.get("code") or product.get("codigo") or "").lower())
-            name = strip_accents(str(product.get("name") or product.get("nombre") or "").lower())
-            if code and code in text_norm:
-                return product
-            if name and name in text_norm:
-                return product
-        return None
-
-    def blend_intents(self, intents: list[dict], user_message: str) -> list[dict]:
-        # Maneja follow-ups cortos para no perder continuidad.
-        if self._is_short_follow_up(user_message):
-            if self.pending_product:
-                return [
-                    {
-                        "type": "cart_action",
-                        "span": user_message,
-                        "confidence": 0.78,
-                        "data": {
-                            "action": "add",
-                            "product": self.pending_product.get("code") or self.pending_product.get("name"),
-                            "notes": "follow_up_confirmation",
-                        },
-                    }
-                ]
-
-            matched = self._match_product_in_memory(user_message)
-            if matched:
-                return [
-                    {
-                        "type": "cart_action",
-                        "span": user_message,
-                        "confidence": 0.72,
-                        "data": {
-                            "action": "add",
-                            "product": matched.get("code") or matched.get("name"),
-                            "notes": "follow_up_match",
-                        },
-                    }
-                ]
-
-            if self.previous_intent in {"product_search", "compare", "clarification"}:
-                return [
-                    {
-                        "type": "clarification",
-                        "span": user_message,
-                        "confidence": 0.6,
-                        "data": {"notes": "short_follow_up"},
-                    }
-                ]
-
-        matched = self._match_product_in_memory(user_message)
-        if matched and self.stage in {"awaiting_confirmation", "comparison"}:
-            return [
-                {
-                    "type": "cart_action",
-                    "span": user_message,
-                    "confidence": 0.7,
-                    "data": {
-                        "action": "add",
-                        "product": matched.get("code") or matched.get("name"),
-                        "notes": "confirmation_match",
-                    },
-                }
-            ]
-
-        # Intent blender: prioriza intents concretos y evita perder el topic.
-        priority = {
-            "checkout": 0,
-            "cart_action": 1,
-            "compare": 2,
-            "product_search": 3,
-            "clarification": 4,
-            "general_chat": 5,
-        }
-        dedup: dict[str, dict] = {}
-        for intent in intents or []:
-            itype = intent.get("type") or "general_chat"
-            if itype not in dedup or priority.get(itype, 99) < priority.get(dedup[itype].get("type", "general_chat"), 99):
-                dedup[itype] = intent
-
-        blended = sorted(dedup.values(), key=lambda x: priority.get(x.get("type", "general_chat"), 99))
-        return blended or [
-            {
-                "type": "general_chat",
-                "span": user_message,
-                "confidence": 0.4,
-                "data": {"notes": "fallback_general_chat"},
-            }
-        ]
-
-    def update_after_interaction(
-        self,
-        primary_intent: str,
-        normalized_query: str,
-        selected_products: list,
-        candidates: list,
-        moto_detected: str,
-    ):
-        if primary_intent == "product_search" and (selected_products or candidates):
-            self.last_product_list = selected_products or candidates
-            self.pending_product = (selected_products or candidates or [{}])[0]
-            self.stage = "awaiting_confirmation"
-        elif primary_intent == "cart_action":
-            self.stage = "cart"
-            if selected_products:
-                self.pending_product = selected_products[0]
-        elif primary_intent == "compare":
-            self.stage = "comparison"
-            if selected_products:
-                self.pending_product = selected_products[0]
-        elif primary_intent == "checkout":
-            self.stage = "closing"
-        elif primary_intent == "general_chat":
-            self.stage = "chat"
-        else:
-            self.stage = "discovery"
-
-        if moto_detected:
-            self.last_motorcycle = moto_detected
-            self.topic = moto_detected
-        if normalized_query:
-            self.actions_history = (self.actions_history or [])[-8:] + [
-                {
-                    "intent": primary_intent,
-                    "query": normalized_query,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            ]
-
-    def to_context(self, context: dict) -> dict:
-        context.update(
-            {
-                "topic": self.topic,
-                "dialogue_stage": self.stage,
-                "pending_product": self.pending_product,
-                "last_product_list": self.last_product_list,
-                "last_motorcycle_detected": self.last_motorcycle,
-                "actions_history": self.actions_history,
-            }
-        )
-        return context
-
-
-def load_context(phone: str, last_7_days: bool = True) -> dict:
-    if not phone:
-        return default_context()
-    try:
-        cutoff = (datetime.now() - timedelta(days=7)).isoformat()
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            if last_7_days:
-                cur.execute(
-                    """
-                    SELECT data_json, timestamp FROM memory
-                    WHERE phone=? AND timestamp >= ?
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                    """,
-                    (phone, cutoff),
-                )
-            else:
-                cur.execute(
-                    "SELECT data_json, timestamp FROM memory WHERE phone=? ORDER BY timestamp DESC LIMIT 1",
-                    (phone,),
-                )
-            row = cur.fetchone()
-            if not row:
-                ctx = default_context()
-                logger.info(f"[MEMORY] Loaded context: {ctx}")
-                return ctx
-            loaded = json.loads(row[0]) if row[0] else {}
-            ctx = _normalize_context(loaded)
-            logger.info(f"[MEMORY] Loaded context: {ctx}")
-            return ctx
-    except Exception as e:
-        logger.error(f"load_context error: {e}")
-        ctx = default_context()
-        logger.info(f"[MEMORY] Loaded context: {ctx}")
-        return ctx
-
-
-def save_context(phone: str, context: dict):
-    if not phone:
-        return
-    try:
-        ctx = _normalize_context(context or {})
-        ctx["timestamp"] = datetime.now().isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO memory (phone, data_json, timestamp) VALUES (?, ?, ?)",
-                (phone, json.dumps(ctx, ensure_ascii=False), ctx["timestamp"]),
-            )
-        logger.info(f"[MEMORY] Updated context: {ctx}")
-    except Exception as e:
-        logger.error(f"save_context error: {e}")
-
-
 def get_history_since(phone, days=7, limit=2000):
     if not phone:
         return []
@@ -2621,60 +1847,21 @@ def get_search_history(phone, limit=5):
         return []
 
 
-def get_recent_searches(phone, limit=3, minutes=10080):
-    if not phone:
-        return []
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                SELECT data_json, timestamp
-                FROM memory
-                WHERE phone = ? AND timestamp >= datetime('now', ? || ' minutes')
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (phone, -minutes, limit),
-            )
-            rows = cur.fetchall()
-            results = []
-            for row in rows:
-                try:
-                    results.append(json.loads(row[0]))
-                except Exception:
-                    continue
-            return results
-    except Exception as e:
-        logger.error(f"get_recent_searches error: {e}")
-        return []
-
-
-def save_last_search(phone, data, query=None):
-    if not phone or not data:
+def save_last_search(phone, products, query):
+    if not phone or not products:
         return
-
-    payload = data if isinstance(data, dict) else {"products": data, "query": query}
-    products = payload.get("products") or []
-    query_text = (payload.get("query") or query or "").strip()
-    timestamp = payload.get("timestamp") or datetime.now().isoformat()
-    payload.setdefault("timestamp", timestamp)
-    payload.setdefault("intent", payload.get("intent", "product_search"))
-
     meta = {
         "products": products,
-        "query": query_text,
-        "timestamp": timestamp,
+        "query": query,
+        "timestamp": datetime.now().isoformat(),
         "summary": f"{len(products)} productos",
         "top_category": max(
             set(p.get("category", "") for p in products),
             key=lambda c: sum(1 for p in products if p.get("category") == c),
-            default="",
+            default=""
         ),
-        "total_value": sum(float(p.get("price_ars", 0)) for p in products),
-        "intent": payload.get("intent", ""),
+        "total_value": sum(float(p.get("price_ars", 0)) for p in products)
     }
-
     try:
         with get_db_connection() as conn:
             conn.execute(
@@ -2685,18 +1872,7 @@ def save_last_search(phone, data, query=None):
                   query=excluded.query,
                   timestamp=excluded.timestamp,
                   metadata=excluded.metadata""",
-                (
-                    phone,
-                    json.dumps(meta["products"], ensure_ascii=False),
-                    query_text,
-                    meta["timestamp"],
-                    json.dumps(meta, ensure_ascii=False),
-                ),
-            )
-
-            conn.execute(
-                "INSERT INTO memory (phone, data_json, timestamp) VALUES (?, ?, ?)",
-                (phone, json.dumps(payload, ensure_ascii=False), timestamp),
+                (phone, json.dumps(meta["products"], ensure_ascii=False), query, meta["timestamp"], json.dumps(meta, ensure_ascii=False))
             )
     except Exception as e:
         logger.error(f"save_last_search error: {e}")
@@ -2716,8 +1892,8 @@ def get_last_search(phone):
             timestamp = datetime.fromisoformat(row[3])
             age_minutes = (datetime.now() - timestamp).total_seconds() / 60
 
-            # Si pasaron más de 7 días, no usar ese contexto
-            if age_minutes > 10080:
+            # Si pasaron más de 10 minutos, no usar ese contexto
+            if age_minutes > 10:
                 logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
                 return None
 
@@ -2749,7 +1925,6 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
                 (order_id, phone, customer_name, customer_address, json.dumps(items), total_ars, "confirmed", datetime.now().isoformat())
             )
             conn.execute("DELETE FROM carts WHERE phone=?", (phone,))
-        register_order_closed(phone)
         return order_id
     except Exception as e:
         logger.error(f"Error creando orden: {e}")
@@ -3275,43 +2450,12 @@ def get_catalog_and_index():
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
 # ------------------------------------------------------------------
-def hybrid_search(
-    query: str,
-    phone: str | None = None,
-    top_k: int = MAX_SEARCH_RESULTS,
-    metadata_filters: dict | None = None,
-    intent: str = "product_search",
-) -> list | dict:
+def hybrid_search(query: str, phone: str | None = None, top_k: int = MAX_SEARCH_RESULTS, metadata_filters: dict | None = None) -> list | dict:
     catalog, index, bm25_index, _bm25_corpus = get_catalog_and_index()
     if not catalog or not query:
         return []
 
     parsed = parse_query_v2(query, phone=phone)
-
-    if FRAN_DEBUG:
-        LAST_SEARCH_DEBUG.clear()
-        LAST_SEARCH_DEBUG.update(
-            {
-                "query": query,
-                "initial_count": len(catalog),
-                "parsed": parsed,
-            }
-        )
-
-    def _log_ranked(stage, results, include_rank=True, limit=20):
-        if not FRAN_DEBUG:
-            return
-        lines = []
-        for idx, item in enumerate(results[:limit], 1):
-            if include_rank:
-                product, score, rank = item
-            else:
-                product, score = item
-                rank = idx
-            lines.append(
-                f"{rank}. {product.get('code', product.get('name',''))} | {product.get('name','').strip()} | score={score:.4f}"
-            )
-        debug_log(f"[DEBUG][{stage}] Top {min(limit, len(results))}: " + "; ".join(lines))
 
     if metadata_filters:
         def _norm_list(val):
@@ -3348,8 +2492,6 @@ def hybrid_search(
             for rank, idx in enumerate(ranked_indices[:k_bm25], 1):
                 if 0 <= idx < len(catalog):
                     bm25_results.append((catalog[idx], float(scores[idx]), rank))
-            LAST_SEARCH_DEBUG["bm25_count"] = len(bm25_results)
-            _log_ranked("BM25", bm25_results, include_rank=True)
         except Exception as e:
             logger.error(f"Error en búsqueda BM25: {e}", exc_info=True)
     else:
@@ -3370,16 +2512,10 @@ def hybrid_search(
             for rank, (dist, idx) in enumerate(zip(D[0], I[0]), 1):
                 if 0 <= idx < len(catalog):
                     faiss_results.append((catalog[idx], float(dist), rank))
-            LAST_SEARCH_DEBUG["faiss_count"] = len(faiss_results)
-            _log_ranked("FAISS", faiss_results, include_rank=True)
         except Exception as e:
             logger.error(f"Error en búsqueda FAISS: {e}", exc_info=True)
     else:
         logger.warning("Índice FAISS no disponible, usando solo BM25")
-
-    logger.info(
-        f"[SEARCH] FAISS results: {len(faiss_results)} | BM25 results: {len(bm25_results)}"
-    )
 
     if not bm25_results and not faiss_results:
         return []
@@ -3402,20 +2538,7 @@ def hybrid_search(
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
     fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
 
-    LAST_SEARCH_DEBUG["rrf_count"] = len(fused)
-    _log_ranked("RRF", fused, include_rank=False)
-
-    merged_results = [p for p, _ in fused]
-    LAST_SEARCH_DEBUG["merged_count"] = len(merged_results)
-    logger.info(f"[SEARCH] merged_results={len(merged_results)}")
-
-    products_only = merged_results
-
-    if FRAN_DEBUG:
-        debug_log(
-            "[DEBUG][Pipeline] IDs antes de filtrar allowed_products: "
-            + ", ".join(p.get("code", p.get("name", "")) for p in products_only[:50])
-        )
+    products_only = [p for p, _ in fused]
 
     cats = parsed.get("categories") or []
     motos = parsed.get("motos_detectadas") or []
@@ -3424,9 +2547,7 @@ def hybrid_search(
         if len(motos) * len(cats) > 6:
             return {
                 "error": "too_many_combinations",
-                "message": "Hay muchas combinaciones de moto y categoría. Decime una sola moto o categoría para buscar mejor.",
-                "final_candidates": [],
-                "final_results": [],
+                "message": "Hay muchas combinaciones de moto y categoría. Decime una sola moto o categoría para buscar mejor."
             }
         combined = {}
         for m in motos:
@@ -3438,7 +2559,7 @@ def hybrid_search(
                 sub_filtered = filter_catalog(products_only, sub)
                 key = f"{m['brand']} {m['model']} – {c}"
                 combined[key] = sub_filtered[:MAX_SEARCH_RESULTS]
-        return {"multi_moto_multi_cat": True, "results": combined, "final_candidates": [], "final_results": []}
+        return {"multi_moto_multi_cat": True, "results": combined}
 
     if len(cats) > 1 and len(motos) <= 1:
         multi_results = {}
@@ -3448,7 +2569,7 @@ def hybrid_search(
             sub_parsed["category"] = c
             sub_filtered = filter_catalog(products_only, sub_parsed)
             multi_results[c] = sub_filtered[:MAX_SEARCH_RESULTS]
-        return {"multisearch": True, "results": multi_results, "final_candidates": [], "final_results": []}
+        return {"multisearch": True, "results": multi_results}
 
     if len(motos) > 1:
         results = {}
@@ -3458,22 +2579,23 @@ def hybrid_search(
             sub_filtered = filter_catalog(products_only, sub_parsed)
             key = f"{m['brand']} {m['model']}"
             results[key] = sub_filtered[:MAX_SEARCH_RESULTS]
-        return {"multi_moto": True, "results": results, "final_candidates": [], "final_results": []}
+        return {"multi_moto": True, "results": results}
 
-    filtered_by_moto = filter_catalog(products_only, parsed)
+    filtered_products = filter_catalog(products_only, parsed)
 
     def _score_for(product):
         key = product.get("code") or product.get("name") or id(product)
         return fused_scores.get(key, 0.0)
 
-    filtered_pairs = [(p, _score_for(p)) for p in filtered_by_moto]
-
-    if not filtered_pairs:
+    if filtered_products:
+        results = [(p, _score_for(p)) for p in filtered_products]
+    else:
         families = parsed.get("families") or []
         cat = parsed.get("category")
         brands = parsed.get("brands") or []
         models = parsed.get("models") or []
 
+        results = []
         if (brands or models) and (families or cat):
             super_relaxed = {
                 "families": families,
@@ -3482,84 +2604,29 @@ def hybrid_search(
                 "models": [],
                 "raw": parsed.get("raw", "")
             }
-            filtered_super_relaxed = filter_catalog(products_only, super_relaxed)
-            filtered_pairs = [(p, _score_for(p)) for p in filtered_super_relaxed]
+            filtered_products = filter_catalog(products_only, super_relaxed)
+            if filtered_products:
+                results = [(p, _score_for(p)) for p in filtered_products]
 
-    if filtered_pairs:
-        results = sorted(filtered_pairs, key=lambda x: x[1], reverse=True)
-        filtered_by_moto_sorted = [p for p, _ in results]
-        logger.info(f"[SEARCH] filtered_by_moto={len(filtered_by_moto_sorted)}")
-    else:
-        filtered_by_moto_sorted = []
-        if intent == "product_search" and merged_results:
-            logger.warning(
-                f"[MOTO] Fallback → using unfiltered merged results ({len(merged_results)})"
-            )
-            filtered_by_moto_sorted = merged_results
+        if not results:
+            results = fused
 
-    if filtered_by_moto_sorted:
-        final_results = filtered_by_moto_sorted[:top_k]
-    else:
-        final_results = merged_results[:top_k]
-
-    final_candidates = final_results
-
-    LAST_SEARCH_DEBUG["after_moto_filter"] = len(filtered_by_moto)
-    LAST_SEARCH_DEBUG["final_results"] = len(final_results)
-    logger.info(f"[SEARCH] final_results={len(final_candidates)}")
-    logger.info(f"[FINAL] Returning {len(final_candidates)} products")
-
-    if FRAN_DEBUG:
-        after_moto = LAST_FILTER_CATALOG_DEBUG.get("after_moto_filter", len(products_only)) if LAST_FILTER_CATALOG_DEBUG else len(products_only)
-        after_family = LAST_FILTER_CATALOG_DEBUG.get("after_family_filter", len(filtered_by_moto)) if LAST_FILTER_CATALOG_DEBUG else len(filtered_by_moto)
-        LAST_SEARCH_DEBUG.update(
-            {
-                "after_moto_filter": after_moto,
-                "after_family_filter": after_family,
-                "after_filter_catalog": len(filtered_by_moto),
-            }
-        )
-        debug_log(
-            "[DEBUG][Pipeline] Conteo tras filtros -> "
-            f"motos: {after_moto}, familias: {after_family}, catalogo: {len(filtered_by_moto)}"
-        )
-
-    return {
-        "faiss": faiss_results,
-        "bm25": bm25_results,
-        "merged": merged_results,
-        "filtered_by_moto": filtered_by_moto,
-        "final_results": final_results,
-        "final_candidates": final_candidates,
-    }
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results[:top_k]
 
 
-def run_allowed_products_search(normalized_query: str, phone: str | None = None, intent: str = "product_search") -> dict:
+def run_allowed_products_search(normalized_query: str, phone: str | None = None) -> list | dict:
     """
-    Ejecuta la búsqueda híbrida y devuelve los resultados finales.
+    Ejecuta la búsqueda híbrida y filtra por relevancia para generar allowed_products.
     """
-    search_results = hybrid_search(
-        normalized_query,
-        phone=phone,
-        top_k=MAX_SEARCH_RESULTS,
-        intent=intent,
-    )
+    semantic_results = hybrid_search(normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
 
-    if isinstance(search_results, dict):
-        final_candidates = search_results.get("final_candidates", [])
-    else:
-        final_candidates = search_results or []
-        search_results = {"final_candidates": final_candidates, "final_results": final_candidates}
+    if isinstance(semantic_results, dict):
+        return semantic_results
 
-    logger.info(f"[PIPELINE] received {len(final_candidates)} final_candidates from hybrid_search")
+    products = [p for p, _ in semantic_results]
 
-    if FRAN_DEBUG:
-        debug_log(
-            "[DEBUG][Pipeline] Productos finales: "
-            + ", ".join(p.get("code", p.get("name", "")) for p in final_candidates[:50])
-        )
-
-    return search_results
+    return filter_by_relevance(normalized_query, products, min_score=RELEVANCE_MIN_SCORE)
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -3619,9 +2686,8 @@ def process_bulk_sync(phone, raw_list):
             logger.info(f"Autocorrect bulk sync: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
         matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-        final_results = matches.get("final_results", []) if isinstance(matches, dict) else matches
-        if final_results:
-            best = final_results[0]
+        if matches:
+            best, score = matches[0]
             price_ars = to_decimal_money(best.get("price_ars", 0))
             subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
             total_quoted += subtotal
@@ -3696,9 +2762,8 @@ def process_bulk_async(job):
                 logger.info(f"Autocorrect bulk async: {product_name} -> {corrected_name} ({', '.join(corr)})")
 
             matches = hybrid_search(corrected_name, phone=phone, top_k=3)
-            final_results = matches.get("final_results", []) if isinstance(matches, dict) else matches
-            if final_results:
-                best = final_results[0]
+            if matches:
+                best, score = matches[0]
                 price_ars = to_decimal_money(best.get("price_ars", 0))
                 subtotal = (price_ars * requested_qty).quantize(Decimal("0.01"))
                 total_quoted += subtotal
@@ -3957,18 +3022,7 @@ def match_product_from_list(message, products, key="name"):
     return best
 
 
-def find_product_by_code_in_catalog(code: str):
-    catalog, _idx, _bm25, _bm25_corpus = get_catalog_and_index()
-    if not catalog or not code:
-        return None
-
-    ok, normalized = validate_tercom_code(code)
-    target = normalized if ok else str(code).strip()
-
-    return next((p for p in catalog if str(p.get("code", "")).strip() == target), None)
-
-
-def handle_cart_action(phone, message, context_products=None):
+def handle_cart_action(phone, message):
     msg_norm = strip_accents((message or "")).lower()
     if not msg_norm:
         return "Necesito que me indiques qué producto toco del carrito."
@@ -3980,7 +3034,7 @@ def handle_cart_action(phone, message, context_products=None):
     ]
 
     last_search = get_last_search(phone) or {}
-    last_products = context_products or last_search.get("products") or []
+    last_products = last_search.get("products") or []
 
     code = extract_code_from_text(message)
     explicit_qty = bool(EXPLICIT_QTY_PATTERN.search(msg_norm))
@@ -4008,7 +3062,7 @@ def handle_cart_action(phone, message, context_products=None):
     if action == "unknown":
         return "Para tocar el carrito decime el código o nombre del producto y qué querés hacer."
 
-    if action == "add" and not last_products and not code:
+    if action == "add" and not last_products:
         return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
 
     target_cart = None
@@ -4024,21 +3078,9 @@ def handle_cart_action(phone, message, context_products=None):
     if action == "add":
         candidate = None
         if code:
-            candidate = find_product_by_code_in_catalog(code)
-            if candidate:
-                logger.info(f"[CART] Exact code match in catalog: {candidate.get('code')}")
-        if not candidate and code:
             candidate = next((p for p in last_products if p.get("code") == code), None)
         if not candidate:
             candidate = match_product_from_list(message, last_products, key="name")
-        if not candidate and code:
-            fallback_matches = hybrid_search(code, phone=phone, top_k=3, intent="cart_action") or []
-            if isinstance(fallback_matches, dict):
-                fallback_candidates = fallback_matches.get("final_results", [])
-            else:
-                fallback_candidates = fallback_matches
-            if fallback_candidates:
-                candidate = fallback_candidates[0]
         if not candidate:
             return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
 
@@ -4359,7 +3401,7 @@ def run_planning_unificado(
 
         # Compactar productos permitidos para el prompt (no mandamos todo el catálogo crudo)
         productos_contexto = []
-        for p in allowed_products:
+        for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]:
             productos_contexto.append({
                 "code": p.get("code", ""),
                 "name": p.get("name", ""),
@@ -4520,18 +3562,19 @@ def maybe_requery_and_replan(
         logger.info(f"[Requery] Activado para {phone}: '{original_query}' -> '{new_query}'")
 
         # Nueva búsqueda híbrida solo con el nuevo query
+        catalog, index, bm25, bm25_corpus = get_catalog_and_index()
         search_results = hybrid_search(
+            catalog=catalog,
+            index=index,
+            bm25=bm25,
+            bm25_corpus=bm25_corpus,
             query=new_query,
-            phone=phone,
-            top_k=MAX_SEARCH_RESULTS,
+            max_results=MAX_SEARCH_RESULTS,
         )
 
         # Filtrar por relevancia y calidad
-        results_for_filter = (
-            search_results.get("final_results", []) if isinstance(search_results, dict) else search_results
-        )
-        filtered = filter_by_relevance(new_query, results_for_filter, min_score=RELEVANCE_MIN_SCORE)
-        allowed_products = filtered
+        filtered = filter_by_relevance(new_query, search_results, min_score=RELEVANCE_MIN_SCORE)
+        allowed_products = filtered[:MAX_PRODUCTS_FOR_LLM]
         context_quality = assess_context_quality(new_query, allowed_products)
 
         execution_context["requery_done"] = True
@@ -4572,7 +3615,7 @@ def build_customer_output_context(
     meta_razonamiento = plan.get("meta_razonamiento") or {}
 
     productos_contexto = []
-    for p in allowed_products:
+    for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]:
         productos_contexto.append({
             "code": p.get("code", ""),
             "name": p.get("name", ""),
@@ -5137,10 +4180,6 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         }
 
         productos_permitidos = catalog_products or []
-        skip_product_section = execution_context.get("intent") == "social"
-
-        if skip_product_section:
-            productos_permitidos = []
 
         # 1) Construir conversación reducida para análisis comercial
         historial = short_history[-6:] if short_history else []
@@ -5187,11 +4226,9 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             nueva_query = parsed_plan.get("requery", {}).get("new_query")
             try:
                 semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
-                productos_permitidos = (
-                    semantic_results.get("final_results", [])
-                    if isinstance(semantic_results, dict)
-                    else semantic_results
-                )
+                if isinstance(semantic_results, dict):
+                    semantic_results = []
+                productos_permitidos = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
                 execution_context["search_query"] = nueva_query
                 memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), productos_permitidos)
                 contexto_prev.update({
@@ -5366,47 +4403,6 @@ def format_search_results(products):
     return "\n\n".join(lines)
 
 
-def chunk_message_for_twilio(text: str, limit: int = TWILIO_CHUNK_LIMIT) -> list[str]:
-    if not text:
-        return []
-
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks: list[str] = []
-    current: list[str] = []
-
-    for paragraph in paragraphs:
-        candidate = "\n\n".join(current + [paragraph]).strip()
-        if candidate and len(candidate) <= limit:
-            current.append(paragraph)
-            continue
-
-        if current:
-            chunks.append("\n\n".join(current).strip())
-            current = []
-
-        if len(paragraph) <= limit:
-            current.append(paragraph)
-            continue
-
-        sentences = re.split(r"(?<=[.!?])\s+", paragraph)
-        sentence_buffer: list[str] = []
-        for sentence in sentences:
-            candidate_sentence = " ".join(sentence_buffer + [sentence]).strip()
-            if candidate_sentence and len(candidate_sentence) <= limit:
-                sentence_buffer.append(sentence)
-            else:
-                if sentence_buffer:
-                    chunks.append(" ".join(sentence_buffer).strip())
-                sentence_buffer = [sentence]
-        if sentence_buffer:
-            current.append(" ".join(sentence_buffer).strip())
-
-    if current:
-        chunks.append("\n\n".join(current).strip())
-
-    return chunks or [text]
-
-
 def format_multi_search_response(results: dict) -> str | None:
     if results.get("multisearch"):
         blocks = []
@@ -5437,16 +4433,6 @@ def format_multi_search_response(results: dict) -> str | None:
 
     return None
 
-
-def format_products_by_category(grouped: dict) -> dict:
-    filtered = {}
-    for cat, productos in grouped.items():
-        real = [p for p in productos if p.get("codigo")]
-        if len(real) > 0:
-            filtered[cat] = real
-
-    return filtered
-
 # =========================================================
 # ORQUESTADOR FRAN – VERSIÓN 3.15 (templates estructurados)
 # =========================================================
@@ -5464,14 +4450,6 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
-    context = load_context(phone, last_7_days=True)
-    session_brain = SessionBrain(context)
-
-    if not is_llm_available():
-        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
-        save_message(phone, reply, "assistant")
-        return reply
-
     logger.info(f"[STEP 1] Understanding query: {user_message}")
 
     understanding = complete_template(
@@ -5484,512 +4462,163 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         },
     )
 
-    intents = understanding.get("intents") or []
-    normalized_candidate = (
-        understanding.get("normalized_query")
-        or (intents[0].get("span") if intents else user_message)
-        or user_message
-    )
-    normalized_lower = strip_accents((normalized_candidate or "").lower())
-    heuristics_intent = None
-
-    if any(w in normalized_lower for w in ["compar", "vs", "versus", "diferencia", "cual conviene", "cuál conviene"]):
-        heuristics_intent = "compare"
-    elif any(w in normalized_lower for w in ["medida", "stock", "compatibles", "cuanto", "cuánto"]):
-        heuristics_intent = "clarification"
-    elif re.search(r"\bsku\b", normalized_lower) or "agregame" in normalized_lower or re.search(r"\d{4}/\d{5}-\d{3}", normalized_lower):
-        heuristics_intent = "cart_action"
-    elif any(w in normalized_lower for w in ["cerrar", "listo", "enviame total", "enviame el total"]):
-        heuristics_intent = "checkout"
-
-    allowed_types = {"product_search", "compare", "cart_action", "checkout", "clarification", "general_chat"}
-
-    updated_intents = []
-    for intent in intents:
-        data = intent.get("data", {}) or {}
-        intent_name = intent.get("type") or ""
-
-        if intent_name == "social":
-            intent_name = "general_chat"
-        elif intent_name in {"tech_question", "follow_up"}:
-            intent_name = "clarification"
-        elif intent_name == "order_flow":
-            intent_name = "checkout"
-
-        if heuristics_intent and intent_name not in allowed_types:
-            intent_name = heuristics_intent
-
-        if intent_name not in allowed_types:
-            intent_name = heuristics_intent or "general_chat"
-
-        if heuristics_intent and intent_name in {"clarification", "general_chat"}:
-            intent_name = heuristics_intent
-
-        if "notes" not in data or data.get("notes") is None:
-            data["notes"] = ""
-
-        if "quantity" not in data or data.get("quantity") is None:
-            data["quantity"] = 1
-
-        intent["data"] = data
-        intent["type"] = intent_name or "general_chat"
-        updated_intents.append(intent)
-
-    intents = updated_intents
-    if not intents:
-        intents = [
-            {
-                "type": heuristics_intent or "general_chat",
-                "span": user_message,
-                "confidence": 0.5,
-                "data": {"notes": "", "quantity": 1},
-            }
-        ]
-
-    intents = session_brain.blend_intents(intents, user_message)
-    understanding["intents"] = intents
-
-    primary_intent = intents[0].get("type") if intents else "general_chat"
-    if not primary_intent:
-        primary_intent = "general_chat"
-    primary_span = intents[0].get("span") if intents else user_message
-    logger.info(f"[INTENT] Assigned intent={primary_intent}")
-
     if understanding.get("needs_clarification"):
         reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
         save_message(phone, reply, "assistant")
         return reply
 
-    normalized_query = understanding.get("normalized_query") or (
-        primary_span if primary_intent == "product_search" else user_message
-    )
-    if primary_intent in {"cart_action", "checkout", "clarification"} and not understanding.get("normalized_query"):
-        normalized_query = context.get("last_query") or normalized_query
-
-    moto_detected = ""
-    try:
-        parsed_query = parse_query_v2(normalized_query, phone=phone)
-        if parsed_query.get("motos_detectadas"):
-            moto = parsed_query.get("motos_detectadas")[0]
-            moto_detected = f"{moto.get('brand', '')} {moto.get('model', '')}".strip()
-    except Exception:
-        moto_detected = context.get("last_motorcycle_detected", "")
-
-    session_brain.detect_topic_switch(
-        moto_detected,
-        intents[0].get("data", {}).get("category") if intents else None,
-    )
-    if session_brain.topic_switched:
-        logger.info("[SESSION] Topic switch detected, reseteando contexto de productos")
-        context["last_products"] = []
-        context["last_compare_products"] = []
-        context["last_product_list"] = []
-        context["pending_product"] = {}
-        context["dialogue_stage"] = "discovery"
+    normalized_query = understanding.get("normalized_query") or user_message
+    intent = understanding.get("intent") or "product_search"
 
     logger.info(
-        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {primary_intent} | Corrections: {understanding.get('corrections')}"
+        f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
     )
-
-    recent_searches = get_recent_searches(phone)
-    recent_products: list[dict] = []
-    for search in recent_searches:
-        if isinstance(search, dict) and search.get("products"):
-            recent_products.extend(search.get("products") or [])
-
-    deduped = {}
-    for p in recent_products:
-        key = p.get("code") or p.get("codigo") or p.get("name")
-        if key:
-            deduped[key] = p
-    recent_products = list(deduped.values())
-
-    logger.info(f"[MEMORY] Recovered {len(recent_products)} recent products")
 
     # ============================================
     # STEP 2: SEARCH
     # ============================================
     logger.info(f"[STEP 2] Searching products...")
 
-    candidates: list = []
-    selected_products: list = []
-    selection: dict = {"selected_products": [], "analysis": {}}
-    reply: str | None = None
-    search_results: dict | list = {}
+    allowed_products = []
+    quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
 
-    use_memory = True
-    context_products = session_brain.last_product_list or context.get("last_products") or []
-    if context_products:
-        recent_products = context_products + recent_products
-        deduped_recent = {}
-        for p in recent_products:
-            key = p.get("code") or p.get("codigo") or p.get("name")
-            if key:
-                deduped_recent[key] = p
-        recent_products = list(deduped_recent.values())
-
-    if primary_intent == "general_chat":
-        logger.info("[STEP 2] Bypass search for general chat intent")
-        reply = handle_general_chat_intent({"span": user_message}, phone, context)
-    elif primary_intent == "product_search":
-        search_results = hybrid_search(
-            normalized_query, phone=phone, top_k=MAX_SEARCH_RESULTS, intent=primary_intent
-        )
-        logger.info(
-            "[STEP 2][SEARCH] FAISS=%s BM25=%s merged=%s moto_filtered=%s final=%s",
-            LAST_SEARCH_DEBUG.get("faiss_count", 0),
-            LAST_SEARCH_DEBUG.get("bm25_count", 0),
-            LAST_SEARCH_DEBUG.get("merged_count", 0),
-            LAST_SEARCH_DEBUG.get("after_moto_filter", 0),
-            LAST_SEARCH_DEBUG.get("final_results", 0),
-        )
-        if isinstance(search_results, dict):
-            if search_results.get("error") == "too_many_combinations":
-                reply = search_results.get("message", "Pasame una sola moto o categoría.")
-            else:
-                formatted = format_multi_search_response(search_results)
-                if formatted:
-                    reply = formatted
-                candidates = search_results.get("final_candidates", [])
-        else:
-            candidates = search_results or []
-            search_results = {"final_candidates": candidates, "final_results": candidates}
-
-        logger.info(f"[STEP 2] Final candidates: {len(candidates)}")
-
-        if candidates:
-            save_last_search(
-                phone,
-                [
-                    {
-                        "code": p.get("code", ""),
-                        "name": p.get("name", ""),
-                        "price_ars": p.get("price_ars"),
-                        "price_usd": p.get("price_usd"),
-                        "qty": 1,
-                    }
-                    for p in candidates[:MAX_ITEMS]
-                ],
-                normalized_query,
-            )
-    elif primary_intent == "cart_action":
-        reply = handle_cart_action(phone, user_message, context_products=context_products)
-    elif primary_intent == "checkout":
-        reply = handle_checkout_intent({"span": user_message}, phone)
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        allowed_products = []
+        logger.info("[STEP 2] Bypass search for social intent")
     else:
-        if use_memory and recent_products:
-            candidates = recent_products
-            logger.info(f"[STEP 2] Using memory: {len(candidates)} products")
-        else:
-            candidates = []
-            logger.info("[STEP 2] Memory empty — no candidates")
+        allowed_products = run_allowed_products_search(normalized_query, phone=phone)
+        logger.info(f"[STEP 2] Allowed products: {len(allowed_products) if isinstance(allowed_products, list) else 0}")
 
-    clean_candidates = [
-        p
-        for p in candidates
-        if (p.get("familia") or p.get("family") or p.get("family_name"))
-        and str(p.get("familia") or p.get("family") or p.get("family_name")).strip()
-    ]
-    if clean_candidates:
-        candidates = clean_candidates
+        if isinstance(allowed_products, dict):
+            if allowed_products.get("error") == "too_many_combinations":
+                reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
+                save_message(phone, reply, "assistant")
+                return reply
 
-    logger.info(f"[CLEAN] final candidates: {len(candidates)}")
+            reply = format_multi_search_response(allowed_products)
+            if reply:
+                save_message(phone, reply, "assistant")
+                return reply
+            allowed_products = []
+
+        quality = assess_context_quality(normalized_query, allowed_products)
+
+        if not quality["sufficient"]:
+            if quality["action"] == "ask_clarification":
+                reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
+            else:
+                top_products = quality.get("top_products", [])[:3]
+                suggestions = "\n".join(
+                    [
+                        f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                        for p in top_products
+                    ]
+                )
+                reply = (
+                    "No encontré coincidencia perfecta. Tengo:\n\n"
+                    f"{suggestions}\n\n"
+                    "¿Te sirve alguna o dame más detalles?"
+                )
+
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
+            log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
+            return reply
+
+        save_last_search(
+            phone,
+            [
+                {
+                    "code": p["code"],
+                    "name": p.get("name", ""),
+                    "price_ars": p.get("price_ars"),
+                    "price_usd": p.get("price_usd"),
+                    "qty": 1,
+                }
+                for p in allowed_products[:MAX_ITEMS]
+            ],
+            normalized_query,
+        )
+
+        logger.info(
+            f"[STEP 2] Found {len(allowed_products)} relevant products | Quality: {quality.get('confidence')}"
+        )
 
     # ============================================
     # STEP 3: PRODUCT SELECTION (LLM)
     # ============================================
-    logger.info(f"[STEP 3] Selecting best products...")
 
-    if reply is None and primary_intent == "product_search":
-        selection_candidates = candidates[:MAX_ITEMS]
-        if len(selection_candidates) > 50:
-            block_size = 18
-            annotated: list[dict] = []
-            for idx, start in enumerate(range(0, len(selection_candidates), block_size)):
-                block = selection_candidates[start:start + block_size]
-                for product in block:
-                    annotated.append({**product, "block_number": idx + 1})
-            selection_candidates = annotated
-
-        selection_payload = {
-            "phone": phone,
-            "intent": primary_intent,
-            "original_message": user_message,
-            "detected_intent": primary_intent,
-            "normalized_query": normalized_query,
-            "business_context": "Ventas mayoristas de repuestos de moto. Tono mayorista, directo, sin inventar productos.",
-            "final_candidates": selection_candidates,
-        }
-
-        selection = complete_template("product_selection", selection_payload)
-        selected_codes = {
-            p.get("code") for p in selection.get("selected_products", []) if p.get("code")
-        }
-        selected_products = [
-            p for p in selection_candidates if p.get("code") in selected_codes
-        ]
-    elif reply is None and primary_intent in {"clarification", "compare"}:
-        if len(recent_products) >= 1:
-            selected_products = recent_products[:7]
-            logger.info(f"[COMPARE] Providing {len(selected_products)} products from memory")
-        else:
-            selected_products = candidates[:7]
+    # Si el intent es social, saltear la selección de productos
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        logger.info("[STEP 3] Skipping product selection for social intent")
+        selected_products = []
         selection = {
-            "selected_products": selected_products,
-            "analysis": {"customer_type": "recurrente", "interest_level": "medio", "key_arguments": []},
+            "selected_products": [],
+            "analysis": {
+                "customer_type": "nuevo",
+                "interest_level": "bajo",
+                "key_arguments": []
+            },
+            "action": "show_products"
         }
     else:
-        selection = selection or {"selected_products": selected_products, "analysis": {}}
+        logger.info(f"[STEP 3] Selecting best products...")
 
-    logger.info(
-        f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
-    )
+        selection = complete_template(
+            "product_selection",
+            {
+                "phone": phone,
+                "normalized_query": normalized_query,
+                "original_query": user_message,
+                "entities": understanding.get("entities", {}),
+                "intent": intent,
+                "allowed_products": [
+                    {
+                        "code": p.get("code", ""),
+                        "name": p.get("name", ""),
+                        "price_ars": float(p.get("price_ars", 0)),
+                        "brand": p.get("brand", ""),
+                        "model": p.get("model", ""),
+                        "category": p.get("category", ""),
+                    }
+                    for p in allowed_products[:MAX_PRODUCTS_FOR_LLM]
+                ],
+                "conversation_context": {
+                    "cart_items": len(cart_get(phone)),
+                    "sales_phase": get_sales_phase(phone),
+                    "is_first_message": len(get_history_since(phone, days=1, limit=5)) <= 1,
+                },
+            },
+        )
+
+        if selection.get("action") == "ask_clarification":
+            reply = selection.get("clarification_needed", "Necesito un dato más (marca/modelo/año).")
+            save_message(phone, reply, "assistant")
+            return reply
+
+        selected_products = selection.get("selected_products", [])
+
+        logger.info(
+            f"[STEP 3] Selected {len(selected_products)} products | Customer: {selection.get('analysis', {}).get('customer_type')}"
+        )
 
     # ============================================
     # STEP 4: RESPONSE GENERATION (LLM)
     # ============================================
     logger.info(f"[STEP 4] Generating response...")
 
-    if reply is None:
-        if primary_intent == "clarification" and not selected_products:
-            reply = "Necesito más detalles de la moto o el repuesto para ayudarte bien."
-        elif primary_intent == "compare" and not selected_products:
-            reply = "Decime cuáles de los últimos productos querés comparar o pasame los códigos."
-        elif primary_intent == "product_search" and not candidates:
-            reply = "No encontré resultados con esa descripción. Probá indicarme la categoría o la moto y te muestro opciones."
-        elif primary_intent == "general_chat":
-            reply = handle_general_chat_intent({"span": user_message}, phone, context)
-
-    if reply is None:
-        memory_context = {}
-        if primary_intent in {"compare", "clarification"}:
-            memory_context = {
-                "last_products": context.get("last_products", []),
-                "last_motorcycle_detected": context.get("last_motorcycle_detected", ""),
-                "cart_state": context.get("cart_state", []),
-            }
-
-        response = complete_template(
-            "response_generation",
-            {
-                "phone": phone,
-                "intent": primary_intent,
-                "selected_products": selected_products,
-                "customer_analysis": selection.get("analysis", {}),
-                "query_context": {
-                    "original": user_message,
-                    "normalized": normalized_query,
-                    "corrections": understanding.get("corrections", []),
-                },
-                "conversation_state": {
-                    "sales_phase": get_sales_phase(phone),
-                    "cart_total": format_price(cart_totals(phone)[0]),
-                },
-                "memory_context": memory_context,
-            },
-        )
-
-        reply = response.get("message", "")
-        products_cited = response.get("products_cited", [])
-    else:
-        products_cited = []
-
-    # ============================================
-    # STEP 5: POST-VALIDATION
-    # ============================================
-    logger.info(f"[STEP 5] Validating response...")
-
-    if primary_intent == "product_search":
-        allowed_codes = {p.get("code") for p in candidates if p.get("code")}
-        hallucinated = set(products_cited) - allowed_codes
-
-        if hallucinated:
-            logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-            reply = format_search_results(candidates[:5])
-            reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
-
-    if selected_products or candidates:
-        save_last_search(
-            phone,
-            {
-                "products": selected_products or candidates,
-                "query": normalized_query,
-                "intent": primary_intent,
-                "timestamp": datetime.now().isoformat(),
-            },
-        )
-
-    cart_snapshot = [
-        {
-            "code": code,
-            "qty": qty,
-            "name": name,
-            "price": float(to_decimal_money(price)),
-        }
-        for code, qty, name, price in cart_get(phone)
-    ]
-
-    context["cart_state"] = cart_snapshot
-    context["last_intent"] = primary_intent
-
-    if primary_intent in {"product_search", "clarification", "compare"}:
-        context["last_query"] = normalized_query
-
-    if primary_intent == "product_search":
-        context["last_products"] = selected_products or candidates
-        context["last_compare_products"] = []
-        context["last_cart_action"] = ""
-        if moto_detected:
-            context["last_motorcycle_detected"] = moto_detected
-    elif primary_intent == "compare":
-        if selected_products:
-            context["last_compare_products"] = selected_products
-        if candidates and not context.get("last_products"):
-            context["last_products"] = candidates
-    elif primary_intent == "clarification":
-        context["last_compare_products"] = context.get("last_compare_products", [])
-    elif primary_intent == "cart_action":
-        context["last_cart_action"] = user_message
-    elif primary_intent == "checkout":
-        context["last_cart_action"] = "checkout"
-        context["order_closed_at"] = datetime.now().isoformat()
-
-    if primary_intent == "general_chat" and not context.get("last_query"):
-        context["last_query"] = user_message
-
-    session_brain.update_after_interaction(
-        primary_intent,
-        normalized_query,
-        selected_products,
-        candidates,
-        moto_detected,
-    )
-    context = session_brain.to_context(context)
-
-    save_context(phone, context)
-
-    save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, primary_intent, len(selected_products))
-    log_performance(phone, primary_intent, time.time() - start_time, len(candidates))
-    update_sales_phase_from_intent(phone, primary_intent)
-
-    logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
-
-    return reply
-
-
-def handle_social_intent(intent: dict, phone: str) -> str:
-    span = intent.get("span", "")
-    system_prompt = (
-        "Sos Fran, asistente mayorista humano y cercano. Contestá breve (1-2 líneas), "
-        "en tono cálido, sin catálogo ni listas."
-    )
-    user_prompt = f"Mensaje social del cliente: \"{span}\""
-    return llm_text_response(system_prompt, user_prompt, temperature=0.5)
-
-
-def handle_general_chat_intent(intent: dict, phone: str, context: dict) -> str:
-    span = intent.get("span", "")
-    hints = []
-    if context.get("last_motorcycle_detected"):
-        hints.append(f"Última moto: {context.get('last_motorcycle_detected')}")
-    if context.get("last_query"):
-        hints.append(f"Última consulta: {context.get('last_query')}")
-    if context.get("cart_state"):
-        hints.append(f"Items en carrito: {len(context.get('cart_state', []))}")
-    memory_hint = " | ".join([h for h in hints if h])
-    system_prompt = (
-        "Sos Fran, asistente mayorista humano y cercano. Contestá breve (1-2 líneas), "
-        "en tono cálido, sin catálogo ni listas."
-    )
-    user_prompt = f"Mensaje del cliente: '{span}'. Contexto previo: {memory_hint}"
-    return llm_text_response(system_prompt, user_prompt, temperature=0.5)
-
-
-def handle_checkout_intent(intent: dict, phone: str) -> str:
-    span = intent.get("span", "")
-    items = cart_get(phone)
-    total, discount = cart_totals(phone)
-    if not items:
-        return "Tu carrito está vacío. Decime qué agrego y te paso el total."
-    lines = [f"{qty}x {name} ({code})" for code, qty, name, _ in items]
-    discount_text = f" con descuento de {format_price(discount)}" if discount else ""
-    register_order_closed(phone)
-    return (
-        f"Listo, cierro el pedido: {format_price(total)}{discount_text}. "
-        f"Detalle: {'; '.join(lines)}. {span}".strip()
-    )
-
-
-def handle_social_intents_only(intents: list[dict], phone: str) -> str:
-    quality = {"sufficient": True, "confidence": 1.0, "reason": "social_intent"}
-    _ = quality  # Se mantiene explícito para evitar recalcular calidad en sociales
-
-    social_intents = [i for i in intents if i.get("type") in {"social", "general_chat"}]
-    if not social_intents:
-        fallback_span = (intents[0].get("span") if intents else "") or ""
-        social_intents = [{"type": "general_chat", "span": fallback_span, "confidence": 1.0, "data": {}}]
-
-    responses: list[tuple[str, str]] = []
-    for intent in social_intents:
-        responses.append(("general_chat", handle_general_chat_intent(intent, phone, load_context(phone, last_7_days=True))))
-
-    return combine_responses(responses, social_intents)
-
-
-def handle_clarification_intent(intent: dict, phone: str) -> str:
-    span = intent.get("span", "")
-    data = intent.get("data", {}) or {}
-    system_prompt = (
-        "Pedí datos faltantes de forma simple y amable. No ofrezcas productos aún."
-    )
-    fields = []
-    for key in ("brand", "model", "product", "category"):
-        if data.get(key):
-            fields.append(f"{key}: {data.get(key)}")
-    info_hint = f" Datos detectados: {', '.join(fields)}." if fields else ""
-    user_prompt = f"Texto del cliente: '{span}'.{info_hint}"
-    return llm_text_response(system_prompt, user_prompt, temperature=0.4)
-
-
-def handle_cart_action_intent(intent: dict, phone: str) -> str:
-    span = intent.get("span", "")
-    data = intent.get("data", {}) or {}
-    enriched = span
-    if data.get("product") or data.get("quantity"):
-        extra = []
-        if data.get("product"):
-            extra.append(f"producto: {data['product']}")
-        if data.get("quantity"):
-            extra.append(f"cantidad: {data['quantity']}")
-        enriched = f"{span} ({', '.join(extra)})"
-    return handle_cart_action(phone, enriched)
-
-
-def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
-    query_span = intent.get("span", "")
-    search_results = run_allowed_products_search(query_span, phone=phone, intent=intent.get("type"))
-
-    if isinstance(search_results, dict):
-        reply = format_multi_search_response(search_results)
-        candidates = search_results.get("final_candidates", []) if not reply else []
-        if reply:
-            return reply or "Pasame una sola moto o categoría para buscar bien.", []
-    else:
-        candidates = search_results or []
-
-    logger.info(f"[MULTI] Final candidates: {len(candidates)}")
-
-    selected_products = candidates
-
     response = complete_template(
         "response_generation",
         {
             "phone": phone,
-            "intent": "product_search",
+            "intent": intent,
             "selected_products": selected_products,
-            "customer_analysis": {},
-            "query_context": {"original": query_span, "normalized": query_span, "corrections": []},
+            "customer_analysis": selection.get("analysis", {}),
+            "query_context": {
+                "original": user_message,
+                "normalized": normalized_query,
+                "corrections": understanding.get("corrections", []),
+            },
             "conversation_state": {
                 "sales_phase": get_sales_phase(phone),
                 "cart_total": format_price(cart_totals(phone)[0]),
@@ -5999,329 +4628,68 @@ def handle_product_search_intent(intent: dict, phone: str) -> tuple[str, list]:
 
     reply = response.get("message", "")
     products_cited = response.get("products_cited", [])
-    allowed_codes = {p.get("code") for p in candidates if p.get("code")}
+
+    # ============================================
+    # STEP 5: POST-VALIDATION
+    # ============================================
+    logger.info(f"[STEP 5] Validating response...")
+
+    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
     hallucinated = set(products_cited) - allowed_codes
 
     if hallucinated:
         logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-        reply = format_search_results(candidates[:5])
+        reply = format_search_results(allowed_products[:5])
         reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    save_last_search(phone, candidates, query_span)
-    return reply, candidates
+    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
+        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
+        if remaining_products:
+            chunks = [
+                remaining_products[i : i + PRODUCTS_PER_CHUNK]
+                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
+            ]
 
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
+                chunk_text += format_search_results(chunk)
+                time.sleep(0.5)
+                send_long_message(phone, chunk_text)
 
-def handle_tech_question_intent(intent: dict) -> str:
-    span = intent.get("span", "")
-    system_prompt = (
-        "Contestá dudas técnicas o de compatibilidad de forma breve y clara, tono mayorista."
-    )
-    return llm_text_response(system_prompt, f"Consulta técnica: {span}", temperature=0.3)
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, intent, len(selected_products))
+    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
+    update_sales_phase_from_intent(phone, intent)
 
+    logger.info(f"[DONE] Response sent | Duration: {time.time()-start_time:.2f}s")
 
-def handle_order_flow_intent(intent: dict, phone: str) -> str:
-    span = intent.get("span", "")
-    total, _ = cart_totals(phone)
-    cart_context = f"Carrito estimado: {format_price(total)}." if total else "Carrito aún vacío."
-    system_prompt = (
-        "Guiá al cliente por pasos de compra, pago o envío en tono mayorista, breve y directo."
-    )
-    user_prompt = f"Consulta sobre pedido/envío: '{span}'. Contexto: {cart_context}"
-    return llm_text_response(system_prompt, user_prompt, temperature=0.35)
+    return reply
 
-
-def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> str:
-    buckets: dict[str, list[str]] = {
-        "general_chat": [],
-        "clarification": [],
-        "cart_action": [],
-        "product_search": [],
-        "compare": [],
-        "checkout": [],
-    }
-
-    seen = set()
-    for intent_type, text in responses:
-        if not text:
-            continue
-        cleaned = text.strip()
-        if not cleaned or cleaned in seen:
-            continue
-        seen.add(cleaned)
-        buckets.setdefault(intent_type, []).append(cleaned)
-
-    ordered_parts: list[str] = []
-    for key in ("general_chat", "clarification", "cart_action", "product_search", "compare", "checkout"):
-        ordered_parts.extend(buckets.get(key, []))
-
-    if ordered_parts:
-        closing = "Decime si querés que deje todo listo o busco algo más."
-        if buckets.get("general_chat"):
-            closing = "¡Quedo atento a lo que necesites!"
-        if closing not in ordered_parts:
-            ordered_parts.append(closing)
-
-    message = "\n\n".join(ordered_parts)
-    chunks = chunk_message_for_twilio(message, TWILIO_CHUNK_LIMIT)
-    return "\n\n".join(chunks)
-
-
-# ============================================================
-# FUNCIONES AUXILIARES - FRAN 3.16
-# ============================================================
-
-def run_search_with_strategy(
-    query: str,
-    strategy: str,
-    phone: str,
-    use_last_search: bool = False,
-    top_k: int = 60
-) -> tuple[list[dict], dict]:
-    """
-    Ejecuta búsqueda con estrategia específica.
-
-    Args:
-        query: Query normalizada
-        strategy: "hybrid"|"semantic_only"|"keyword_only"|"family_based"|"none"
-        phone: Teléfono del usuario
-        use_last_search: Si debe combinar con última búsqueda
-        top_k: Máximo de resultados
-
-    Returns:
-        (productos, metadata) donde metadata incluye scores, timing, etc.
-    """
-    action_start = time.time()
-    products = []
-
-    try:
-        if strategy == "hybrid":
-            # FAISS + BM25 + RRF (actual)
-            products = hybrid_search(query, phone=phone, top_k=top_k)
-
-        elif strategy == "semantic_only":
-            # Solo FAISS - buscar en índice semántico
-            catalog, index, _, _ = get_catalog_and_index()
-            if index and catalog:
-                query_embedding = generate_embeddings_with_cache([query])
-                if query_embedding:
-                    emb_np = np.array([query_embedding[0]]).astype("float32")
-                    faiss.normalize_L2(emb_np)
-                    D, I = index.search(emb_np, min(top_k * 2, len(catalog)))
-                    products = [catalog[i] for i in I[0] if i < len(catalog)]
-
-        elif strategy == "keyword_only":
-            # Solo BM25
-            catalog, _, bm25_index, bm25_corpus = get_catalog_and_index()
-            if bm25_index and bm25_corpus:
-                query_tokens = _tokenize_text(query)
-                scores = bm25_index.get_scores(query_tokens)
-                top_indices = np.argsort(scores)[::-1][:top_k]
-                products = [catalog[i] for i in top_indices if i < len(catalog)]
-
-        elif strategy == "family_based":
-            # Búsqueda por familia de productos
-            parsed = parse_query_v2(query, phone=phone)
-            families = parsed.get("families", [])
-            catalog, _, _, _ = get_catalog_and_index()
-
-            if families and catalog:
-                family_products = []
-                for p in catalog:
-                    if any(fam.lower() in (p.get("family", "") or "").lower() for fam in families):
-                        family_products.append(p)
-
-                products = family_products[:top_k]
-            else:
-                # Fallback a hybrid si no hay familias
-                products = hybrid_search(query, phone=phone, top_k=top_k)
-
-        else:  # strategy == "none"
-            products = []
-
-        # Si use_last_search, combinar con última búsqueda
-        if use_last_search and products:
-            last_search = get_last_search(phone)
-            if last_search and last_search.get("products"):
-                # Mezclar resultados, evitando duplicados
-                existing_codes = {p.get("code") for p in products}
-                for p in last_search["products"][:20]:  # Máx 20 de last_search
-                    if p.get("code") not in existing_codes:
-                        products.append(p)
-                        existing_codes.add(p.get("code"))
-
-        # Post-procesamiento: filtrado por relevancia
-        if products:
-            products = filter_by_relevance(products, query)
-
-        # Evaluación de calidad
-        quality = assess_context_quality(products, query) if products else {
-            "sufficient": False,
-            "confidence": "low",
-            "avg_score": 0,
-            "max_score": 0
-        }
-
-        metadata = {
-            "strategy_used": strategy,
-            "total_found": len(products),
-            "avg_score": quality.get("avg_score", 0),
-            "max_score": quality.get("max_score", 0),
-            "duration_ms": (time.time() - action_start) * 1000,
-            "quality_assessment": quality
-        }
-
-        return products, metadata
-
-    except Exception as e:
-        logger.error(f"Error en run_search_with_strategy: {e}")
-        return [], {
-            "strategy_used": strategy,
-            "total_found": 0,
-            "error": str(e),
-            "duration_ms": (time.time() - action_start) * 1000
-        }
-
-
-def format_product_chunk(products: list[dict], start_num: int, query: str) -> str:
-    """
-    Formatea un chunk de productos para envío por WhatsApp.
-
-    Args:
-        products: Lista de productos
-        start_num: Número de inicio para el listado
-        query: Query original del usuario
-
-    Returns:
-        str: Mensaje formateado
-    """
-    if not products:
-        return ""
-
-    lines = [f"Más opciones para {query}:", ""]
-
-    for i, p in enumerate(products, start_num):
-        code = p.get("code", "N/A")
-        name = p.get("name", "Producto")[:60]
-        price = p.get("price_ars", 0)
-
-        lines.append(f"{i}. {code} - {name} - ${price:,.0f}")
-
-    return "\n".join(lines)
-
-
-def send_whatsapp_message(phone: str, message: str):
-    """
-    Envía un mensaje por WhatsApp usando Twilio REST API.
-
-    Args:
-        phone: Número de teléfono en formato WhatsApp
-        message: Mensaje a enviar
-    """
-    if not twilio_rest_client:
-        logger.warning(f"Twilio REST client no disponible, no se puede enviar: {message[:50]}...")
-        return
-
-    try:
-        twilio_rest_client.messages.create(
-            from_=TWILIO_WHATSAPP_FROM,
-            to=phone,
-            body=message
-        )
-        logger.info(f"✅ Mensaje enviado a {phone}: {len(message)} chars")
-    except Exception as e:
-        logger.error(f"❌ Error enviando mensaje a {phone}: {e}")
-
-
-def log_interaction_v316(phone: str, metadata: dict):
-    """
-    Log estructurado de cada interacción para análisis y observabilidad.
-
-    Args:
-        phone: Número de teléfono
-        metadata: Dict con toda la metadata de la interacción
-    """
-    log_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "phone": phone,
-        "version": "3.16",
-
-        # FASE 1: Understanding
-        "understanding": metadata.get("understanding", {}),
-
-        # FASE 2: Reasoning
-        "reasoning": metadata.get("reasoning", {}),
-
-        # FASE 3: Action Execution
-        "action": metadata.get("action", {}),
-
-        # FASE 4: Reflection
-        "reflection": metadata.get("reflection", {}),
-
-        # FASE 6: Response
-        "response": metadata.get("response", {}),
-
-        # FASE 7: Validation
-        "validation": metadata.get("validation", {}),
-
-        # Performance
-        "performance": {
-            "total_duration_ms": metadata.get("total_duration_ms", 0),
-            "llm_calls_count": metadata.get("llm_calls_count", 0),
-            "retry_executed": metadata.get("retry_executed", False)
-        }
-    }
-
-    # Log a consola en modo debug
-    if FRAN_DEBUG:
-        logger.info(f"📊 [Fran 3.16] Interaction Log:\n{json.dumps(log_entry, indent=2, ensure_ascii=False)}")
-
-    # TODO: Guardar en DB para análisis posterior
-    # save_interaction_log_to_db(log_entry)
-
-
-# ============================================================
-# FRAN 3.16 - ARQUITECTURA HÍBRIDA AGENTIC
-# ============================================================
-# Combina:
-# - Razonamiento interno (de 3.14)
-# - Structured outputs (de 3.15)
-# - Reflexion pattern (auto-crítica)
-# - Tool calling explícito
-# ============================================================
-
+# =========================================================
+# ORQUESTADOR FRAN – VERSIÓN 3.16 (ARQUITECTURA HÍBRIDA)
+# =========================================================
 def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     """
-    Orquestador Fran 3.16 - Arquitectura Híbrida Agentic.
+    Orquestador híbrido que combina lo mejor de Fran 3.14 y 3.15.
 
-    Combina lo mejor de Fran 3.14 y 3.15:
-    - Razonamiento interno explícito antes de actuar
-    - Structured outputs con JSON schemas
-    - Reflexion pattern para auto-corrección
-    - Estrategias de búsqueda adaptativas
+    ARQUITECTURA:
+    1. Understanding con Template estructurado (3.15)
+    2. Intent detection temprano con skip logic para sociales
+    3. Búsqueda híbrida (compartida)
+    4. Reasoning con re-query capability (3.14)
+    5. Response con Template estructurado (3.15)
+    6. Validación anti-alucinación (compartida)
 
-    Flujo de 8 fases:
-    1. Query Understanding (Structured)
-    2. Reasoning (Agentic - NUEVO)
-    3. Action Execution (Tool Calling)
-    4. Reflection (Auto-Crítica - NUEVO)
-    5. Product Selection (Structured)
-    6. Response Generation (Structured)
-    7. Validation (Anti-Alucinación)
-    8. Chunks & Delivery
+    VENTAJAS:
+    - Structured outputs nativos (más rápido, confiable)
+    - Razonamiento explícito para casos complejos
+    - Re-búsqueda adaptativa
+    - Skip de reasoning para intents sociales (optimización de latencia y costo)
+    - Fallbacks automáticos por fase
     """
-
-    # ===== INICIO: SETUP =====
     start_time = time.time()
-    metadata = {
-        "version": "3.16",
-        "llm_calls_count": 0,
-        "total_tokens": 0,
-        "retry_executed": False
-    }
-
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
 
-    # Rate limiting
     if not rate_limit_check(phone):
         reply = "Demasiados mensajes, esperá un minuto."
         save_message(phone, reply, "assistant")
@@ -6329,16 +4697,10 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
-    # Check LLM availability
-    if not is_llm_available():
-        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
-        save_message(phone, reply, "assistant")
-        return reply
-
-    logger.info(f"🚀 [Fran 3.16] Iniciando orquestación para: {user_message}")
-
-    # ===== FASE 1: QUERY UNDERSTANDING (Structured) =====
-    logger.info("📋 [FASE 1] Query Understanding")
+    # ============================================
+    # FASE 1: UNDERSTANDING (Template 3.15)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 1] Understanding query: {user_message}")
 
     understanding = complete_template(
         "query_understanding",
@@ -6347,434 +4709,482 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
             "user_message": user_message,
             "conversation_history": get_history_since(phone, days=1, limit=5),
             "last_search_query": (get_last_search(phone) or {}).get("query", "")
-        }
+        },
     )
-    metadata["llm_calls_count"] += 1
 
-    # Normalizar y extraer intent principal
-    intents = understanding.get("intents") or []
-    if not intents:
-        intents = [{
-            "type": "general_chat",
-            "span": user_message,
-            "confidence": 0.5,
-            "data": {"notes": "", "quantity": 1}
-        }]
-
-    primary_intent = intents[0].get("type") if intents else "general_chat"
-    normalized_query = understanding.get("normalized_query") or intents[0].get("span", user_message)
-
-    logger.info(f"   Intent detectado: {primary_intent}")
-    logger.info(f"   Query normalizada: {normalized_query}")
-
-    metadata["understanding"] = {
-        "normalized_query": normalized_query,
-        "intent": primary_intent,
-        "confidence": understanding.get("confidence", 0.5),
-        "entities": understanding.get("entities", {})
-    }
-
-    # Early return si needs_clarification
     if understanding.get("needs_clarification"):
         reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
         save_message(phone, reply, "assistant")
-        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
-        log_interaction_v316(phone, metadata)
         return reply
 
-    # ===== FASE 2: REASONING (Agentic - NUEVO) =====
-    logger.info("🧠 [FASE 2] Reasoning - Planeando acción")
+    normalized_query = understanding.get("normalized_query") or user_message
+    intent = understanding.get("intent") or "product_search"
+    entities = understanding.get("entities", {})
 
-    # Construir contexto enriquecido para reasoning
-    last_search = get_last_search(phone)
-    cart_items = cart_get(phone)
-    history = get_history_since(phone, days=1, limit=3)
+    logger.info(
+        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
+    )
 
-    reasoning_context = {
-        "normalized_query": normalized_query,
-        "intent": primary_intent,
-        "entities": understanding.get("entities", {}),
-        "last_search_summary": f"{len(last_search.get('products', []))} productos" if last_search else "Sin búsqueda previa",
-        "cart_has_items": len(cart_items) > 0,
-        "recent_history": [{"role": h[1], "content": h[2][:100]} for h in history[-3:]] if history else []
-    }
+    # ============================================
+    # FASE 2: SKIP LOGIC PARA INTENTS SOCIALES
+    # ============================================
+    if intent in ["social", "greeting", "small_talk", "conversation"]:
+        logger.info("[v3.16 - FASE 2] Social intent detected, usando respuesta directa")
 
-    reasoning = complete_template("reasoning", reasoning_context)
-    metadata["llm_calls_count"] += 1
+        response = complete_template(
+            "response_generation",
+            {
+                "phone": phone,
+                "intent": intent,
+                "selected_products": [],
+                "customer_analysis": {
+                    "customer_type": "nuevo",
+                    "interest_level": "bajo",
+                    "key_arguments": []
+                },
+                "query_context": {
+                    "original": user_message,
+                    "normalized": normalized_query,
+                    "corrections": understanding.get("corrections", []),
+                },
+                "conversation_state": {
+                    "sales_phase": get_sales_phase(phone),
+                    "cart_total": format_price(cart_totals(phone)[0]),
+                },
+            },
+        )
 
-    reasoning_steps = reasoning.get("reasoning_steps", [])
-    decision = reasoning.get("decision", {})
-    action_type = decision.get("action_type", "clarification")
-    search_strategy = decision.get("search_strategy", "hybrid")
+        reply = response.get("message", "¿En qué te puedo ayudar?")
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, intent, 0)
+        log_performance(phone, "social_direct", time.time() - start_time, 0)
+        update_sales_phase_from_intent(phone, intent)
 
-    logger.info(f"   Razonamiento ({len(reasoning_steps)} pasos):")
-    for i, step in enumerate(reasoning_steps[:3], 1):  # Log solo primeros 3
-        logger.info(f"     {i}. {step}")
-    logger.info(f"   Decisión: {action_type} | Estrategia: {search_strategy}")
+        logger.info(f"[v3.16 - DONE] Social response | Duration: {time.time()-start_time:.2f}s")
+        return reply
 
-    metadata["reasoning"] = {
-        "action_type": action_type,
-        "search_strategy": search_strategy,
-        "confidence": reasoning.get("confidence", 0.5),
-        "steps_count": len(reasoning_steps)
-    }
+    # ============================================
+    # FASE 3: BÚSQUEDA HÍBRIDA (compartida)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 3] Hybrid search for product intent...")
 
-    # ===== FASE 3: ACTION EXECUTION (Tool Calling) =====
-    logger.info(f"🔧 [FASE 3] Action Execution - {action_type}")
+    allowed_products = run_allowed_products_search(normalized_query, phone=phone)
+    logger.info(f"[v3.16 - FASE 3] Found: {len(allowed_products) if isinstance(allowed_products, list) else 'multi-search'}")
 
-    allowed_products = []
-    action_metadata = {}
-
-    if action_type == "social":
-        # Skip búsqueda para intents sociales
-        logger.info("   🤝 Intent social, saltando búsqueda")
-        allowed_products = []
-        action_metadata = {"strategy_used": "none", "total_found": 0}
-
-    elif action_type == "search":
-        # Ejecutar búsqueda con estrategia específica
-        action_start = time.time()
-
-        try:
-            allowed_products, action_metadata = run_search_with_strategy(
-                query=normalized_query,
-                strategy=search_strategy,
-                phone=phone,
-                use_last_search=decision.get("use_last_search", False)
-            )
-            logger.info(f"   ✅ Búsqueda completada: {len(allowed_products)} productos en {action_metadata.get('duration_ms', 0):.0f}ms")
-        except Exception as e:
-            logger.error(f"   ❌ Error en búsqueda: {e}")
-            allowed_products = []
-            action_metadata = {"error": str(e), "total_found": 0}
-
-    elif action_type == "cart_operation":
-        # Manejar operación de carrito
-        logger.info("   🛒 Operación de carrito")
-        cart_result = handle_cart_action(phone, user_message)
-        if cart_result:
-            reply = cart_result
+    if isinstance(allowed_products, dict):
+        if allowed_products.get("error") == "too_many_combinations":
+            reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
             save_message(phone, reply, "assistant")
-            metadata["total_duration_ms"] = (time.time() - start_time) * 1000
-            log_interaction_v316(phone, metadata)
             return reply
 
-    elif action_type == "clarification":
-        # Pedir aclaración
-        reply = "¿Me das más detalles? Por ejemplo: marca, modelo y año de la moto, y qué repuesto necesitás."
+        reply = format_multi_search_response(allowed_products)
+        if reply:
+            save_message(phone, reply, "assistant")
+            return reply
+        allowed_products = []
+
+    quality = assess_context_quality(normalized_query, allowed_products)
+
+    if not quality["sufficient"]:
+        if quality["action"] == "ask_clarification":
+            reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
+        else:
+            top_products = quality.get("top_products", [])[:3]
+            suggestions = "\n".join(
+                [
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in top_products
+                ]
+            )
+            reply = (
+                "No encontré coincidencia perfecta. Tengo:\n\n"
+                f"{suggestions}\n\n"
+                "¿Te sirve alguna o dame más detalles?"
+            )
+
         save_message(phone, reply, "assistant")
-        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
-        log_interaction_v316(phone, metadata)
+        log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
+        log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
         return reply
 
-    metadata["action"] = action_metadata
+    save_last_search(
+        phone,
+        [
+            {
+                "code": p["code"],
+                "name": p.get("name", ""),
+                "price_ars": p.get("price_ars"),
+                "price_usd": p.get("price_usd"),
+                "qty": 1,
+            }
+            for p in allowed_products[:150]
+        ],
+        normalized_query,
+    )
 
-    # ===== FASE 4: REFLECTION (Auto-Crítica - NUEVO) =====
-    logger.info("🪞 [FASE 4] Reflection - Evaluando resultados")
+    logger.info(f"[v3.16 - FASE 3] Quality: {quality.get('confidence')} | Products: {len(allowed_products)}")
 
-    reflection_context = {
-        "action_type": action_type,
-        "search_strategy": search_strategy,
-        "normalized_query": normalized_query,
-        "entities": understanding.get("entities", {}),
-        "products_found": len(allowed_products),
-        "avg_score": action_metadata.get("avg_score", 0),
-        "max_score": action_metadata.get("max_score", 0),
-        "quality_assessment": action_metadata.get("quality_assessment", {})
+    # ============================================
+    # FASE 4: REASONING CON RE-QUERY (estilo 3.14)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 4] Internal reasoning with re-query capability...")
+
+    history = get_history_since(phone, days=1, limit=12)
+    if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
+        history = history[:-1]
+    short_history = history[-8:]
+    primer_mensaje = len(short_history) == 0
+
+    execution_context = {
+        "intent_detected": intent,
+        "search_query": normalized_query,
+        "entities": entities,
     }
 
-    reflection = complete_template("reflection", reflection_context)
-    metadata["llm_calls_count"] += 1
+    memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
 
-    evaluation = reflection.get("evaluation", {})
-    reflection_decision = reflection.get("decision", {})
-    should_retry = reflection_decision.get("should_retry", False)
-    quality_score = evaluation.get("quality_score", 0)
-
-    logger.info(f"   Quality Score: {quality_score}/100")
-    logger.info(f"   Coherencia: {'✅' if evaluation.get('coherence_check') else '❌'}")
-    logger.info(f"   Should retry: {'SÍ' if should_retry else 'NO'}")
-
-    if evaluation.get("issues_found"):
-        logger.info(f"   Issues: {', '.join(evaluation['issues_found'][:2])}")
-
-    metadata["reflection"] = {
-        "quality_score": quality_score,
-        "should_retry": should_retry,
-        "issues_count": len(evaluation.get("issues_found", []))
+    contexto = {
+        "mensaje_usuario": user_message,
+        "search_query": normalized_query,
+        "historial": [{"role": h["role"], "content": h["content"]} for h in short_history],
+        "metadata_catalogo": {"productos_total": len(allowed_products or [])},
+        "memoria_viva": memory,
+        "pending_actions": memory.get("pending_action"),
+        "cart_state": memory.get("cart_state", []),
+        "most_recent_bike": memory.get("most_recent_bike", ""),
     }
 
-    # RETRY LOGIC (máximo 1 vez)
-    if should_retry and not metadata["retry_executed"] and action_type == "search":
-        logger.info("🔁 [RETRY] Re-ejecutando búsqueda con estrategia diferente")
-        metadata["retry_executed"] = True
+    # Análisis comercial
+    historial_comercial = short_history[-6:] if short_history else []
+    conversacion_completa = [h.get("content", "") for h in historial_comercial]
 
-        retry_strategy = reflection_decision.get("retry_strategy", "broader_search")
+    sales_result = run_sales_analysis_llm(
+        conversacion_completa=conversacion_completa,
+        productos_disponibles=allowed_products,
+        contexto_cliente=memory,
+        perfil_cliente=memory.get("perfil_cliente", {}),
+    )
 
-        # Mapear retry_strategy a search_strategy
-        strategy_map = {
-            "broader_search": "family_based",
-            "narrower_search": "semantic_only",
-            "different_keywords": "keyword_only",
-            "family_fallback": "family_based"
-        }
-        new_strategy = strategy_map.get(retry_strategy, "hybrid")
+    parsed_sales = sales_result or {}
+    sales = parsed_sales.get("sales_analysis", {}) or {}
+
+    sales_analysis = {
+        "tipo_de_cliente": sales.get("tipo_de_cliente", ""),
+        "nivel_de_interes": sales.get("nivel_de_interes", "medio"),
+        "senales_de_cierre": sales.get("senales_de_cierre", []),
+        "producto_recomendado": sales.get("producto_recomendado", ""),
+        "argumentos_clave": sales.get("argumentos_clave", []),
+        "alternativas_seguras": sales.get("alternativas_seguras", []),
+        "tono_sugerido": sales.get("tono_sugerido", "concise"),
+        "nivel_de_confianza": float(sales.get("nivel_de_confianza", 0.0) or 0.0),
+    }
+
+    contexto["sales_analysis"] = sales_analysis
+
+    # Razonamiento interno
+    plan_interno = pensar_con_llm(
+        PLANNING_UNIFIED_PROMPT,
+        contexto,
+        allowed_products[:MAX_PRODUCTS_FOR_LLM],
+    )
+
+    parsed_plan = validate_reasoning_json(plan_interno, allowed_products[:MAX_PRODUCTS_FOR_LLM])
+
+    # Re-query si es necesario (capacidad de 3.14)
+    max_requery_attempts = 1
+    requery_count = 0
+    while parsed_plan and parsed_plan.get("requery", {}).get("NEED_REQUERY") and requery_count < max_requery_attempts:
+        requery_count += 1
+        nueva_query = parsed_plan.get("requery", {}).get("new_query")
+        logger.info(f"[v3.16 - FASE 4] Re-query triggered: {nueva_query}")
 
         try:
-            allowed_products, action_metadata = run_search_with_strategy(
-                query=normalized_query,
-                strategy=new_strategy,
-                phone=phone,
-                use_last_search=True  # Combinar con última búsqueda
-            )
-            logger.info(f"   ✅ Retry completado: {len(allowed_products)} productos")
-            metadata["action"]["retry_strategy"] = new_strategy
-        except Exception as e:
-            logger.error(f"   ❌ Error en retry: {e}")
+            semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
+            if isinstance(semantic_results, dict):
+                semantic_results = []
+            allowed_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
 
-    # Si no hay productos y era búsqueda, pedir aclaración
-    if action_type == "search" and len(allowed_products) == 0:
-        reply = "No encontré productos con esos términos. ¿Me das más detalles? Marca, modelo y año de la moto, y qué repuesto necesitás."
+            memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
+            contexto.update({
+                "search_query": nueva_query,
+                "memoria_viva": memory,
+                "metadata_catalogo": {"productos_total": len(allowed_products)},
+                "cart_state": memory.get("cart_state", []),
+            })
+
+            plan_interno = pensar_con_llm(
+                PLANNING_UNIFIED_PROMPT,
+                contexto,
+                allowed_products,
+            )
+            parsed_plan = validate_reasoning_json(plan_interno, allowed_products)
+        except Exception as e:
+            logger.error(f"Error en re-query: {e}")
+            break
+
+    if not parsed_plan:
+        logger.warning("[v3.16 - FASE 4] Plan parsing failed, usando fallback")
+        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
         save_message(phone, reply, "assistant")
-        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
-        log_interaction_v316(phone, metadata)
         return reply
 
-    # Guardar última búsqueda
-    if action_type == "search" and allowed_products:
-        save_last_search(phone, normalized_query, allowed_products[:150])
+    # Ejecutar plan
+    plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, allowed_products[:MAX_PRODUCTS_FOR_LLM])
 
-    # ===== FASE 5: PRODUCT SELECTION (Structured) =====
-    logger.info("🎯 [FASE 5] Product Selection")
+    if not plan_ejecutado:
+        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
+        save_message(phone, reply, "assistant")
+        return reply
 
-    selection = {}
+    productos_finales = plan_ejecutado.get("productos_finales", [])
+    customer_state = plan_ejecutado.get("customer_state", {})
 
-    if action_type == "social" or action_type != "search":
-        # Saltear selección para intents no-search
-        logger.info("   ⏭️  Saltando selección (no es búsqueda de productos)")
-        selection = {
-            "selected_products": [],
-            "analysis": {},
-            "action": "respond_socially"
+    logger.info(f"[v3.16 - FASE 4] Reasoning complete | Selected: {len(productos_finales)} products")
+
+    # ============================================
+    # FASE 5: RESPONSE GENERATION (Template 3.15)
+    # ============================================
+    logger.info(f"[v3.16 - FASE 5] Generating response with template...")
+
+    # Convertir productos_finales a formato para template
+    selected_for_template = [
+        {
+            "code": p.get("code", ""),
+            "reason": p.get("razon", ""),
+            "rank": p.get("rol", "principal"),
+            "compatibility": 1.0 if p.get("rol") == "principal" else 0.8
         }
-    else:
-        # Seleccionar mejores productos
-        selection_context = {
-            "allowed_products": allowed_products[:15],  # Máx 15 para LLM
-            "normalized_query": normalized_query,
-            "entities": understanding.get("entities", {}),
-            "reasoning_summary": reasoning_steps[:2] if reasoning_steps else [],
-            "reflection_notes": reflection.get("reflection_notes", ""),
-            "conversation_history": get_history_since(phone, days=1, limit=3)
-        }
+        for p in productos_finales
+    ]
 
-        selection = complete_template("product_selection", selection_context)
-        metadata["llm_calls_count"] += 1
-
-        selected_products = selection.get("selected_products", [])
-        analysis = selection.get("analysis", {})
-
-        logger.info(f"   Productos seleccionados: {len(selected_products)}")
-        logger.info(f"   Tipo de cliente: {analysis.get('customer_type', 'N/A')}")
-        logger.info(f"   Nivel de interés: {analysis.get('interest_level', 'N/A')}")
-
-    # ===== FASE 6: RESPONSE GENERATION (Structured) =====
-    logger.info("💬 [FASE 6] Response Generation")
-
-    response_context = {
-        "normalized_query": normalized_query,
-        "intent": primary_intent,
-        "understanding": understanding,
-        "reasoning": reasoning,
-        "action_results": {
-            "products": allowed_products[:15],
-            "strategy_used": action_metadata.get("strategy_used", "none")
+    response = complete_template(
+        "response_generation",
+        {
+            "phone": phone,
+            "intent": intent,
+            "selected_products": selected_for_template,
+            "customer_analysis": sales_analysis,
+            "query_context": {
+                "original": user_message,
+                "normalized": normalized_query,
+                "corrections": understanding.get("corrections", []),
+            },
+            "conversation_state": {
+                "sales_phase": get_sales_phase(phone),
+                "cart_total": format_price(cart_totals(phone)[0]),
+            },
         },
-        "reflection": reflection,
-        "selection": selection,
-        "conversation_history": get_history_since(phone, days=1, limit=3)
-    }
+    )
 
-    response = complete_template("response_generation", response_context)
-    metadata["llm_calls_count"] += 1
-
-    message = response.get("message", "")
+    reply = response.get("message", "")
     products_cited = response.get("products_cited", [])
 
-    logger.info(f"   Mensaje generado: {len(message)} chars")
-    logger.info(f"   Productos citados: {len(products_cited)}")
+    # ============================================
+    # FASE 6: VALIDACIÓN ANTI-ALUCINACIÓN
+    # ============================================
+    logger.info(f"[v3.16 - FASE 6] Anti-hallucination validation...")
 
-    metadata["response"] = {
-        "message_length": len(message),
-        "products_cited_count": len(products_cited),
-        "tone": response.get("tone", "friendly")
-    }
+    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
+    hallucinated = set(products_cited) - allowed_codes
 
-    # ===== FASE 7: VALIDATION (Anti-Alucinación) =====
-    logger.info("✅ [FASE 7] Validation")
+    if hallucinated:
+        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
+        reply = format_search_results(allowed_products[:5])
+        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
 
-    hallucinations_detected = False
-
-    if products_cited and allowed_products:
-        allowed_codes = {p.get("code") for p in allowed_products}
-
-        for cited_code in products_cited:
-            if cited_code not in allowed_codes:
-                logger.warning(f"   ⚠️  Alucinación detectada: código {cited_code} no existe")
-                hallucinations_detected = True
-
-        if hallucinations_detected:
-            logger.info("   🔧 Regenerando respuesta con listado seguro")
-
-            # Generar respuesta básica segura
-            safe_products = allowed_products[:3]
-            message_lines = [
-                f"Te encontré estas opciones para {normalized_query}:",
-                ""
+    # Manejar productos restantes (chunks)
+    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
+        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
+        if remaining_products:
+            chunks = [
+                remaining_products[i : i + PRODUCTS_PER_CHUNK]
+                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
             ]
 
-            for p in safe_products:
-                code = p.get("code", "N/A")
-                name = p.get("name", "Producto")[:60]
-                price = p.get("price_ars", 0)
-                message_lines.append(f"• {code} - {name} - ${price:,.0f}")
+            for idx, chunk in enumerate(chunks, 1):
+                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
+                chunk_text += format_search_results(chunk)
+                time.sleep(0.5)
+                send_long_message(phone, chunk_text)
 
-            message_lines.append("")
-            message_lines.append("¿Querés que compare opciones o te arme el carrito?")
-            message = "\n".join(message_lines)
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, intent, len(selected_for_template))
+    log_performance(phone, intent, time.time() - start_time, len(allowed_products))
+    update_sales_phase_from_intent(phone, intent)
 
-            products_cited = [p.get("code") for p in safe_products]
+    logger.info(f"[v3.16 - DONE] Hybrid architecture complete | Duration: {time.time()-start_time:.2f}s")
 
-    metadata["validation"] = {
-        "hallucinations_detected": hallucinations_detected,
-        "regeneration_needed": hallucinations_detected
-    }
+    return reply
 
-    # ===== FASE 8: CHUNKS & DELIVERY =====
-    logger.info("📦 [FASE 8] Chunks & Delivery")
+# =========================================================
+# ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
+# =========================================================
+def orquestar_fran(mensaje_usuario, phone):
+    """
+    Orquestador unificado de Fran.
 
-    save_message(phone, message, "assistant")
-
-    # Enviar productos adicionales en chunks si es necesario
-    if action_type == "search" and len(allowed_products) > 15:
-        remaining_products = allowed_products[15:]
-        chunks_sent = 0
-
-        for i in range(0, len(remaining_products), 30):
-            chunk = remaining_products[i:i+30]
-            chunk_message = format_product_chunk(chunk, i+16, normalized_query)
-
-            time.sleep(0.5)  # Delay entre chunks
-            send_whatsapp_message(phone, chunk_message)
-            chunks_sent += 1
-
-            if chunks_sent >= 3:  # Máximo 3 chunks adicionales
-                break
-
-        logger.info(f"   📤 Enviados {chunks_sent} chunks adicionales")
-
-    # ===== FINALIZACIÓN =====
-    metadata["total_duration_ms"] = (time.time() - start_time) * 1000
-    logger.info(f"✨ [Fran 3.16] Completado en {metadata['total_duration_ms']:.0f}ms | {metadata['llm_calls_count']} LLM calls")
-
-    # Log estructurado
-    log_interaction_v316(phone, metadata)
-
-    return message
-
-
-def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
+    Gestiona rate limiting, búsqueda, memoria y el doble
+    paso de LLM (razonamiento interno + respuesta conversacional).
+    """
     start_time = time.time()
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+    save_message(phone, user_message, "user")
 
     if not rate_limit_check(phone):
         reply = "Demasiados mensajes, esperá un minuto."
         save_message(phone, reply, "assistant")
         return reply
 
-    save_message(phone, user_message, "user")
+    last_search_data = get_last_search(phone) or {}
+    last_search_query = (last_search_data.get("query") or "").strip()
 
-    if not is_llm_available():
-        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
-        save_message(phone, reply, "assistant")
-        return reply
+    execution_context = {
+        "intent_detected": "unified",
+        "intent_details": {},
+        "search_query": user_message,
+        "search_executed": False,
+        "products_found": 0,
+        "products_shown_to_llm": 0,
+        "filters_applied": [],
+        "quality_assessment": None,
+        "will_send_chunks": False,
+        "chunk_info": None,
+        "warnings": [],
+    }
 
-    understanding = complete_template(
-        "query_understanding",
-        {
-            "phone": phone,
-            "user_message": user_message,
-            "conversation_history": get_history_since(phone, days=1, limit=6),
-            "last_search_query": (get_last_search(phone) or {}).get("query", ""),
-        },
+    products = []
+    query_for_search = user_message
+    corrections = []
+
+    if query_for_search and len(query_for_search.split()) < 4 and last_search_query:
+        query_for_search = f"{last_search_query} {query_for_search}".strip()
+        execution_context["warnings"].append("query_refined_with_last_search")
+
+    query_for_search, corrections = autocorrect_keywords(query_for_search)
+    if corrections:
+        execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
+
+    execution_context["search_query"] = query_for_search
+
+    semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
+
+    if isinstance(semantic_results, dict):
+        if semantic_results.get("error") == "too_many_combinations":
+            reply = semantic_results.get("message") or "Hay demasiadas combinaciones, pasame una sola moto o categoría."
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "too_many_combinations", 0)
+            log_performance(phone, "too_many_combinations", time.time()-start_time, 0)
+            return reply
+        execution_context["search_executed"] = True
+        total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
+        execution_context["products_found"] = total_found
+        reply = format_multi_search_response(semantic_results)
+        if reply:
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "multi_search", total_found)
+            log_performance(phone, "multi_search", time.time()-start_time, total_found)
+            update_sales_phase_from_intent(phone, "product_search")
+            return reply
+        semantic_results = []
+
+    products = [p for p, _ in semantic_results]
+
+    execution_context["search_executed"] = True
+    execution_context["products_found"] = len(products)
+
+    if products:
+        original_len = len(products)
+        filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
+        if filtered_products:
+            products = filtered_products
+            execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
+
+    quality_assessment = assess_context_quality(query_for_search, products)
+    execution_context["quality_assessment"] = quality_assessment
+    log_quality_metrics(
+        phone,
+        query_for_search,
+        quality_assessment.get("avg_score", 0),
+        quality_assessment.get("max_score", 0),
+        quality_assessment.get("relevant_count", 0),
     )
 
-    allowed_types = {"product_search", "cart_action", "general_chat", "clarification", "compare", "checkout"}
-    intents = [
-        intent
-        for intent in (understanding.get("intents") or [])
-        if intent.get("type") in allowed_types and (intent.get("span") or "").strip()
-    ]
-    if not intents:
-        intents = [{"type": "general_chat", "span": user_message, "confidence": 0.5, "data": {}}]
-
-    has_product_intent = any(i.get("type") == "product_search" for i in intents)
-    if not has_product_intent:
-        reply = handle_social_intents_only(intents, phone)
+    if not quality_assessment["sufficient"]:
+        if quality_assessment["action"] == "ask_clarification":
+            reply = quality_assessment["message"]
+        elif quality_assessment["action"] == "suggest_alternatives":
+            top_products = quality_assessment.get("top_products", [])
+            suggestions = "\n".join(
+                [
+                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
+                    for p in top_products
+                ]
+            )
+            reply = (
+                "No encontré coincidencia perfecta, pero tengo estas opciones que se acercan:\n\n"
+                f"{suggestions}\n\n"
+                "O dame un poco más de detalle (marca/modelo/año) y afinamos la búsqueda."
+            )
         save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, "multi_intent", 0)
-        log_performance(phone, "multi_intent", time.time() - start_time, 0)
+        log_interaction(phone, user_message, f"low_quality_{quality_assessment['reason']}", 0)
+        log_performance(phone, "low_quality", time.time()-start_time, 0)
         return reply
 
-    priority = {
-        "general_chat": 0,
-        "clarification": 1,
-        "compare": 2,
-        "product_search": 3,
-        "cart_action": 4,
-        "checkout": 5,
-    }
-    intents_sorted = sorted(intents, key=lambda x: priority.get(x.get("type", "z"), 9))
+    if products:
+        save_last_search(phone, [
+            {
+                "code": p["code"],
+                "name": p["name"],
+                "price_ars": p["price_ars"],
+                "price_usd": p["price_usd"],
+                "qty": 1
+            }
+            for p in products[:150]
+        ], query_for_search)
 
-    responses: list[tuple[str, str]] = []
-    all_products = []
+    execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
 
-    for intent in intents_sorted:
-        itype = intent.get("type")
-        if itype == "general_chat":
-            responses.append((itype, handle_general_chat_intent(intent, phone, load_context(phone, last_7_days=True))))
-        elif itype == "clarification":
-            responses.append((itype, handle_clarification_intent(intent, phone)))
-        elif itype == "cart_action":
-            responses.append((itype, handle_cart_action_intent(intent, phone)))
-        elif itype == "product_search":
-            reply, products = handle_product_search_intent(intent, phone)
-            responses.append((itype, reply))
-            all_products.extend(products or [])
-        elif itype == "compare":
-            responses.append((itype, handle_clarification_intent(intent, phone)))
-        elif itype == "checkout":
-            responses.append((itype, handle_checkout_intent(intent, phone)))
+    if len(products) > MAX_PRODUCTS_FOR_LLM:
+        execution_context["will_send_chunks"] = True
+        num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
+        execution_context["chunk_info"] = {
+            "total_chunks": num_chunks,
+            "products_per_chunk": PRODUCTS_PER_CHUNK,
+            "total_products": len(products)
+        }
 
-    final_reply = combine_responses(responses, intents_sorted)
+    result = generate_smart_ai_reply_v2(
+        phone,
+        user_message,
+        products[:MAX_PRODUCTS_FOR_LLM],
+        execution_context,
+        system_prompt=CITATION_ENFORCED_PROMPT
+    )
 
-    save_message(phone, final_reply, "assistant")
-    log_interaction(phone, user_message, "multi_intent", len(all_products))
-    log_performance(phone, "multi_intent", time.time() - start_time, len(all_products))
+    reply = result.get("reply") or "Uy, tuve un problema. ¿Me repetís?"
+    plan = result.get("plan") or {}
+    real_intent = plan.get("real_intent", "unknown")
+    execution_context["intent_detected"] = real_intent
 
-    return final_reply
+    if products:
+        allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
+        reply = validate_and_fix_response(reply, allowed_products, phone, execution_context)
 
-# =========================================================
-# ORQUESTADOR PRINCIPAL – VERSIÓN 3.15
-# =========================================================
-def orquestar_fran(mensaje_usuario: str, phone: str) -> str:
-    """
-    Orquestador unificado de Fran.
+    if execution_context["will_send_chunks"] and products:
+        chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
+        for idx, chunk in enumerate(chunks, 1):
+            chunk_text = f"━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
+            chunk_text += format_search_results(chunk)
+            if idx > 1:
+                time.sleep(0.5)
+            send_long_message(phone, chunk_text)
 
-    Wrapper sobre la versión 3.15 (templates estructurados) para evitar
-    mantener dos implementaciones del flujo conversacional.
-    """
-    return orquestar_fran_v315(mensaje_usuario, phone)
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, real_intent, len(products))
+    log_performance(phone, real_intent, time.time()-start_time, len(products))
+    update_sales_phase_from_intent(phone, real_intent)
+    return reply
+
 
 def run_agent(phone, user_message):
     """Compatibilidad hacia atrás con el nombre anterior."""
@@ -6788,7 +5198,7 @@ def send_long_message(phone, text, chunk_size=1600):
         return False
 
     try:
-        parts = chunk_message_for_twilio(text, chunk_size)
+        parts = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
         logger.info(f"Enviando {len(parts)} chunks a {phone}")
 
         for idx, part in enumerate(parts):
@@ -6817,32 +5227,6 @@ def send_long_message(phone, text, chunk_size=1600):
 # ------------------------------------------------------------------
 # WEBHOOK WHATSAPP
 # ------------------------------------------------------------------
-def should_use_v316(phone: str) -> bool:
-    """
-    Determina si debe usar Fran 3.16 para este teléfono.
-
-    Criterios:
-    1. Si USE_FRAN_316=true → todos usan 3.16
-    2. Si phone está en BETA_PHONES_316 → usa 3.16
-    3. Si no → usa versión por defecto
-
-    Args:
-        phone: Número de teléfono
-
-    Returns:
-        bool: True si debe usar 3.16
-    """
-    # Si está habilitado globalmente
-    if USE_FRAN_316:
-        return True
-
-    # Si está en lista de beta testers
-    if phone in BETA_PHONES_316:
-        return True
-
-    return False
-
-
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     try:
@@ -6861,20 +5245,6 @@ def whatsapp_webhook():
             return Response("<Response></Response>", mimetype="text/xml")
 
         logger.info(f"Mensaje sanitizado: {message_body}")
-
-        last_seen = get_last_interaction(from_number)
-        if last_seen:
-            age_minutes = minutes_since(last_seen)
-            if age_minutes and age_minutes > 10080:
-                clear_memory(from_number)
-
-        closed_at = get_order_closed_at(from_number)
-        if closed_at:
-            closed_age = minutes_since(closed_at)
-            if closed_age and closed_age > 10080:
-                clear_memory(from_number)
-
-        update_last_interaction(from_number)
 
         if is_duplicate_message(from_number, message_body):
             logger.info(f"Mensaje duplicado ignorado de {from_number}")
@@ -6898,18 +5268,21 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        # Selección de versión de Fran
-        if should_use_v316(from_number):
-            logger.info(f"🚀 Usando Fran 3.16 (Híbrido Agentic) para {from_number}")
+        # A/B/C routing entre versiones 3.14, 3.15 y 3.16
+        version = get_orchestrator_version(from_number)
+        logger.info(f"Using orchestrator version: {version} for {from_number}")
+
+        if version == "3.16":
             reply = orquestar_fran_v316(message_body, from_number)
-        else:
-            logger.info(f"📋 Usando Fran default para {from_number}")
+        elif version == "3.15":
+            reply = orquestar_fran_v315(message_body, from_number)
+        else:  # 3.14
             reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
 
-        if len(reply) <= TWILIO_CHUNK_LIMIT:
+        if len(reply) <= WHATSAPP_MSG_LIMIT:
             logger.info("Mensaje corto, usando TwiML")
             resp = MessagingResponse()
             resp.message(reply)
@@ -6936,9 +5309,14 @@ def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.15",
+        "version": "3.16",
         "catalog_size": len(catalog) if catalog else 0,
-        "architecture": "claude_inspired_families_hybrid_intents_context_v2",
+        "architecture": "hybrid_templates_reasoning_v316",
+        "orchestrators": {
+            "v3.16": "hybrid (templates + reasoning + re-query)",
+            "v3.15": "structured templates",
+            "v3.14": "dual LLM reasoning"
+        },
         "features": [
             "context_quality_check",
             "relevance_scoring",
@@ -6976,7 +5354,7 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("=" * 60)
-    logger.info("🚀 Iniciando Fran 3.15 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0 + doble LLM")
+    logger.info("🚀 Iniciando Fran 3.14 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0 + doble LLM")
     logger.info("=" * 60)
     logger.info(f"Puerto: {port}")
     logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
@@ -6984,7 +5362,7 @@ if __name__ == "__main__":
     logger.info(f"Relevance min score: {RELEVANCE_MIN_SCORE}")
     logger.info(f"Quality thresholds: HIGH={QUALITY_HIGH_THRESHOLD}, MED={QUALITY_MEDIUM_THRESHOLD}")
     logger.info("=" * 60)
-    logger.info("Características nuevas en 3.15:")
+    logger.info("Características nuevas en 3.14:")
     logger.info("  ✅ Doble llamada LLM (plan interno + respuesta final)")
     logger.info("  ✅ Orquestador unificado orquestar_fran")
     logger.info("  ✅ Validación de búsqueda con reintento sugerido por LLM")

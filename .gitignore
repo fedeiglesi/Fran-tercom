@@ -1,9 +1,47 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.db
-.env
-.envrc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
 venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
 .env.local
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# FAISS indices
+*.faiss
+*.pkl
+
+# Logs
+*.log
+logs/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Twilio/WhatsApp test files
+test_webhook.py
