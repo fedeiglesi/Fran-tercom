@@ -321,10 +321,154 @@ RESPONSE_GENERATION_SCHEMA = {
     }
 }
 
+# ============================================================
+# NUEVOS SCHEMAS - FRAN 3.16
+# ============================================================
+
+REASONING_SCHEMA = {
+    "task": "reason_about_query",
+    "description": """
+    Sos un experto en ventas de repuestos de motos. Analiza la situación
+    y razona qué acción tomar.
+
+    Piensa paso por paso sobre:
+    1. ¿Qué está pidiendo realmente el usuario?
+    2. ¿Tengo suficiente información del contexto?
+    3. ¿Qué estrategia de búsqueda es más apropiada?
+    4. ¿Debería usar información previa (carrito, última búsqueda)?
+    5. ¿Cuál es el mejor resultado esperado?
+
+    Genera un plan claro de acción.
+    """,
+    "output_schema": {
+        "type": "object",
+        "required": ["reasoning_steps", "decision", "confidence"],
+        "properties": {
+            "reasoning_steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Pasos del razonamiento (para logging)"
+            },
+            "decision": {
+                "type": "object",
+                "required": ["action_type", "search_strategy"],
+                "properties": {
+                    "action_type": {
+                        "type": "string",
+                        "enum": ["search", "cart_operation", "social", "clarification"],
+                        "description": "Tipo de acción a ejecutar"
+                    },
+                    "search_strategy": {
+                        "type": "string",
+                        "enum": ["hybrid", "semantic_only", "keyword_only", "family_based", "none"],
+                        "description": "Estrategia de búsqueda a usar"
+                    },
+                    "use_last_search": {
+                        "type": "boolean",
+                        "description": "Si debería usar productos de última búsqueda"
+                    },
+                    "use_cart_context": {
+                        "type": "boolean",
+                        "description": "Si debería considerar el carrito actual"
+                    },
+                    "expected_outcome": {
+                        "type": "string",
+                        "description": "Qué espera lograr con esta acción"
+                    }
+                }
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Confianza en el plan (0.0-1.0)"
+            },
+            "fallback_plan": {
+                "type": "string",
+                "description": "Qué hacer si el plan principal falla"
+            }
+        }
+    }
+}
+
+REFLECTION_SCHEMA = {
+    "task": "reflect_on_results",
+    "description": """
+    Analiza críticamente los resultados de la búsqueda/acción ejecutada.
+
+    Evalúa:
+    1. ¿Los resultados son coherentes con la query?
+    2. ¿La calidad es suficiente?
+    3. ¿Hay problemas que ameriten re-intentar?
+    4. ¿Debería usar una estrategia diferente?
+
+    Sé crítico y honesto. Es mejor re-intentar que dar resultados pobres.
+    """,
+    "output_schema": {
+        "type": "object",
+        "required": ["evaluation", "decision"],
+        "properties": {
+            "evaluation": {
+                "type": "object",
+                "properties": {
+                    "quality_score": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100,
+                        "description": "Score de calidad general (0-100)"
+                    },
+                    "coherence_check": {
+                        "type": "boolean",
+                        "description": "¿Resultados coherentes con query?"
+                    },
+                    "quantity_appropriate": {
+                        "type": "boolean",
+                        "description": "¿Cantidad de resultados apropiada?"
+                    },
+                    "issues_found": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Problemas específicos detectados"
+                    }
+                }
+            },
+            "decision": {
+                "type": "object",
+                "required": ["should_retry", "proceed_with_results"],
+                "properties": {
+                    "should_retry": {
+                        "type": "boolean",
+                        "description": "Si debería re-intentar la búsqueda"
+                    },
+                    "retry_strategy": {
+                        "type": "string",
+                        "enum": ["broader_search", "narrower_search", "different_keywords", "family_fallback"],
+                        "description": "Estrategia para el retry (si should_retry=true)"
+                    },
+                    "retry_reason": {
+                        "type": "string",
+                        "description": "Por qué se necesita retry"
+                    },
+                    "proceed_with_results": {
+                        "type": "boolean",
+                        "description": "Si puede continuar con resultados actuales"
+                    }
+                }
+            },
+            "reflection_notes": {
+                "type": "string",
+                "description": "Notas adicionales para logging"
+            }
+        }
+    }
+}
+
 TEMPLATES = {
     "query_understanding": QUERY_UNDERSTANDING_SCHEMA,
     "product_selection": PRODUCT_SELECTION_SCHEMA,
-    "response_generation": RESPONSE_GENERATION_SCHEMA
+    "response_generation": RESPONSE_GENERATION_SCHEMA,
+    "reasoning": REASONING_SCHEMA,
+    "reflection": REFLECTION_SCHEMA
 }
 
 # ------------------------------------------------------------
@@ -422,6 +566,33 @@ TEMPLATE_FALLBACKS = {
         "products_cited": [],
         "tone": "friendly",
         "next_expected_action": "retry"
+    },
+    "reasoning": {
+        "reasoning_steps": ["Fallback por error técnico"],
+        "decision": {
+            "action_type": "clarification",
+            "search_strategy": "none",
+            "use_last_search": False,
+            "use_cart_context": False,
+            "expected_outcome": "Pedir aclaración al usuario"
+        },
+        "confidence": 0.3,
+        "fallback_plan": "Pedir al usuario que reformule su mensaje"
+    },
+    "reflection": {
+        "evaluation": {
+            "quality_score": 0,
+            "coherence_check": False,
+            "quantity_appropriate": False,
+            "issues_found": ["Error técnico en evaluación"]
+        },
+        "decision": {
+            "should_retry": False,
+            "retry_strategy": "broader_search",
+            "retry_reason": "Error técnico",
+            "proceed_with_results": True
+        },
+        "reflection_notes": "Fallback por error en reflection"
     }
 }
 
