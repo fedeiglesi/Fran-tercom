@@ -2093,6 +2093,11 @@ def default_context():
         "last_cart_action": "",
         "cart_state": [],
         "last_motorcycle_detected": "",
+        "topic": "",
+        "dialogue_stage": "idle",
+        "pending_product": {},
+        "last_product_list": [],
+        "actions_history": [],
         "timestamp": datetime.now().isoformat(),
         "order_closed_at": None,
     }
@@ -2103,12 +2108,217 @@ def _normalize_context(ctx: dict) -> dict:
     if not isinstance(ctx, dict):
         return base
     merged = {**base, **ctx}
-    for key in ("last_products", "last_compare_products", "cart_state"):
+    for key in (
+        "last_products",
+        "last_compare_products",
+        "cart_state",
+        "last_product_list",
+        "actions_history",
+    ):
         if merged.get(key) is None:
             merged[key] = []
+    if merged.get("pending_product") is None:
+        merged["pending_product"] = {}
+    if merged.get("topic") is None:
+        merged["topic"] = ""
+    if merged.get("dialogue_stage") is None:
+        merged["dialogue_stage"] = "idle"
     if merged.get("timestamp") is None:
         merged["timestamp"] = datetime.now().isoformat()
     return merged
+
+
+class SessionBrain:
+    """Coordina el estado vivo de la sesión para dar continuidad real."""
+
+    SHORT_FOLLOW_UPS = {
+        "si",
+        "sí",
+        "dale",
+        "ok",
+        "oka",
+        "oks",
+        "dalee",
+        "listo",
+        "perfecto",
+        "va",
+        "me sirve",
+        "de una",
+        "joya",
+    }
+
+    def __init__(self, context: dict):
+        normalized = _normalize_context(context or {})
+        self.topic = normalized.get("topic", "")
+        self.stage = normalized.get("dialogue_stage", "idle")
+        self.pending_product = normalized.get("pending_product") or {}
+        self.last_product_list = normalized.get("last_product_list") or normalized.get("last_products") or []
+        self.last_motorcycle = normalized.get("last_motorcycle_detected", "")
+        self.previous_intent = normalized.get("last_intent", "")
+        self.actions_history = normalized.get("actions_history") or []
+        self.topic_switched = False
+
+    def detect_topic_switch(self, moto_detected: str | None, category: str | None = None):
+        moto_detected = (moto_detected or "").strip()
+        if moto_detected and self.last_motorcycle and moto_detected.lower() != self.last_motorcycle.lower():
+            self.topic_switched = True
+            self.stage = "discovery"
+            self.pending_product = {}
+            self.last_product_list = []
+        if moto_detected:
+            self.topic = moto_detected
+            self.last_motorcycle = moto_detected
+        if category and not self.topic:
+            self.topic = category
+
+    def _is_short_follow_up(self, text: str) -> bool:
+        normalized = strip_accents(text.strip().lower())
+        return normalized in self.SHORT_FOLLOW_UPS or len(normalized) <= 4
+
+    def _match_product_in_memory(self, text: str):
+        text_norm = strip_accents(text.lower())
+        for product in self.last_product_list or []:
+            code = strip_accents(str(product.get("code") or product.get("codigo") or "").lower())
+            name = strip_accents(str(product.get("name") or product.get("nombre") or "").lower())
+            if code and code in text_norm:
+                return product
+            if name and name in text_norm:
+                return product
+        return None
+
+    def blend_intents(self, intents: list[dict], user_message: str) -> list[dict]:
+        # Maneja follow-ups cortos para no perder continuidad.
+        if self._is_short_follow_up(user_message):
+            if self.pending_product:
+                return [
+                    {
+                        "type": "cart_action",
+                        "span": user_message,
+                        "confidence": 0.78,
+                        "data": {
+                            "action": "add",
+                            "product": self.pending_product.get("code") or self.pending_product.get("name"),
+                            "notes": "follow_up_confirmation",
+                        },
+                    }
+                ]
+
+            matched = self._match_product_in_memory(user_message)
+            if matched:
+                return [
+                    {
+                        "type": "cart_action",
+                        "span": user_message,
+                        "confidence": 0.72,
+                        "data": {
+                            "action": "add",
+                            "product": matched.get("code") or matched.get("name"),
+                            "notes": "follow_up_match",
+                        },
+                    }
+                ]
+
+            if self.previous_intent in {"product_search", "compare", "clarification"}:
+                return [
+                    {
+                        "type": "clarification",
+                        "span": user_message,
+                        "confidence": 0.6,
+                        "data": {"notes": "short_follow_up"},
+                    }
+                ]
+
+        matched = self._match_product_in_memory(user_message)
+        if matched and self.stage in {"awaiting_confirmation", "comparison"}:
+            return [
+                {
+                    "type": "cart_action",
+                    "span": user_message,
+                    "confidence": 0.7,
+                    "data": {
+                        "action": "add",
+                        "product": matched.get("code") or matched.get("name"),
+                        "notes": "confirmation_match",
+                    },
+                }
+            ]
+
+        # Intent blender: prioriza intents concretos y evita perder el topic.
+        priority = {
+            "checkout": 0,
+            "cart_action": 1,
+            "compare": 2,
+            "product_search": 3,
+            "clarification": 4,
+            "general_chat": 5,
+        }
+        dedup: dict[str, dict] = {}
+        for intent in intents or []:
+            itype = intent.get("type") or "general_chat"
+            if itype not in dedup or priority.get(itype, 99) < priority.get(dedup[itype].get("type", "general_chat"), 99):
+                dedup[itype] = intent
+
+        blended = sorted(dedup.values(), key=lambda x: priority.get(x.get("type", "general_chat"), 99))
+        return blended or [
+            {
+                "type": "general_chat",
+                "span": user_message,
+                "confidence": 0.4,
+                "data": {"notes": "fallback_general_chat"},
+            }
+        ]
+
+    def update_after_interaction(
+        self,
+        primary_intent: str,
+        normalized_query: str,
+        selected_products: list,
+        candidates: list,
+        moto_detected: str,
+    ):
+        if primary_intent == "product_search" and (selected_products or candidates):
+            self.last_product_list = selected_products or candidates
+            self.pending_product = (selected_products or candidates or [{}])[0]
+            self.stage = "awaiting_confirmation"
+        elif primary_intent == "cart_action":
+            self.stage = "cart"
+            if selected_products:
+                self.pending_product = selected_products[0]
+        elif primary_intent == "compare":
+            self.stage = "comparison"
+            if selected_products:
+                self.pending_product = selected_products[0]
+        elif primary_intent == "checkout":
+            self.stage = "closing"
+        elif primary_intent == "general_chat":
+            self.stage = "chat"
+        else:
+            self.stage = "discovery"
+
+        if moto_detected:
+            self.last_motorcycle = moto_detected
+            self.topic = moto_detected
+        if normalized_query:
+            self.actions_history = (self.actions_history or [])[-8:] + [
+                {
+                    "intent": primary_intent,
+                    "query": normalized_query,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            ]
+
+    def to_context(self, context: dict) -> dict:
+        context.update(
+            {
+                "topic": self.topic,
+                "dialogue_stage": self.stage,
+                "pending_product": self.pending_product,
+                "last_product_list": self.last_product_list,
+                "last_motorcycle_detected": self.last_motorcycle,
+                "actions_history": self.actions_history,
+            }
+        )
+        return context
 
 
 def load_context(phone: str, last_7_days: bool = True) -> dict:
@@ -5079,6 +5289,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     save_message(phone, user_message, "user")
 
     context = load_context(phone, last_7_days=True)
+    session_brain = SessionBrain(context)
 
     if not is_llm_available():
         reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
@@ -5159,6 +5370,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             }
         ]
 
+    intents = session_brain.blend_intents(intents, user_message)
     understanding["intents"] = intents
 
     primary_intent = intents[0].get("type") if intents else "general_chat"
@@ -5175,6 +5387,8 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     normalized_query = understanding.get("normalized_query") or (
         primary_span if primary_intent == "product_search" else user_message
     )
+    if primary_intent in {"cart_action", "checkout", "clarification"} and not understanding.get("normalized_query"):
+        normalized_query = context.get("last_query") or normalized_query
 
     moto_detected = ""
     try:
@@ -5184,6 +5398,18 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
             moto_detected = f"{moto.get('brand', '')} {moto.get('model', '')}".strip()
     except Exception:
         moto_detected = context.get("last_motorcycle_detected", "")
+
+    session_brain.detect_topic_switch(
+        moto_detected,
+        intents[0].get("data", {}).get("category") if intents else None,
+    )
+    if session_brain.topic_switched:
+        logger.info("[SESSION] Topic switch detected, reseteando contexto de productos")
+        context["last_products"] = []
+        context["last_compare_products"] = []
+        context["last_product_list"] = []
+        context["pending_product"] = {}
+        context["dialogue_stage"] = "discovery"
 
     logger.info(
         f"[STEP 1] Normalized: '{normalized_query}' | Intent: {primary_intent} | Corrections: {understanding.get('corrections')}"
@@ -5216,7 +5442,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     search_results: dict | list = {}
 
     use_memory = True
-    context_products = context.get("last_products") or []
+    context_products = session_brain.last_product_list or context.get("last_products") or []
     if context_products:
         recent_products = context_products + recent_products
         deduped_recent = {}
@@ -5454,6 +5680,15 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
     if primary_intent == "general_chat" and not context.get("last_query"):
         context["last_query"] = user_message
+
+    session_brain.update_after_interaction(
+        primary_intent,
+        normalized_query,
+        selected_products,
+        candidates,
+        moto_detected,
+    )
+    context = session_brain.to_context(context)
 
     save_context(phone, context)
 

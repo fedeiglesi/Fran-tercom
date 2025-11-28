@@ -98,6 +98,12 @@ def orchestrate(
 
     intents_detected = parse_multi_intent(llm, message)
 
+    normalized_intents = []
+    for intent in intents_detected:
+        if intent.get("type") == "social":
+            intent = {**intent, "type": "general_chat"}
+        normalized_intents.append(intent)
+
     prioridad = {
         "general_chat": 0,
         "clarification": 1,
@@ -106,7 +112,7 @@ def orchestrate(
         "cart_action": 4,
         "checkout": 5,
     }
-    intents_sorted = sorted(intents_detected, key=lambda x: prioridad.get(x.get("type"), len(prioridad)))
+    intents_sorted = sorted(normalized_intents, key=lambda x: prioridad.get(x.get("type"), len(prioridad)))
 
     respuestas = []
 
