@@ -400,10 +400,10 @@ TEMPLATE_FALLBACKS = {
     "query_understanding": {
         "intents": [
             {
-                "type": "social",
+                "type": "general_chat",
                 "span": "",
                 "confidence": 0.5,
-                "data": {},
+                "data": {"notes": "", "quantity": 1},
             }
         ]
     },
@@ -424,6 +424,49 @@ TEMPLATE_FALLBACKS = {
         "next_expected_action": "retry"
     }
 }
+
+
+def normalize_query_intents(result: dict, context: dict | None = None) -> dict:
+    """Normalizar intents para evitar arrays vacíos o campos nulos."""
+
+    context = context or {}
+    intents = result.get("intents") or []
+    user_message = context.get("user_message", "") or ""
+    normalized_candidate = (
+        result.get("normalized_query")
+        or (intents[0].get("span") if intents else "")
+        or user_message
+    )
+
+    if not intents:
+        intents = [
+            {
+                "type": "general_chat",
+                "span": user_message,
+                "confidence": 0.5,
+                "data": {
+                    "notes": normalized_candidate or user_message or "",
+                    "quantity": 1,
+                },
+            }
+        ]
+
+    updated_intents = []
+    for intent in intents:
+        data = intent.get("data") or {}
+        intent_name = intent.get("type") or ""
+
+        if data.get("notes") is None:
+            data["notes"] = ""
+        if data.get("quantity") is None:
+            data["quantity"] = 1
+
+        intent["data"] = data
+        intent["type"] = intent_name or "general_chat"
+        updated_intents.append(intent)
+
+    result["intents"] = updated_intents
+    return result
 
 
 def validate_schema(data: dict, schema: dict) -> bool:
@@ -496,9 +539,22 @@ REGLAS:
                 )
 
             result = json.loads(resp.choices[0].message.content)
-            validate_schema(result, template["output_schema"])
-            if template_name == "query_understanding" and not (result.get("intents") or []):
-                raise ValueError("Schema validation failed: intents array vacío")
+            if template_name == "query_understanding":
+                result = normalize_query_intents(result, context)
+            try:
+                validate_schema(result, template["output_schema"])
+                if template_name == "query_understanding" and not (result.get("intents") or []):
+                    raise ValueError("Schema validation failed: intents array vacío")
+            except ValueError as validation_error:
+                if template_name == "query_understanding":
+                    logger.warning(
+                        "Schema validation failed for understanding: %s. Normalizing and retrying.",
+                        validation_error,
+                    )
+                    result = normalize_query_intents(result, context)
+                    validate_schema(result, template["output_schema"])
+                else:
+                    raise
             log_template_execution(template_name, context, result, time.time() - start_time)
             return result
 
@@ -508,7 +564,23 @@ REGLAS:
             time.sleep(0.2)
 
     logger.error(f"Template completion failed after retries: {last_error}", exc_info=True)
-    fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+    if template_name == "query_understanding":
+        fallback = {
+            "normalized_query": (context or {}).get("user_message", "") or "",
+            "intents": [
+                {
+                    "type": "general_chat",
+                    "span": (context or {}).get("user_message", "") or "",
+                    "confidence": 0.5,
+                    "data": {
+                        "notes": (context or {}).get("user_message", "") or "",
+                        "quantity": 1,
+                    },
+                }
+            ],
+        }
+    else:
+        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
     try:
         log_template_execution(template_name, context, fallback, time.time() - start_time)
     except Exception:
