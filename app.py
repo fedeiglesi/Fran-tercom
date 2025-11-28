@@ -1229,7 +1229,9 @@ def detect_semantic_entities(message: str) -> dict:
     }
 
 
-def merge_intents_with_semantics(semantic_signals: dict, llm_intent: str | None) -> list[str]:
+def merge_intents_with_semantics(
+    semantic_signals: dict, llm_intent: str | None, llm_semantic_intents: list[str] | None = None
+) -> list[str]:
     """Fuse deterministic semantic evidence with the LLM intent guess.
 
     - If technical entities are present, product_search is mandatory and the
@@ -1248,13 +1250,22 @@ def merge_intents_with_semantics(semantic_signals: dict, llm_intent: str | None)
     if semantic_signals.get("has_technical"):
         intents.append("product_search")
 
+    llm_intents: list[str] = []
     if llm_intent:
-        if llm_intent == "social" and semantic_signals.get("has_technical"):
-            # keep social context but enforce product search
+        llm_intents.append(llm_intent)
+    if llm_semantic_intents:
+        for cand in llm_semantic_intents:
+            if cand and cand not in llm_intents:
+                llm_intents.append(cand)
+
+    for candidate in llm_intents:
+        if candidate == "social" and semantic_signals.get("has_technical"):
             if "social" not in intents:
                 intents.append("social")
-        elif llm_intent not in intents:
-            intents.append(llm_intent)
+            if "product_search" not in intents:
+                intents.append("product_search")
+        elif candidate and candidate not in intents:
+            intents.append(candidate)
 
     if not intents:
         intents.append(llm_intent or "product_search")
@@ -4976,20 +4987,45 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     normalized_query = understanding.get("normalized_query") or user_message
     intent = understanding.get("intent") or "product_search"
     entities = understanding.get("entities", {})
+    semantic_intents = [i for i in (understanding.get("semantic_intents") or []) if i]
 
-    intents_detected = merge_intents_with_semantics(semantic_signals, intent)
-    primary_intent = "product_search" if "product_search" in intents_detected else intents_detected[0]
+    parser_detected_technical = bool(
+        semantic_signals.get("has_technical")
+        or semantic_signals.get("technical_tokens")
+        or semantic_signals.get("brands")
+        or semantic_signals.get("models")
+        or semantic_signals.get("purchase_verbs")
+        or semantic_signals.get("codes")
+    )
+
+    intents_detected = merge_intents_with_semantics(semantic_signals, intent, semantic_intents)
+
+    if parser_detected_technical and "product_search" not in intents_detected:
+        intents_detected.insert(0, "product_search")
+
+    semantic_has_product = "product_search" in semantic_intents
+    intent_final = "product_search" if semantic_has_product or parser_detected_technical else intent
+    primary_intent = intent_final if intent_final else intents_detected[0]
 
     logger.info(
-        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Semantic intents: {intents_detected} | Corrections: {understanding.get('corrections')}"
+        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Semantic intents: {semantic_intents or intents_detected} | Corrections: {understanding.get('corrections')}"
     )
 
     # ============================================
     # FASE 2: SKIP LOGIC PARA INTENTS SOCIALES
     # ============================================
+    has_social_intent = "social" in semantic_intents or "social" in intents_detected
+    product_intent_active = "product_search" in intents_detected or semantic_has_product or parser_detected_technical
+    should_return_social_only = has_social_intent and not product_intent_active and primary_intent in [
+        "social",
+        "greeting",
+        "small_talk",
+        "conversation",
+    ]
+
     social_intro = None
-    if "social" in intents_detected:
-        logger.info("[v3.16 - FASE 2] Social markers detected, generando saludo")
+    if has_social_intent and (should_return_social_only or product_intent_active):
+        logger.info("[v3.16 - FASE 2] Generando respuesta social mínima")
         social_response = complete_template(
             "response_generation",
             {
@@ -5014,7 +5050,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         )
         social_intro = social_response.get("message", "")
 
-    if "product_search" not in intents_detected and primary_intent in ["social", "greeting", "small_talk", "conversation"]:
+    if should_return_social_only:
         reply = social_intro or "¿En qué te puedo ayudar?"
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, primary_intent, 0)
