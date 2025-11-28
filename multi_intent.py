@@ -29,7 +29,7 @@ def parse_multi_intent(llm: Callable[[str], str], message: str) -> Iterable[Inte
     {{
       "intents": [
         {{
-          "type": "social|product_search|cart_action|clarification|tech_question|order_flow",
+          "type": "general_chat|product_search|cart_action|clarification|compare|checkout",
           "span": "<texto_exactamente_original>",
           "confidence": 0.0,
           "data": {{"query": "", "product": "", "action": "", "quantity": 0}}
@@ -91,20 +91,20 @@ def orchestrate(
 ) -> str:
     """Execute multiple intents in priority order.
 
-    The orchestrator keeps priority stable (social → clarification →
-    product_search → cart_action) to ensure human rapport is handled
+    The orchestrator keeps priority stable (general_chat → clarification →
+    compare → product_search → cart_action → checkout) to ensure human rapport is handled
     first, followed by technical guidance.
     """
 
     intents_detected = parse_multi_intent(llm, message)
 
     prioridad = {
-        "social": 0,
+        "general_chat": 0,
         "clarification": 1,
-        "product_search": 2,
-        "cart_action": 3,
-        "tech_question": 4,
-        "order_flow": 5,
+        "compare": 2,
+        "product_search": 3,
+        "cart_action": 4,
+        "checkout": 5,
     }
     intents_sorted = sorted(intents_detected, key=lambda x: prioridad.get(x.get("type"), len(prioridad)))
 
@@ -114,7 +114,7 @@ def orchestrate(
         intent_type = intent_item["type"]
         span = intent_item["span"]
 
-        if intent_type == "social":
+        if intent_type == "general_chat":
             respuestas.append(llm(generate_social_prompt(span)))
             continue
 
@@ -129,6 +129,14 @@ def orchestrate(
 
         if intent_type == "cart_action":
             respuestas.append(process_cart_action(span, aplicar_accion_carrito))
+            continue
+
+        if intent_type == "compare":
+            respuestas.append(llm(generate_clarification_prompt(span)))
+            continue
+
+        if intent_type == "checkout":
+            respuestas.append("Cierro el pedido y preparo el total.")
             continue
 
     return " ".join(respuestas)
