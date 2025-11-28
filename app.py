@@ -6061,6 +6061,623 @@ def combine_responses(responses: list[tuple[str, str]], intents: list[dict]) -> 
     return "\n\n".join(chunks)
 
 
+# ============================================================
+# FUNCIONES AUXILIARES - FRAN 3.16
+# ============================================================
+
+def run_search_with_strategy(
+    query: str,
+    strategy: str,
+    phone: str,
+    use_last_search: bool = False,
+    top_k: int = 60
+) -> tuple[list[dict], dict]:
+    """
+    Ejecuta búsqueda con estrategia específica.
+
+    Args:
+        query: Query normalizada
+        strategy: "hybrid"|"semantic_only"|"keyword_only"|"family_based"|"none"
+        phone: Teléfono del usuario
+        use_last_search: Si debe combinar con última búsqueda
+        top_k: Máximo de resultados
+
+    Returns:
+        (productos, metadata) donde metadata incluye scores, timing, etc.
+    """
+    action_start = time.time()
+    products = []
+
+    try:
+        if strategy == "hybrid":
+            # FAISS + BM25 + RRF (actual)
+            products = hybrid_search(query, phone=phone, top_k=top_k)
+
+        elif strategy == "semantic_only":
+            # Solo FAISS - buscar en índice semántico
+            catalog, index, _, _ = get_catalog_and_index()
+            if index and catalog:
+                query_embedding = generate_embeddings_with_cache([query])
+                if query_embedding:
+                    emb_np = np.array([query_embedding[0]]).astype("float32")
+                    faiss.normalize_L2(emb_np)
+                    D, I = index.search(emb_np, min(top_k * 2, len(catalog)))
+                    products = [catalog[i] for i in I[0] if i < len(catalog)]
+
+        elif strategy == "keyword_only":
+            # Solo BM25
+            catalog, _, bm25_index, bm25_corpus = get_catalog_and_index()
+            if bm25_index and bm25_corpus:
+                query_tokens = _tokenize_text(query)
+                scores = bm25_index.get_scores(query_tokens)
+                top_indices = np.argsort(scores)[::-1][:top_k]
+                products = [catalog[i] for i in top_indices if i < len(catalog)]
+
+        elif strategy == "family_based":
+            # Búsqueda por familia de productos
+            parsed = parse_query_v2(query, phone=phone)
+            families = parsed.get("families", [])
+            catalog, _, _, _ = get_catalog_and_index()
+
+            if families and catalog:
+                family_products = []
+                for p in catalog:
+                    if any(fam.lower() in (p.get("family", "") or "").lower() for fam in families):
+                        family_products.append(p)
+
+                products = family_products[:top_k]
+            else:
+                # Fallback a hybrid si no hay familias
+                products = hybrid_search(query, phone=phone, top_k=top_k)
+
+        else:  # strategy == "none"
+            products = []
+
+        # Si use_last_search, combinar con última búsqueda
+        if use_last_search and products:
+            last_search = get_last_search(phone)
+            if last_search and last_search.get("products"):
+                # Mezclar resultados, evitando duplicados
+                existing_codes = {p.get("code") for p in products}
+                for p in last_search["products"][:20]:  # Máx 20 de last_search
+                    if p.get("code") not in existing_codes:
+                        products.append(p)
+                        existing_codes.add(p.get("code"))
+
+        # Post-procesamiento: filtrado por relevancia
+        if products:
+            products = filter_by_relevance(products, query)
+
+        # Evaluación de calidad
+        quality = assess_context_quality(products, query) if products else {
+            "sufficient": False,
+            "confidence": "low",
+            "avg_score": 0,
+            "max_score": 0
+        }
+
+        metadata = {
+            "strategy_used": strategy,
+            "total_found": len(products),
+            "avg_score": quality.get("avg_score", 0),
+            "max_score": quality.get("max_score", 0),
+            "duration_ms": (time.time() - action_start) * 1000,
+            "quality_assessment": quality
+        }
+
+        return products, metadata
+
+    except Exception as e:
+        logger.error(f"Error en run_search_with_strategy: {e}")
+        return [], {
+            "strategy_used": strategy,
+            "total_found": 0,
+            "error": str(e),
+            "duration_ms": (time.time() - action_start) * 1000
+        }
+
+
+def format_product_chunk(products: list[dict], start_num: int, query: str) -> str:
+    """
+    Formatea un chunk de productos para envío por WhatsApp.
+
+    Args:
+        products: Lista de productos
+        start_num: Número de inicio para el listado
+        query: Query original del usuario
+
+    Returns:
+        str: Mensaje formateado
+    """
+    if not products:
+        return ""
+
+    lines = [f"Más opciones para {query}:", ""]
+
+    for i, p in enumerate(products, start_num):
+        code = p.get("code", "N/A")
+        name = p.get("name", "Producto")[:60]
+        price = p.get("price_ars", 0)
+
+        lines.append(f"{i}. {code} - {name} - ${price:,.0f}")
+
+    return "\n".join(lines)
+
+
+def send_whatsapp_message(phone: str, message: str):
+    """
+    Envía un mensaje por WhatsApp usando Twilio REST API.
+
+    Args:
+        phone: Número de teléfono en formato WhatsApp
+        message: Mensaje a enviar
+    """
+    if not twilio_rest_client:
+        logger.warning(f"Twilio REST client no disponible, no se puede enviar: {message[:50]}...")
+        return
+
+    try:
+        twilio_rest_client.messages.create(
+            from_=TWILIO_WHATSAPP_FROM,
+            to=phone,
+            body=message
+        )
+        logger.info(f"✅ Mensaje enviado a {phone}: {len(message)} chars")
+    except Exception as e:
+        logger.error(f"❌ Error enviando mensaje a {phone}: {e}")
+
+
+def log_interaction_v316(phone: str, metadata: dict):
+    """
+    Log estructurado de cada interacción para análisis y observabilidad.
+
+    Args:
+        phone: Número de teléfono
+        metadata: Dict con toda la metadata de la interacción
+    """
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "phone": phone,
+        "version": "3.16",
+
+        # FASE 1: Understanding
+        "understanding": metadata.get("understanding", {}),
+
+        # FASE 2: Reasoning
+        "reasoning": metadata.get("reasoning", {}),
+
+        # FASE 3: Action Execution
+        "action": metadata.get("action", {}),
+
+        # FASE 4: Reflection
+        "reflection": metadata.get("reflection", {}),
+
+        # FASE 6: Response
+        "response": metadata.get("response", {}),
+
+        # FASE 7: Validation
+        "validation": metadata.get("validation", {}),
+
+        # Performance
+        "performance": {
+            "total_duration_ms": metadata.get("total_duration_ms", 0),
+            "llm_calls_count": metadata.get("llm_calls_count", 0),
+            "retry_executed": metadata.get("retry_executed", False)
+        }
+    }
+
+    # Log a consola en modo debug
+    if FRAN_DEBUG:
+        logger.info(f"📊 [Fran 3.16] Interaction Log:\n{json.dumps(log_entry, indent=2, ensure_ascii=False)}")
+
+    # TODO: Guardar en DB para análisis posterior
+    # save_interaction_log_to_db(log_entry)
+
+
+# ============================================================
+# FRAN 3.16 - ARQUITECTURA HÍBRIDA AGENTIC
+# ============================================================
+# Combina:
+# - Razonamiento interno (de 3.14)
+# - Structured outputs (de 3.15)
+# - Reflexion pattern (auto-crítica)
+# - Tool calling explícito
+# ============================================================
+
+def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
+    """
+    Orquestador Fran 3.16 - Arquitectura Híbrida Agentic.
+
+    Combina lo mejor de Fran 3.14 y 3.15:
+    - Razonamiento interno explícito antes de actuar
+    - Structured outputs con JSON schemas
+    - Reflexion pattern para auto-corrección
+    - Estrategias de búsqueda adaptativas
+
+    Flujo de 8 fases:
+    1. Query Understanding (Structured)
+    2. Reasoning (Agentic - NUEVO)
+    3. Action Execution (Tool Calling)
+    4. Reflection (Auto-Crítica - NUEVO)
+    5. Product Selection (Structured)
+    6. Response Generation (Structured)
+    7. Validation (Anti-Alucinación)
+    8. Chunks & Delivery
+    """
+
+    # ===== INICIO: SETUP =====
+    start_time = time.time()
+    metadata = {
+        "version": "3.16",
+        "llm_calls_count": 0,
+        "total_tokens": 0,
+        "retry_executed": False
+    }
+
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+
+    # Rate limiting
+    if not rate_limit_check(phone):
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    save_message(phone, user_message, "user")
+
+    # Check LLM availability
+    if not is_llm_available():
+        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    logger.info(f"🚀 [Fran 3.16] Iniciando orquestación para: {user_message}")
+
+    # ===== FASE 1: QUERY UNDERSTANDING (Structured) =====
+    logger.info("📋 [FASE 1] Query Understanding")
+
+    understanding = complete_template(
+        "query_understanding",
+        {
+            "phone": phone,
+            "user_message": user_message,
+            "conversation_history": get_history_since(phone, days=1, limit=5),
+            "last_search_query": (get_last_search(phone) or {}).get("query", "")
+        }
+    )
+    metadata["llm_calls_count"] += 1
+
+    # Normalizar y extraer intent principal
+    intents = understanding.get("intents") or []
+    if not intents:
+        intents = [{
+            "type": "general_chat",
+            "span": user_message,
+            "confidence": 0.5,
+            "data": {"notes": "", "quantity": 1}
+        }]
+
+    primary_intent = intents[0].get("type") if intents else "general_chat"
+    normalized_query = understanding.get("normalized_query") or intents[0].get("span", user_message)
+
+    logger.info(f"   Intent detectado: {primary_intent}")
+    logger.info(f"   Query normalizada: {normalized_query}")
+
+    metadata["understanding"] = {
+        "normalized_query": normalized_query,
+        "intent": primary_intent,
+        "confidence": understanding.get("confidence", 0.5),
+        "entities": understanding.get("entities", {})
+    }
+
+    # Early return si needs_clarification
+    if understanding.get("needs_clarification"):
+        reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
+        save_message(phone, reply, "assistant")
+        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
+        log_interaction_v316(phone, metadata)
+        return reply
+
+    # ===== FASE 2: REASONING (Agentic - NUEVO) =====
+    logger.info("🧠 [FASE 2] Reasoning - Planeando acción")
+
+    # Construir contexto enriquecido para reasoning
+    last_search = get_last_search(phone)
+    cart_items = cart_get(phone)
+    history = get_history_since(phone, days=1, limit=3)
+
+    reasoning_context = {
+        "normalized_query": normalized_query,
+        "intent": primary_intent,
+        "entities": understanding.get("entities", {}),
+        "last_search_summary": f"{len(last_search.get('products', []))} productos" if last_search else "Sin búsqueda previa",
+        "cart_has_items": len(cart_items) > 0,
+        "recent_history": [{"role": h[1], "content": h[2][:100]} for h in history[-3:]] if history else []
+    }
+
+    reasoning = complete_template("reasoning", reasoning_context)
+    metadata["llm_calls_count"] += 1
+
+    reasoning_steps = reasoning.get("reasoning_steps", [])
+    decision = reasoning.get("decision", {})
+    action_type = decision.get("action_type", "clarification")
+    search_strategy = decision.get("search_strategy", "hybrid")
+
+    logger.info(f"   Razonamiento ({len(reasoning_steps)} pasos):")
+    for i, step in enumerate(reasoning_steps[:3], 1):  # Log solo primeros 3
+        logger.info(f"     {i}. {step}")
+    logger.info(f"   Decisión: {action_type} | Estrategia: {search_strategy}")
+
+    metadata["reasoning"] = {
+        "action_type": action_type,
+        "search_strategy": search_strategy,
+        "confidence": reasoning.get("confidence", 0.5),
+        "steps_count": len(reasoning_steps)
+    }
+
+    # ===== FASE 3: ACTION EXECUTION (Tool Calling) =====
+    logger.info(f"🔧 [FASE 3] Action Execution - {action_type}")
+
+    allowed_products = []
+    action_metadata = {}
+
+    if action_type == "social":
+        # Skip búsqueda para intents sociales
+        logger.info("   🤝 Intent social, saltando búsqueda")
+        allowed_products = []
+        action_metadata = {"strategy_used": "none", "total_found": 0}
+
+    elif action_type == "search":
+        # Ejecutar búsqueda con estrategia específica
+        action_start = time.time()
+
+        try:
+            allowed_products, action_metadata = run_search_with_strategy(
+                query=normalized_query,
+                strategy=search_strategy,
+                phone=phone,
+                use_last_search=decision.get("use_last_search", False)
+            )
+            logger.info(f"   ✅ Búsqueda completada: {len(allowed_products)} productos en {action_metadata.get('duration_ms', 0):.0f}ms")
+        except Exception as e:
+            logger.error(f"   ❌ Error en búsqueda: {e}")
+            allowed_products = []
+            action_metadata = {"error": str(e), "total_found": 0}
+
+    elif action_type == "cart_operation":
+        # Manejar operación de carrito
+        logger.info("   🛒 Operación de carrito")
+        cart_result = handle_cart_action(phone, user_message)
+        if cart_result:
+            reply = cart_result
+            save_message(phone, reply, "assistant")
+            metadata["total_duration_ms"] = (time.time() - start_time) * 1000
+            log_interaction_v316(phone, metadata)
+            return reply
+
+    elif action_type == "clarification":
+        # Pedir aclaración
+        reply = "¿Me das más detalles? Por ejemplo: marca, modelo y año de la moto, y qué repuesto necesitás."
+        save_message(phone, reply, "assistant")
+        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
+        log_interaction_v316(phone, metadata)
+        return reply
+
+    metadata["action"] = action_metadata
+
+    # ===== FASE 4: REFLECTION (Auto-Crítica - NUEVO) =====
+    logger.info("🪞 [FASE 4] Reflection - Evaluando resultados")
+
+    reflection_context = {
+        "action_type": action_type,
+        "search_strategy": search_strategy,
+        "normalized_query": normalized_query,
+        "entities": understanding.get("entities", {}),
+        "products_found": len(allowed_products),
+        "avg_score": action_metadata.get("avg_score", 0),
+        "max_score": action_metadata.get("max_score", 0),
+        "quality_assessment": action_metadata.get("quality_assessment", {})
+    }
+
+    reflection = complete_template("reflection", reflection_context)
+    metadata["llm_calls_count"] += 1
+
+    evaluation = reflection.get("evaluation", {})
+    reflection_decision = reflection.get("decision", {})
+    should_retry = reflection_decision.get("should_retry", False)
+    quality_score = evaluation.get("quality_score", 0)
+
+    logger.info(f"   Quality Score: {quality_score}/100")
+    logger.info(f"   Coherencia: {'✅' if evaluation.get('coherence_check') else '❌'}")
+    logger.info(f"   Should retry: {'SÍ' if should_retry else 'NO'}")
+
+    if evaluation.get("issues_found"):
+        logger.info(f"   Issues: {', '.join(evaluation['issues_found'][:2])}")
+
+    metadata["reflection"] = {
+        "quality_score": quality_score,
+        "should_retry": should_retry,
+        "issues_count": len(evaluation.get("issues_found", []))
+    }
+
+    # RETRY LOGIC (máximo 1 vez)
+    if should_retry and not metadata["retry_executed"] and action_type == "search":
+        logger.info("🔁 [RETRY] Re-ejecutando búsqueda con estrategia diferente")
+        metadata["retry_executed"] = True
+
+        retry_strategy = reflection_decision.get("retry_strategy", "broader_search")
+
+        # Mapear retry_strategy a search_strategy
+        strategy_map = {
+            "broader_search": "family_based",
+            "narrower_search": "semantic_only",
+            "different_keywords": "keyword_only",
+            "family_fallback": "family_based"
+        }
+        new_strategy = strategy_map.get(retry_strategy, "hybrid")
+
+        try:
+            allowed_products, action_metadata = run_search_with_strategy(
+                query=normalized_query,
+                strategy=new_strategy,
+                phone=phone,
+                use_last_search=True  # Combinar con última búsqueda
+            )
+            logger.info(f"   ✅ Retry completado: {len(allowed_products)} productos")
+            metadata["action"]["retry_strategy"] = new_strategy
+        except Exception as e:
+            logger.error(f"   ❌ Error en retry: {e}")
+
+    # Si no hay productos y era búsqueda, pedir aclaración
+    if action_type == "search" and len(allowed_products) == 0:
+        reply = "No encontré productos con esos términos. ¿Me das más detalles? Marca, modelo y año de la moto, y qué repuesto necesitás."
+        save_message(phone, reply, "assistant")
+        metadata["total_duration_ms"] = (time.time() - start_time) * 1000
+        log_interaction_v316(phone, metadata)
+        return reply
+
+    # Guardar última búsqueda
+    if action_type == "search" and allowed_products:
+        save_last_search(phone, normalized_query, allowed_products[:150])
+
+    # ===== FASE 5: PRODUCT SELECTION (Structured) =====
+    logger.info("🎯 [FASE 5] Product Selection")
+
+    selection = {}
+
+    if action_type == "social" or action_type != "search":
+        # Saltear selección para intents no-search
+        logger.info("   ⏭️  Saltando selección (no es búsqueda de productos)")
+        selection = {
+            "selected_products": [],
+            "analysis": {},
+            "action": "respond_socially"
+        }
+    else:
+        # Seleccionar mejores productos
+        selection_context = {
+            "allowed_products": allowed_products[:15],  # Máx 15 para LLM
+            "normalized_query": normalized_query,
+            "entities": understanding.get("entities", {}),
+            "reasoning_summary": reasoning_steps[:2] if reasoning_steps else [],
+            "reflection_notes": reflection.get("reflection_notes", ""),
+            "conversation_history": get_history_since(phone, days=1, limit=3)
+        }
+
+        selection = complete_template("product_selection", selection_context)
+        metadata["llm_calls_count"] += 1
+
+        selected_products = selection.get("selected_products", [])
+        analysis = selection.get("analysis", {})
+
+        logger.info(f"   Productos seleccionados: {len(selected_products)}")
+        logger.info(f"   Tipo de cliente: {analysis.get('customer_type', 'N/A')}")
+        logger.info(f"   Nivel de interés: {analysis.get('interest_level', 'N/A')}")
+
+    # ===== FASE 6: RESPONSE GENERATION (Structured) =====
+    logger.info("💬 [FASE 6] Response Generation")
+
+    response_context = {
+        "normalized_query": normalized_query,
+        "intent": primary_intent,
+        "understanding": understanding,
+        "reasoning": reasoning,
+        "action_results": {
+            "products": allowed_products[:15],
+            "strategy_used": action_metadata.get("strategy_used", "none")
+        },
+        "reflection": reflection,
+        "selection": selection,
+        "conversation_history": get_history_since(phone, days=1, limit=3)
+    }
+
+    response = complete_template("response_generation", response_context)
+    metadata["llm_calls_count"] += 1
+
+    message = response.get("message", "")
+    products_cited = response.get("products_cited", [])
+
+    logger.info(f"   Mensaje generado: {len(message)} chars")
+    logger.info(f"   Productos citados: {len(products_cited)}")
+
+    metadata["response"] = {
+        "message_length": len(message),
+        "products_cited_count": len(products_cited),
+        "tone": response.get("tone", "friendly")
+    }
+
+    # ===== FASE 7: VALIDATION (Anti-Alucinación) =====
+    logger.info("✅ [FASE 7] Validation")
+
+    hallucinations_detected = False
+
+    if products_cited and allowed_products:
+        allowed_codes = {p.get("code") for p in allowed_products}
+
+        for cited_code in products_cited:
+            if cited_code not in allowed_codes:
+                logger.warning(f"   ⚠️  Alucinación detectada: código {cited_code} no existe")
+                hallucinations_detected = True
+
+        if hallucinations_detected:
+            logger.info("   🔧 Regenerando respuesta con listado seguro")
+
+            # Generar respuesta básica segura
+            safe_products = allowed_products[:3]
+            message_lines = [
+                f"Te encontré estas opciones para {normalized_query}:",
+                ""
+            ]
+
+            for p in safe_products:
+                code = p.get("code", "N/A")
+                name = p.get("name", "Producto")[:60]
+                price = p.get("price_ars", 0)
+                message_lines.append(f"• {code} - {name} - ${price:,.0f}")
+
+            message_lines.append("")
+            message_lines.append("¿Querés que compare opciones o te arme el carrito?")
+            message = "\n".join(message_lines)
+
+            products_cited = [p.get("code") for p in safe_products]
+
+    metadata["validation"] = {
+        "hallucinations_detected": hallucinations_detected,
+        "regeneration_needed": hallucinations_detected
+    }
+
+    # ===== FASE 8: CHUNKS & DELIVERY =====
+    logger.info("📦 [FASE 8] Chunks & Delivery")
+
+    save_message(phone, message, "assistant")
+
+    # Enviar productos adicionales en chunks si es necesario
+    if action_type == "search" and len(allowed_products) > 15:
+        remaining_products = allowed_products[15:]
+        chunks_sent = 0
+
+        for i in range(0, len(remaining_products), 30):
+            chunk = remaining_products[i:i+30]
+            chunk_message = format_product_chunk(chunk, i+16, normalized_query)
+
+            time.sleep(0.5)  # Delay entre chunks
+            send_whatsapp_message(phone, chunk_message)
+            chunks_sent += 1
+
+            if chunks_sent >= 3:  # Máximo 3 chunks adicionales
+                break
+
+        logger.info(f"   📤 Enviados {chunks_sent} chunks adicionales")
+
+    # ===== FINALIZACIÓN =====
+    metadata["total_duration_ms"] = (time.time() - start_time) * 1000
+    logger.info(f"✨ [Fran 3.16] Completado en {metadata['total_duration_ms']:.0f}ms | {metadata['llm_calls_count']} LLM calls")
+
+    # Log estructurado
+    log_interaction_v316(phone, metadata)
+
+    return message
+
+
 def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
     start_time = time.time()
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
