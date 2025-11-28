@@ -87,6 +87,11 @@ MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
 MODEL_RESPONSE = "gpt-4o-mini"   # mantener calidad conversacional
 MODEL_OUTPUT = os.environ.get("MODEL_OUTPUT", MODEL_RESPONSE)
 
+# Configuración de versiones de Fran
+USE_FRAN_316 = os.environ.get("USE_FRAN_316", "false").strip().lower() in {"true", "1", "yes", "on"}
+BETA_PHONES_316 = os.environ.get("BETA_PHONES_316", "").strip().split(",")
+BETA_PHONES_316 = [p.strip() for p in BETA_PHONES_316 if p.strip()]
+
 EXCHANGE_API_URL = (
     os.environ.get("EXCHANGE_API_URL") or "https://dolarapi.com/v1/dolares/oficial"
 ).strip()
@@ -6812,6 +6817,32 @@ def send_long_message(phone, text, chunk_size=1600):
 # ------------------------------------------------------------------
 # WEBHOOK WHATSAPP
 # ------------------------------------------------------------------
+def should_use_v316(phone: str) -> bool:
+    """
+    Determina si debe usar Fran 3.16 para este teléfono.
+
+    Criterios:
+    1. Si USE_FRAN_316=true → todos usan 3.16
+    2. Si phone está en BETA_PHONES_316 → usa 3.16
+    3. Si no → usa versión por defecto
+
+    Args:
+        phone: Número de teléfono
+
+    Returns:
+        bool: True si debe usar 3.16
+    """
+    # Si está habilitado globalmente
+    if USE_FRAN_316:
+        return True
+
+    # Si está en lista de beta testers
+    if phone in BETA_PHONES_316:
+        return True
+
+    return False
+
+
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_webhook():
     try:
@@ -6867,7 +6898,13 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        reply = orquestar_fran(message_body, from_number)
+        # Selección de versión de Fran
+        if should_use_v316(from_number):
+            logger.info(f"🚀 Usando Fran 3.16 (Híbrido Agentic) para {from_number}")
+            reply = orquestar_fran_v316(message_body, from_number)
+        else:
+            logger.info(f"📋 Usando Fran default para {from_number}")
+            reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
