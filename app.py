@@ -1,5 +1,5 @@
 # =========================================================
-# Fran 3.14 – Bot Mayorista Inteligente
+# Fran 3.15 – Bot Mayorista Inteligente
 # =========================================================
 # Basado en Fran 3.12/3.13 (estructura completa que pasó tests),
 # con mejoras:
@@ -532,19 +532,6 @@ def llm_text_response(system_prompt: str, user_prompt: str, *, temperature: floa
         logger.error(f"LLM text response failed: {e}")
         return ""
 
-
-def should_use_v315(phone: str) -> bool:
-    """
-    Decidir si usar Fran 3.15 o 3.14 (rollout gradual)
-    """
-    if os.environ.get("USE_FRAN_315", "false").lower() == "true":
-        return True
-
-    beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
-    if beta_phones and phone in beta_phones:
-        return True
-
-    return int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100 < 50
 
 # ------------------------------------------------------------
 # UTILS
@@ -5408,188 +5395,16 @@ def orquestar_fran_multi_intent(mensaje_usuario: str, phone: str) -> str:
     return final_reply
 
 # =========================================================
-# ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
+# ORQUESTADOR PRINCIPAL – VERSIÓN 3.15
 # =========================================================
-def orquestar_fran(mensaje_usuario, phone):
+def orquestar_fran(mensaje_usuario: str, phone: str) -> str:
     """
     Orquestador unificado de Fran.
 
-    Gestiona rate limiting, búsqueda, memoria y el doble
-    paso de LLM (razonamiento interno + respuesta conversacional).
+    Wrapper sobre la versión 3.15 (templates estructurados) para evitar
+    mantener dos implementaciones del flujo conversacional.
     """
-    start_time = time.time()
-    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
-    save_message(phone, user_message, "user")
-
-    if not rate_limit_check(phone):
-        reply = "Demasiados mensajes, esperá un minuto."
-        save_message(phone, reply, "assistant")
-        return reply
-
-    if not is_llm_available():
-        reply = "Estoy en mantenimiento técnico. Volvé a intentar en unos minutos."
-        save_message(phone, reply, "assistant")
-        return reply
-
-    last_search_data = get_last_search(phone) or {}
-    last_search_query = (last_search_data.get("query") or "").strip()
-
-    execution_context = {
-        "intent_detected": "unified",
-        "intent_details": {},
-        "search_query": user_message,
-        "search_executed": False,
-        "products_found": 0,
-        "products_shown_to_llm": 0,
-        "filters_applied": [],
-        "quality_assessment": None,
-        "will_send_chunks": False,
-        "chunk_info": None,
-        "warnings": [],
-    }
-
-    products = []
-    query_for_search = user_message
-    corrections = []
-
-    if query_for_search and len(query_for_search.split()) < 4 and last_search_query:
-        query_for_search = f"{last_search_query} {query_for_search}".strip()
-        execution_context["warnings"].append("query_refined_with_last_search")
-
-    query_for_search, corrections = autocorrect_keywords(query_for_search)
-    if corrections:
-        execution_context["warnings"].append(f"Autocorrect: {', '.join(corrections)}")
-
-    execution_context["search_query"] = query_for_search
-
-    semantic_results = hybrid_search(query_for_search, phone=phone, top_k=MAX_SEARCH_RESULTS)
-
-    if isinstance(semantic_results, dict):
-        if semantic_results.get("error") == "too_many_combinations":
-            reply = semantic_results.get("message") or "Hay demasiadas combinaciones, pasame una sola moto o categoría."
-            save_message(phone, reply, "assistant")
-            log_interaction(phone, user_message, "too_many_combinations", 0)
-            log_performance(phone, "too_many_combinations", time.time()-start_time, 0)
-            return reply
-        execution_context["search_executed"] = True
-        total_found = sum(len(v) for v in (semantic_results.get("results") or {}).values())
-        execution_context["products_found"] = total_found
-        reply = format_multi_search_response(semantic_results)
-        if reply:
-            save_message(phone, reply, "assistant")
-            log_interaction(phone, user_message, "multi_search", total_found)
-            log_performance(phone, "multi_search", time.time()-start_time, total_found)
-            update_sales_phase_from_intent(phone, "product_search")
-            return reply
-        semantic_results = []
-
-    products = (
-        semantic_results.get("final_results", [])
-        if isinstance(semantic_results, dict)
-        else semantic_results
-    )
-
-    if products and all(isinstance(p, tuple) for p in products):
-        try:
-            products = [p[0] for p in products]
-        except Exception:
-            products = []
-
-    execution_context["search_executed"] = True
-    execution_context["products_found"] = len(products)
-
-    if products:
-        original_len = len(products)
-        filtered_products = filter_by_relevance(query_for_search, products, min_score=RELEVANCE_MIN_SCORE)
-        if filtered_products:
-            products = filtered_products
-            execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
-
-    quality_assessment = assess_context_quality(query_for_search, products)
-    execution_context["quality_assessment"] = quality_assessment
-    log_quality_metrics(
-        phone,
-        query_for_search,
-        quality_assessment.get("avg_score", 0),
-        quality_assessment.get("max_score", 0),
-        quality_assessment.get("relevant_count", 0),
-    )
-
-    if not quality_assessment["sufficient"]:
-        if quality_assessment["action"] == "ask_clarification":
-            reply = quality_assessment["message"]
-        elif quality_assessment["action"] == "suggest_alternatives":
-            top_products = quality_assessment.get("top_products", [])
-            suggestions = "\n".join(
-                [
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in top_products
-                ]
-            )
-            reply = (
-                "No encontré coincidencia perfecta, pero tengo estas opciones que se acercan:\n\n"
-                f"{suggestions}\n\n"
-                "O dame un poco más de detalle (marca/modelo/año) y afinamos la búsqueda."
-            )
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, f"low_quality_{quality_assessment['reason']}", 0)
-        log_performance(phone, "low_quality", time.time()-start_time, 0)
-        return reply
-
-    if products:
-        save_last_search(phone, [
-            {
-                "code": p["code"],
-                "name": p["name"],
-                "price_ars": p["price_ars"],
-                "price_usd": p["price_usd"],
-                "qty": 1
-            }
-            for p in products[:150]
-        ], query_for_search)
-
-    execution_context["products_shown_to_llm"] = len(products)
-
-    if len(products) > PRODUCTS_PER_CHUNK:
-        execution_context["will_send_chunks"] = True
-        num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
-        execution_context["chunk_info"] = {
-            "total_chunks": num_chunks,
-            "products_per_chunk": PRODUCTS_PER_CHUNK,
-            "total_products": len(products)
-        }
-
-    result = generate_smart_ai_reply_v2(
-        phone,
-        user_message,
-        products,
-        execution_context,
-        system_prompt=CITATION_ENFORCED_PROMPT
-    )
-
-    reply = result.get("reply") or "Uy, tuve un problema. ¿Me repetís?"
-    plan = result.get("plan") or {}
-    real_intent = plan.get("real_intent", "unknown")
-    execution_context["intent_detected"] = real_intent
-
-    if products and real_intent == "product_search":
-        reply = validate_and_fix_response(reply, products, phone, execution_context)
-
-    if execution_context.get("will_send_chunks") and products:
-        chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
-        for idx, chunk in enumerate(chunks, 1):
-            chunk_text = f"━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
-            chunk_text += format_search_results(chunk)
-            if idx > 1:
-                time.sleep(0.5)
-            send_long_message(phone, chunk_text)
-
-    save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, real_intent, len(products))
-    log_performance(phone, real_intent, time.time()-start_time, len(products))
-    update_sales_phase_from_intent(phone, real_intent)
-    return reply
-
+    return orquestar_fran_v315(mensaje_usuario, phone)
 
 def run_agent(phone, user_message):
     """Compatibilidad hacia atrás con el nombre anterior."""
@@ -5687,10 +5502,7 @@ def whatsapp_webhook():
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
             return Response(str(resp), mimetype="text/xml")
 
-        if should_use_v315(from_number):
-            reply = orquestar_fran_v315(message_body, from_number)
-        else:
-            reply = orquestar_fran(message_body, from_number)
+        reply = orquestar_fran(message_body, from_number)
 
         logger.info(f"Respuesta generada: {len(reply)} caracteres")
         logger.info(f"Preview: {reply[:100]}...")
@@ -5722,7 +5534,7 @@ def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.14",
+        "version": "3.15",
         "catalog_size": len(catalog) if catalog else 0,
         "architecture": "claude_inspired_families_hybrid_intents_context_v2",
         "features": [
@@ -5762,7 +5574,7 @@ init_db()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("=" * 60)
-    logger.info("🚀 Iniciando Fran 3.14 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0 + doble LLM")
+    logger.info("🚀 Iniciando Fran 3.15 - Motor Híbrido Familias + FAISS + Intents/Contexto 2.0 + doble LLM")
     logger.info("=" * 60)
     logger.info(f"Puerto: {port}")
     logger.info(f"Catálogo: {len(catalog) if catalog else 0} productos")
@@ -5770,7 +5582,7 @@ if __name__ == "__main__":
     logger.info(f"Relevance min score: {RELEVANCE_MIN_SCORE}")
     logger.info(f"Quality thresholds: HIGH={QUALITY_HIGH_THRESHOLD}, MED={QUALITY_MEDIUM_THRESHOLD}")
     logger.info("=" * 60)
-    logger.info("Características nuevas en 3.14:")
+    logger.info("Características nuevas en 3.15:")
     logger.info("  ✅ Doble llamada LLM (plan interno + respuesta final)")
     logger.info("  ✅ Orquestador unificado orquestar_fran")
     logger.info("  ✅ Validación de búsqueda con reintento sugerido por LLM")
