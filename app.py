@@ -1153,7 +1153,8 @@ FOLLOW_UP_MARKERS = {
     "además",
 }
 
-TECH_LEXICAL_ROOTS = AUTOCORRECT_VOCAB | {
+# AUTOCORRECT_VOCAB is a list; convert to set for union operations.
+TECH_LEXICAL_ROOTS = set(AUTOCORRECT_VOCAB) | {
     "repuesto",
     "respuesto",
     "repuestos",
