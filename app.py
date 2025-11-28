@@ -117,13 +117,13 @@ QUERY_UNDERSTANDING_SCHEMA = {
     "task": "understand_query",
     "description": """
     Sos un experto en motos argentinas. Analiza el mensaje del cliente y normaliza errores.
-    
+
     MARCAS COMUNES (pueden estar mal escritas):
     - Honda, Yamaha, Zanella, Motomel, Corven, Gilera, Guerrero, Bajaj, Keeway
-    
+
     CATEGORÍAS COMUNES:
     - Batería (ytx, gel, litio), Amortiguador, Filtro, Aceite, Cadena, Bujía, Pastillas
-    
+
     CORRECCIONES TÍPICAS:
     - "gonda" → "Honda"
     - "iamaha" → "Yamaha"
@@ -131,6 +131,8 @@ QUERY_UNDERSTANDING_SCHEMA = {
     - "bateria" → "batería"
 
     Si el mensaje del cliente tiene intención social, humana o relacional (saludo, agradecimiento, conversación ligera, humor leve, follow-up, cierre, rapport), clasificá la intención como intent = "social". Este intent es distinto de "product_search" y debe priorizar lo humano por sobre lo técnico. No inventes datos de productos en este nivel.
+
+    IMPORTANTE: Respondé SIEMPRE con un ÚNICO objeto JSON con un campo "intent" (singular), NO "intents" (plural). La estructura debe ser un objeto plano con propiedades, sin arrays anidados innecesarios.
     """,
     "output_schema": {
         "type": "object",
@@ -483,9 +485,10 @@ def log_template_execution(template_name: str, input_data: dict, output_data: di
         logger.error(f"Error logging template execution: {e}")
 
 
-def complete_template(template_name: str, context: dict, model: str = MODEL_REASONING) -> dict:
+def complete_template(template_name: str, context: dict, model: str = MODEL_REASONING, max_retries: int = 3) -> dict:
     """
     Completa un template usando el LLM con structured output.
+    Implementa reintentos automáticos cuando hay errores de validación de schema.
     """
     template = TEMPLATES.get(template_name)
     if not template:
@@ -501,36 +504,56 @@ REGLAS:
 - Devolvé SOLO JSON válido
 - NO agregues explicaciones fuera del JSON
 - Respetá todos los campos required
+- NO inventes arrays o estructuras anidadas no especificadas
 """
 
     user_prompt = json.dumps(context, ensure_ascii=False)
     start_time = time.time()
+    last_error = None
 
-    try:
-        with openai_sem:
-            resp = llm_client.completion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-
-        result = json.loads(resp.choices[0].message.content)
-        validate_schema(result, template["output_schema"])
-        log_template_execution(template_name, context, result, time.time() - start_time)
-        return result
-
-    except Exception as e:
-        logger.error(f"Template completion failed: {e}", exc_info=True)
-        fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+    # Reintentos para errores de validación de schema
+    for attempt in range(max_retries):
         try:
-            log_template_execution(template_name, context, fallback, time.time() - start_time)
-        except Exception:
-            pass
-        return fallback
+            with openai_sem:
+                resp = llm_client.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+
+            result = json.loads(resp.choices[0].message.content)
+            validate_schema(result, template["output_schema"])
+            log_template_execution(template_name, context, result, time.time() - start_time)
+            return result
+
+        except ValueError as e:
+            # Error de validación de schema
+            last_error = e
+            logger.warning(f"Template completion attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                # Esperar antes de reintentar
+                wait_time = min((2 ** attempt) * 0.5, 5)
+                time.sleep(wait_time)
+            continue
+
+        except Exception as e:
+            # Otro tipo de error, no reintentar
+            last_error = e
+            logger.error(f"Template completion failed (non-recoverable): {e}", exc_info=True)
+            break
+
+    # Si llegamos aquí, todos los reintentos fallaron
+    logger.error(f"Template completion failed after retries: {last_error}")
+    fallback = TEMPLATE_FALLBACKS.get(template_name, template.get("fallback", {}))
+    try:
+        log_template_execution(template_name, context, fallback, time.time() - start_time)
+    except Exception:
+        pass
+    return fallback
 
 
 def should_use_v315(phone: str) -> bool:
