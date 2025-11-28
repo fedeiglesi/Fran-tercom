@@ -162,7 +162,9 @@ QUERY_UNDERSTANDING_SCHEMA = {
                                 "social",
                                 "clarification",
                                 "tech_question",
+                                "follow_up",
                                 "order_flow",
+                                "compare",
                             ],
                         },
                         "span": {"type": "string"},
@@ -4596,6 +4598,10 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
         }
 
         productos_permitidos = catalog_products or []
+        skip_product_section = execution_context.get("intent") == "social"
+
+        if skip_product_section:
+            productos_permitidos = []
 
         # 1) Construir conversación reducida para análisis comercial
         historial = short_history[-6:] if short_history else []
@@ -4892,6 +4898,16 @@ def format_multi_search_response(results: dict) -> str | None:
 
     return None
 
+
+def format_products_by_category(grouped: dict) -> dict:
+    filtered = {}
+    for cat, productos in grouped.items():
+        real = [p for p in productos if p.get("codigo")]
+        if len(real) > 0:
+            filtered[cat] = real
+
+    return filtered
+
 # =========================================================
 # ORQUESTADOR FRAN – VERSIÓN 3.15 (templates estructurados)
 # =========================================================
@@ -4927,6 +4943,50 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
     )
 
     intents = understanding.get("intents") or []
+    normalized_candidate = (
+        understanding.get("normalized_query")
+        or (intents[0].get("span") if intents else user_message)
+        or user_message
+    )
+    normalized_lower = (normalized_candidate or "").lower()
+
+    updated_intents = []
+    for intent in intents:
+        data = intent.get("data", {}) or {}
+        intent_name = intent.get("type") or ""
+
+        if intent_name in {"clarification", "tech_question", "follow_up"}:
+            if any(
+                w in normalized_lower
+                for w in [
+                    "compar",
+                    "comparame",
+                    "compará",
+                    "diferencia",
+                    "distinto",
+                    "vs",
+                    "versus",
+                    "cuál conviene",
+                ]
+            ):
+                intent_name = "compare"
+                intent["type"] = "compare"
+                data["notes"] = normalized_candidate
+                data["quantity"] = 1
+
+        if "notes" not in data or data.get("notes") is None:
+            data["notes"] = ""
+
+        if "quantity" not in data or data.get("quantity") is None:
+            data["quantity"] = 1
+
+        intent["data"] = data
+        intent["type"] = intent_name or intent.get("type")
+        updated_intents.append(intent)
+
+    intents = updated_intents
+    understanding["intents"] = intents
+
     primary_intent = intents[0].get("type") if intents else "product_search"
     primary_span = intents[0].get("span") if intents else user_message
 
@@ -5076,7 +5136,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         selected_products = [
             p for p in selection_candidates if p.get("code") in selected_codes
         ]
-    elif primary_intent in {"clarification", "tech_question", "follow_up"}:
+    elif primary_intent in {"clarification", "tech_question", "follow_up", "compare"}:
         if len(recent_products) >= 2:
             selected_products = recent_products[:7]
             logger.info(f"[COMPARE] Providing {len(selected_products)} products from memory")
