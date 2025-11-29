@@ -87,7 +87,7 @@ STRICT_MODE = True
 ALLOW_MISSING_MOTO_DATA = True
 LLM_REASONING_ENABLED = True
 CONFIDENCE_THRESHOLD = 0.75
-MAX_REQUERY_ATTEMPTS = 2
+MAX_REQUERY_ATTEMPTS = 3
 RESPONSE_TIMEOUT_MS = 5000
 
 # CONSTANTS
@@ -419,6 +419,7 @@ _fuzzy_match_cache = LRUCache(maxsize=20000)
 
 # Índice de familias (global)
 FAMILIES_INDEX = []
+FAMILY_COMPATIBILITY_PROFILE = {}
 
 TEMPLATE_FALLBACKS = {
     "query_understanding": {
@@ -2471,6 +2472,56 @@ def initialize_families_index(catalog):
         logger.error(f"Error construyendo FAMILIES_INDEX: {e}", exc_info=True)
 
 
+def build_family_compatibility_profile(catalog):
+    profile = {}
+    for p in catalog:
+        fam_raw = p.get("family_name") or ""
+        fam_norm = normalize_search_query(fam_raw)
+        if not fam_norm:
+            continue
+
+        entry = profile.setdefault(
+            fam_norm,
+            {"family_name": fam_raw.strip() or fam_norm, "total": 0, "with_structured": 0},
+        )
+        entry["total"] += 1
+
+        moto_brand = p.get("moto_brand") or p.get("brand")
+        moto_model = p.get("moto_model") or p.get("model")
+        if moto_brand and moto_model:
+            entry["with_structured"] += 1
+
+    return profile
+
+
+def initialize_family_compatibility_profile(catalog):
+    global FAMILY_COMPATIBILITY_PROFILE
+    try:
+        FAMILY_COMPATIBILITY_PROFILE = build_family_compatibility_profile(catalog) if catalog else {}
+        if FAMILY_COMPATIBILITY_PROFILE:
+            logger.info(
+                f"Perfil de compatibilidad por familia listo ({len(FAMILY_COMPATIBILITY_PROFILE)} familias)"
+            )
+    except Exception as e:
+        logger.error(f"Error construyendo perfil de compatibilidad por familia: {e}", exc_info=True)
+
+
+def needs_llm_compatibility(family: str | None) -> bool:
+    if not family:
+        return True
+
+    fam_norm = normalize_search_query(family)
+    if not fam_norm:
+        return True
+
+    stats = FAMILY_COMPATIBILITY_PROFILE.get(fam_norm)
+    if not stats or not stats.get("total"):
+        return True
+
+    ratio = stats.get("with_structured", 0) / max(stats.get("total", 1), 1)
+    return ratio < 0.5
+
+
 def save_faiss_index(index, catalog):
     try:
         faiss.write_index(index, FAISS_INDEX_PATH)
@@ -2646,6 +2697,7 @@ def get_catalog_and_index():
             _catalog_and_index_cache["bm25_corpus"] = tokenized_corpus
             _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
             initialize_families_index(catalog)
+            initialize_family_compatibility_profile(catalog)
             return catalog, index, bm25_index, tokenized_corpus
 
         catalog = load_catalog_enriched()
@@ -2661,6 +2713,7 @@ def get_catalog_and_index():
         _catalog_and_index_cache["bm25_corpus"] = tokenized_corpus
         _catalog_and_index_cache["built_at"] = datetime.utcnow().isoformat()
         initialize_families_index(catalog)
+        initialize_family_compatibility_profile(catalog)
         return catalog, index, bm25_index, tokenized_corpus
 
 # ------------------------------------------------------------------
@@ -4993,7 +5046,15 @@ LLM1_UNDERSTANDING_SCHEMA = {
 
 SEARCH_PHASE_SCHEMA = {
     "type": "object",
-    "required": ["phase", "query_params", "results", "total_results"],
+    "required": [
+        "phase",
+        "query_params",
+        "results",
+        "total_results",
+        "target_family",
+        "has_structured_compatibility",
+        "needs_llm_compatibility",
+    ],
     "properties": {
         "phase": {"const": "search"},
         "query_params": {
@@ -5014,15 +5075,30 @@ SEARCH_PHASE_SCHEMA = {
         },
         "results": {"type": "array"},
         "total_results": {"type": "integer"},
+        "target_family": {"type": ["string", "null"]},
+        "has_structured_compatibility": {"type": "boolean"},
+        "needs_llm_compatibility": {"type": "boolean"},
     },
 }
 
 LLM2_SCHEMA = {
     "type": "object",
-    "required": ["phase", "candidates_evaluated", "products_excluded", "llm2_confidence_overall", "needs_requery"],
+    "required": ["phase", "decisions", "llm2_confidence_overall", "needs_requery"],
     "properties": {
         "phase": {"const": "llm2_reasoning"},
-        "candidates_evaluated": {"type": "array"},
+        "decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["product_id", "compatibility", "confidence", "reason"],
+                "properties": {
+                    "product_id": {"type": ["string", "integer"]},
+                    "compatibility": {"enum": ["compatible", "no", "incierto"]},
+                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
         "products_excluded": {"type": "array"},
         "llm2_confidence_overall": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "needs_requery": {"type": "boolean"},
@@ -5108,6 +5184,9 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
     text_query_parts = [understanding.get("brand"), understanding.get("model"), understanding.get("product_type"), understanding.get("raw_query")]
     text_query = " ".join([p for p in text_query_parts if p]) or understanding.get("raw_query", "")
 
+    detected_families = detect_families_in_query(understanding.get("raw_query", ""))
+    target_family = detected_families[0] if detected_families else None
+
     search_results = hybrid_search(text_query, phone=phone, top_k=SEARCH_TOP_K)
     fused = search_results.get("fused") if isinstance(search_results, dict) else []
     if not fused:
@@ -5116,6 +5195,10 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
 
     structured_results = []
     for idx, (product, score) in enumerate(fused[:SEARCH_TOP_K], 1):
+        fam_name = product.get("family_name")
+        has_structured = bool((product.get("moto_brand") or product.get("brand")) and (product.get("moto_model") or product.get("model")))
+        needs_llm_family = needs_llm_compatibility(fam_name)
+
         structured_results.append(
             {
                 "product_id": product.get("code") or str(idx),
@@ -5128,9 +5211,18 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
                     "modelo_moto": product.get("moto_model") or product.get("model") or None,
                     "cilindrada": product.get("displacement") or product.get("cilindrada") or None,
                     "compatibilidad_declarada": product.get("compatibilidad_declarada") or product.get("compatibility"),
+                    "family": fam_name,
+                    "has_structured_compatibility": has_structured,
+                    "needs_llm_compatibility": needs_llm_family,
                 },
+                "family": fam_name,
+                "has_structured_compatibility": has_structured,
+                "needs_llm_compatibility": needs_llm_family,
             }
         )
+
+        if not target_family and fam_name:
+            target_family = fam_name
 
     payload = {
         "phase": "search",
@@ -5144,6 +5236,9 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
         },
         "results": structured_results,
         "total_results": len(structured_results),
+        "target_family": target_family,
+        "has_structured_compatibility": bool(target_family and not needs_llm_compatibility(target_family)),
+        "needs_llm_compatibility": needs_llm_compatibility(target_family) if target_family else any(r.get("needs_llm_compatibility") for r in structured_results),
     }
 
     if not _validate_phase(payload, SEARCH_PHASE_SCHEMA, "FASE2"):
@@ -5153,14 +5248,22 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
     return payload
 
 
-def _phase3_compatibility_filter(search_payload: dict) -> dict:
+def _phase3_compatibility_filter(understanding: dict, search_payload: dict) -> dict:
     candidates_after_filter = []
     hard_rejected = 0
+    filter_policy = "normal"
+
+    target_brand = understanding.get("brand")
+    target_model = understanding.get("model")
+    target_family = search_payload.get("target_family")
+    llm_family_mode = search_payload.get("needs_llm_compatibility") or needs_llm_compatibility(target_family)
 
     for cand in search_payload.get("results", [])[:SEARCH_TOP_K]:
         catalog_data = cand.get("catalog_data") or {}
         brand = catalog_data.get("marca_moto")
         model = catalog_data.get("modelo_moto")
+        family = catalog_data.get("family")
+        candidate_needs_llm = llm_family_mode or catalog_data.get("needs_llm_compatibility") or not catalog_data.get("has_structured_compatibility")
         compatibility_declared = (catalog_data.get("compatibilidad_declarada") or "").lower() if catalog_data.get("compatibilidad_declarada") else None
 
         if compatibility_declared == "incompatible":
@@ -5187,6 +5290,66 @@ def _phase3_compatibility_filter(search_payload: dict) -> dict:
                 }
             )
             continue
+
+        if candidate_needs_llm:
+            filter_policy = "llm_assisted"
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "llm_assisted",
+                    "reason": "Familia sin compatibilidad estructurada, delega en LLM2",
+                    "confidence": 0.6,
+                    "proceedes_to_llm2": True,
+                }
+            )
+            continue
+
+        brand_norm = normalize_search_query(brand or "")
+        model_norm = normalize_search_query(model or "")
+        target_brand_norm = normalize_search_query(target_brand or "")
+        target_model_norm = normalize_search_query(target_model or "")
+        target_family_norm = normalize_search_query(target_family or "")
+
+        if target_brand_norm and brand_norm and target_brand_norm not in brand_norm:
+            hard_rejected += 1
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "hard_incompatible",
+                    "reason": "brand_mismatch",
+                    "confidence": 0.7,
+                    "proceedes_to_llm2": False,
+                }
+            )
+            continue
+
+        if target_model_norm and model_norm and target_model_norm not in model_norm:
+            hard_rejected += 1
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "hard_incompatible",
+                    "reason": "model_mismatch",
+                    "confidence": 0.7,
+                    "proceedes_to_llm2": False,
+                }
+            )
+            continue
+
+        if target_family_norm and family:
+            fam_norm = normalize_search_query(family)
+            if fam_norm and target_family_norm not in fam_norm:
+                candidates_after_filter.append(
+                    {
+                        "product_id": cand["product_id"],
+                        "status": "hard_incompatible",
+                        "reason": "family_mismatch",
+                        "confidence": 0.65,
+                        "proceedes_to_llm2": False,
+                    }
+                )
+                hard_rejected += 1
+                continue
 
         if not ALLOW_MISSING_MOTO_DATA and (not brand or not model):
             hard_rejected += 1
@@ -5215,11 +5378,12 @@ def _phase3_compatibility_filter(search_payload: dict) -> dict:
         "phase": "compatibility_filter",
         "candidates_after_filter": candidates_after_filter,
         "hard_rejected_count": hard_rejected,
+        "filter_policy": filter_policy,
     }
 
 
 def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_payload: dict) -> dict:
-    evaluated = []
+    decisions = []
     excluded = []
 
     results_lookup = {r["product_id"]: r for r in search_payload.get("results", [])}
@@ -5229,6 +5393,7 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
 
         product = results_lookup.get(cand["product_id"], {})
         catalog_data = product.get("catalog_data") or {}
+
         brand_match = catalog_data.get("marca_moto") and understanding.get("brand") and understanding.get("brand").lower() in catalog_data.get("marca_moto", "").lower()
         model_match = catalog_data.get("modelo_moto") and understanding.get("model") and understanding.get("model").lower() in catalog_data.get("modelo_moto", "").lower()
         displacement_match = False
@@ -5238,46 +5403,53 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
             except Exception:
                 displacement_match = False
 
-        confidence_local = 0.6
-        decision = "marginal"
-        justification_type = "semantic_similarity"
-        if brand_match or model_match or displacement_match:
-            decision = "compatible"
-            justification_type = "catalog_match"
-            confidence_local = 0.82 if (brand_match and model_match) else 0.7
+        name = product.get("name") or ""
+        family = catalog_data.get("family")
 
-        if STRICT_MODE and confidence_local < 0.6:
-            excluded.append(
-                {
-                    "product_id": cand["product_id"],
-                    "exclusion_reason": "Confianza insuficiente en compatibilidad",
-                    "confidence": confidence_local,
-                }
-            )
+        compatibility = "incierto"
+        confidence_local = 0.55
+        reasons = []
+
+        if cand.get("status") == "hard_compatible" or (brand_match and model_match):
+            compatibility = "compatible"
+            confidence_local = 0.92 if (brand_match and model_match) else 0.85
+            reasons.append("Coincidencia directa de catálogo (marca/modelo)")
+        elif brand_match or model_match or displacement_match:
+            compatibility = "compatible"
+            confidence_local = 0.78
+            reasons.append("Coincidencia parcial de catálogo")
+        elif cand.get("status") == "llm_assisted":
+            compatibility = "incierto"
+            confidence_local = 0.65 if (understanding.get("brand") or understanding.get("model")) else 0.6
+            reasons.append("Compatibilidad estimada por conocimiento general de motos")
+        else:
+            reasons.append("Sin datos completos, pero no hay rechazo duro")
+
+        if STRICT_MODE and compatibility == "no":
+            excluded.append({"product_id": cand["product_id"], "exclusion_reason": "Compatibilidad marcada como no"})
             continue
 
-        evaluated.append(
+        decisions.append(
             {
                 "product_id": cand["product_id"],
-                "name": product.get("name") or "",
-                "compatibility_decision": decision,
-                "confidence_score": _normalize_confidence(confidence_local, minimum=0.3),
-                "technical_reasoning": "Coincidencia parcial de marca/modelo" if decision != "marginal" else "Sin datos completos, se usa similitud semántica",
-                "justification_type": justification_type,
-                "risk_level": "low" if decision == "compatible" else "medium",
+                "product_name": name,
+                "family": family,
+                "compatibility": compatibility,
+                "confidence": _normalize_confidence(confidence_local, minimum=0.3),
+                "reason": "; ".join(reasons) or "Compatibilidad estimada por contexto general de motos",
             }
         )
 
-    if not evaluated and excluded and STRICT_MODE:
+    if decisions:
+        overall_confidence = sum([d.get("confidence", 0) for d in decisions]) / len(decisions)
+    elif excluded:
         overall_confidence = 0.3
-    elif evaluated:
-        overall_confidence = sum([e.get("confidence_score", 0) for e in evaluated]) / len(evaluated)
     else:
         overall_confidence = 0.4
 
     payload = {
         "phase": "llm2_reasoning",
-        "candidates_evaluated": evaluated,
+        "decisions": decisions,
         "products_excluded": excluded,
         "llm2_confidence_overall": _normalize_confidence(overall_confidence, minimum=0.0),
         "needs_requery": overall_confidence < CONFIDENCE_THRESHOLD,
@@ -5290,25 +5462,43 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
     return payload
 
 
+def search_payload_family_fallback(understanding: dict) -> str | None:
+    detected = detect_families_in_query(understanding.get("raw_query", ""))
+    return detected[0] if detected else None
+
+
 def _phase5_requery(understanding: dict, attempt: int) -> tuple[str, str]:
-    strategy = "ambiguous_terms"
-    new_query_parts = []
+    strategy = "original_query"
+    brand = understanding.get("brand") or ""
+    model = understanding.get("model") or ""
+    displacement = str(understanding.get("displacement_cc") or "").strip()
+    family = understanding.get("product_type") or search_payload_family_fallback(understanding)
 
-    if not understanding.get("brand"):
-        strategy = "brand_missing"
-        new_query_parts = [str(understanding.get("displacement_cc") or ""), understanding.get("product_type") or "", understanding.get("usage_context") or ""]
-    elif not understanding.get("model"):
-        strategy = "model_missing"
-        new_query_parts = [understanding.get("brand") or "", str(understanding.get("displacement_cc") or ""), understanding.get("product_type") or "familia"]
-    elif understanding.get("metadata", {}).get("ambiguity_level") == "high":
-        strategy = "normalize_and_expand"
-        new_query_parts = [normalize_search_query(understanding.get("raw_query", ""))]
+    def _expand_model_variants(base_model: str) -> list[str]:
+        if not base_model:
+            return []
+        norm = normalize_search_query(base_model)
+        variants = {norm}
+        if any(ch.isdigit() for ch in norm):
+            variants.add(norm.replace(" ", ""))
+            variants.add(" ".join(re.findall(r"[a-zA-Z]+|\d+", norm)))
+        return [v for v in variants if v]
 
-    if attempt == 2:
-        strategy = f"{strategy}_broad"
-        new_query_parts.append("universal")
+    if attempt == 1:
+        strategy = "expand_moto_variants"
+        variants = _expand_model_variants(model)
+        core = variants[0] if variants else model
+        new_query = " ".join([brand, core, displacement, family]).strip()
+    elif attempt == 2:
+        strategy = "minimal_core_query"
+        main_token = family or (model.split()[0] if model else "") or (normalize_search_query(understanding.get("raw_query", "")).split()[:1] or [""])[0]
+        new_query = " ".join([brand, model, main_token]).strip()
+    else:
+        strategy = "semantic_expansion"
+        semantic_terms = [brand, model, displacement, family, understanding.get("usage_context") or "", understanding.get("raw_query")]
+        new_query = " ".join([t for t in semantic_terms if t]).strip()
 
-    new_query = " ".join([p for p in new_query_parts if p]).strip() or understanding.get("raw_query", "")
+    new_query = new_query or understanding.get("raw_query", "")
     return strategy, new_query
 
 
@@ -5318,32 +5508,40 @@ def _phase6_fallback(reason: str) -> dict:
         "status": reason,
         "fallback_action": "return_top_N_with_disclaimer",
         "results": [],
+        "fallback_message": "Necesito más datos para asegurar compatibilidad. ¿Querés precio o ver más opciones?",
     }
 
 
 def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback_payload: dict | None = None) -> dict:
-    candidates = reasoning_payload.get("candidates_evaluated") or []
+    decisions = reasoning_payload.get("decisions") or []
     message_type = "confident_match" if reasoning_payload.get("llm2_confidence_overall", 0) >= CONFIDENCE_THRESHOLD else "partial_match"
     recommendations = []
 
-    for cand in candidates:
-        badge = "✅ Coincide exactamente" if cand.get("compatibility_decision") == "compatible" else "⚠️ Probablemente compatible"
+    for dec in decisions:
+        if dec.get("compatibility") == "no":
+            continue
+        badge = "✅ Compatible" if dec.get("compatibility") == "compatible" else "⚠️ A confirmar"
         recommendations.append(
             {
-                "product_id": cand.get("product_id"),
-                "product_name": cand.get("name", ""),
+                "product_id": dec.get("product_id"),
+                "product_name": dec.get("product_name", ""),
                 "confidence_badge": badge,
             }
         )
 
+    follow_up = "¿Querés precio o ver más opciones?"
     whatsapp_response = ""
     if recommendations:
-        lines = ["Te dejo opciones:"]
+        lines = ["Te dejo opciones compatibles:"]
         for rec in recommendations[:5]:
             lines.append(f"- {rec['product_name']} ({rec['confidence_badge']})")
+        lines.append(follow_up)
         whatsapp_response = "\n".join(lines)
     elif fallback_payload:
-        whatsapp_response = fallback_payload.get("fallback_message") or "No tengo resultados seguros, ¿me compartís más detalles?"
+        fallback_msg = fallback_payload.get("fallback_message") or "Necesito más datos para asegurar compatibilidad."
+        whatsapp_response = f"{fallback_msg}\n\n{follow_up}".strip()
+    else:
+        whatsapp_response = f"Necesito confirmar la moto para asegurarte compatibilidad. {follow_up}"
 
     return {
         "phase": "response_generation",
@@ -5392,7 +5590,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         # --------------------------------------------
         # FASE 3: Filtro de compatibilidad inteligente
         # --------------------------------------------
-        compatibility_payload = _phase3_compatibility_filter(search_payload)
+        compatibility_payload = _phase3_compatibility_filter(understanding, search_payload)
         logger.info(f"[v3.16][FASE3] {json.dumps(compatibility_payload, ensure_ascii=False)}")
 
         # --------------------------------------------
@@ -5403,7 +5601,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         else:
             reasoning_payload = {
                 "phase": "llm2_reasoning",
-                "candidates_evaluated": [],
+                "decisions": [],
                 "products_excluded": [],
                 "llm2_confidence_overall": 0.5,
                 "needs_requery": False,
@@ -5430,7 +5628,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     if (not reasoning_payload or reasoning_payload.get("llm2_confidence_overall", 0) < CONFIDENCE_THRESHOLD) and not fallback_payload:
         fallback_payload = _phase6_fallback("low_confidence_results")
-        fallback_payload["fallback_message"] = "No encontré una coincidencia clara, ¿podés darme más detalles?"
+        fallback_payload["fallback_message"] = "Tengo algunas opciones pero necesito confirmar la moto. ¿Querés precio o ver más opciones?"
 
     # --------------------------------------------
     # FASE 7: LLM3 Response Generation
@@ -5441,7 +5639,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     reply = response_payload.get("whatsapp_response") or "Necesito un poco más de información para ayudarte mejor."
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, understanding.get("intent", "otro"), len(response_payload.get("product_recommendations", [])))
-    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("candidates_evaluated", [])) if reasoning_payload else 0)
+    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("decisions", [])) if reasoning_payload else 0)
     update_sales_phase_from_intent(phone, understanding.get("intent", "otro"))
 
     logger.info(f"[v3.16 - DONE] Hybrid JSON pipeline complete | Duration: {time.time()-start_time:.2f}s")
