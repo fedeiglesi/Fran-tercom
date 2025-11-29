@@ -1,12 +1,46 @@
 import json
+import os
+from typing import Iterable, List
+
+try:
+    from jsonschema import validate
+except ImportError:
+    def validate(instance, schema):
+        required = schema.get("required", [])
+        for field in required:
+            if field not in instance:
+                raise ValueError(f"Missing required field: {field}")
+
 from openai import OpenAI
-client = OpenAI()
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "test-key"))
+
+def _iter_column(df, col: str) -> Iterable[str]:
+    """Itera sobre una columna de forma dinámica sin asumir tipo de df."""
+
+    if df is None:
+        return []
+
+    if hasattr(df, "columns") and col in getattr(df, "columns", []):
+        series = df[col]
+        if hasattr(series, "dropna"):
+            series = series.dropna()
+        return series.astype(str).tolist()
+
+    values: List[str] = []
+    for row in df or []:
+        if isinstance(row, dict) and col in row:
+            value = row.get(col)
+            if value is not None:
+                values.append(str(value))
+    return values
+
 
 def build_enum_from_catalog(df, col):
     """
     Convierte valores del catálogo en un enum dinámico deduplicado.
     """
-    values = sorted(set(v for v in df[col].dropna().astype(str)))
+    values = sorted(set(_iter_column(df, col)))
     if len(values) > 60:
         return None  # Si hay demasiados, no se usa enum
     return values
@@ -75,4 +109,7 @@ Mensaje del usuario:
         temperature=0
     )
 
-    return json.loads(response.choices[0].message.content)
+    content = json.loads(response.choices[0].message.content)
+    # Validación JSON-first
+    validate(instance=content, schema=schema)
+    return content
