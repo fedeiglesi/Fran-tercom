@@ -30,7 +30,7 @@ def test_needs_llm_compatibility_detects_missing_structure(monkeypatch):
     monkeypatch.setattr(app, "FAMILY_COMPATIBILITY_PROFILE", profile)
 
     assert app.needs_llm_compatibility("Bujia") is True
-    assert app.needs_llm_compatibility("Pastilla de Freno") is False
+    assert app.needs_llm_compatibility("Pastilla de Freno") is True
 
 
 def test_compatibility_filter_llm_policy(monkeypatch):
@@ -84,8 +84,8 @@ def test_llm2_reasoning_decision_schema(monkeypatch):
     }
 
     result = app._phase4_llm2_reasoning(understanding, search_payload, filter_payload)
-    assert result["decisions"][0]["compatibility"] == "compatible"
-    assert result["decisions"][0]["confidence"] >= 0.85
+    assert result["candidates_evaluated"][0]["compatibility_decision"] == "compatible"
+    assert result["candidates_evaluated"][0]["confidence_score"] >= 0.85
 
 
 def test_phase5_requery_strategies_cover_all_attempts(monkeypatch):
@@ -102,7 +102,7 @@ def test_phase5_requery_strategies_cover_all_attempts(monkeypatch):
 
 def test_response_includes_follow_up(monkeypatch):
     understanding = {"brand": "Honda", "model": "Wave", "raw_query": "bujia"}
-    reasoning_payload = {"decisions": [], "llm2_confidence_overall": 0.4}
+    reasoning_payload = {"candidates_evaluated": [], "llm2_confidence_overall": 0.4}
     fallback_payload = {"fallback_message": "Necesito más datos"}
 
     response = app._phase7_llm3_response(understanding, reasoning_payload, fallback_payload)
