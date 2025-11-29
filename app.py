@@ -42,6 +42,7 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 from dotenv import load_dotenv
 from cachetools import LRUCache
+from jsonschema import validate, ValidationError
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
@@ -78,6 +79,21 @@ logger.info("✅ Imports completos")
 
 FRAN_DEBUG = (os.environ.get("FRAN_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
 LAST_SEARCH_DEBUG = {}
+
+# ------------------------------------------------------------
+# CONFIGURACIÓN FRAN 3.16 (Pipeline JSON-first)
+# ------------------------------------------------------------
+STRICT_MODE = True
+ALLOW_MISSING_MOTO_DATA = True
+LLM_REASONING_ENABLED = True
+CONFIDENCE_THRESHOLD = 0.75
+MAX_REQUERY_ATTEMPTS = 2
+RESPONSE_TIMEOUT_MS = 5000
+
+# CONSTANTS
+SEARCH_TOP_K = 15
+FAISS_THRESHOLD = 0.6
+BM25_THRESHOLD = 0.4
 LAST_FILTER_CATALOG_DEBUG = {}
 LAST_RELEVANCE_DEBUG = {}
 
@@ -4933,25 +4949,413 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 # =========================================================
 # ORQUESTADOR FRAN – VERSIÓN 3.16 (ARQUITECTURA HÍBRIDA)
 # =========================================================
+
+LLM1_UNDERSTANDING_SCHEMA = {
+    "type": "object",
+    "required": [
+        "phase",
+        "raw_query",
+        "intent",
+        "brand",
+        "model",
+        "displacement_cc",
+        "usage_context",
+        "product_type",
+        "metadata",
+        "confidence",
+    ],
+    "properties": {
+        "phase": {"const": "understanding"},
+        "raw_query": {"type": "string"},
+        "intent": {"type": "string"},
+        "brand": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "displacement_cc": {"type": ["integer", "null"]},
+        "usage_context": {"type": ["string", "null"]},
+        "product_type": {"type": ["string", "null"]},
+        "metadata": {
+            "type": "object",
+            "required": ["year_range", "additional_constraints", "ambiguity_level"],
+            "properties": {
+                "year_range": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                        {"type": "null"},
+                    ]
+                },
+                "additional_constraints": {"type": ["string", "null"]},
+                "ambiguity_level": {"enum": ["low", "medium", "high"]},
+            },
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+    },
+}
+
+SEARCH_PHASE_SCHEMA = {
+    "type": "object",
+    "required": ["phase", "query_params", "results", "total_results"],
+    "properties": {
+        "phase": {"const": "search"},
+        "query_params": {
+            "type": "object",
+            "required": ["text_query", "filters"],
+            "properties": {
+                "text_query": {"type": "string"},
+                "filters": {
+                    "type": "object",
+                    "required": ["brand", "model", "displacement_cc"],
+                    "properties": {
+                        "brand": {"type": ["string", "null"]},
+                        "model": {"type": ["string", "null"]},
+                        "displacement_cc": {"type": ["integer", "null"]},
+                    },
+                },
+            },
+        },
+        "results": {"type": "array"},
+        "total_results": {"type": "integer"},
+    },
+}
+
+LLM2_SCHEMA = {
+    "type": "object",
+    "required": ["phase", "candidates_evaluated", "products_excluded", "llm2_confidence_overall", "needs_requery"],
+    "properties": {
+        "phase": {"const": "llm2_reasoning"},
+        "candidates_evaluated": {"type": "array"},
+        "products_excluded": {"type": "array"},
+        "llm2_confidence_overall": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "needs_requery": {"type": "boolean"},
+    },
+}
+
+
+def _validate_phase(payload: dict, schema: dict, phase_name: str) -> bool:
+    try:
+        validate(payload, schema)
+        return True
+    except ValidationError as e:
+        logger.error(f"[v3.16][{phase_name}] JSON inválido: {e.message}")
+        return False
+
+
+def _normalize_confidence(value: float, minimum: float = 0.0) -> float:
+    try:
+        val = float(value)
+    except Exception:
+        return minimum
+    return max(min(val, 1.0), minimum)
+
+
+def _derive_ambiguity(confidence: float) -> str:
+    if confidence < 0.7:
+        return "high"
+    if confidence < 0.85:
+        return "medium"
+    return "low"
+
+
+def _phase1_llm1_understanding(user_message: str) -> dict:
+    semantic_signals = detect_semantic_entities(user_message)
+    brand = (semantic_signals.get("brands") or [None])[0]
+    model = (semantic_signals.get("models") or [None])[0]
+    displacement = None
+    for code in semantic_signals.get("codes") or []:
+        if code.isdigit():
+            try:
+                displacement = int(code)
+                break
+            except Exception:
+                continue
+
+    confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
+    confidence = _normalize_confidence(confidence, minimum=0.3)
+
+    payload = {
+        "phase": "understanding",
+        "raw_query": user_message,
+        "intent": "busca_producto" if semantic_signals.get("has_technical") or semantic_signals.get("brands") else "otro",
+        "brand": brand,
+        "model": model,
+        "displacement_cc": displacement,
+        "usage_context": None,
+        "product_type": None,
+        "metadata": {
+            "year_range": None,
+            "additional_constraints": None,
+            "ambiguity_level": _derive_ambiguity(confidence),
+        },
+        "confidence": confidence,
+    }
+
+    if payload["confidence"] < 0.7:
+        payload["metadata"]["ambiguity_level"] = "high"
+
+    if not _validate_phase(payload, LLM1_UNDERSTANDING_SCHEMA, "FASE1"):
+        payload["confidence"] = 0.3
+        payload["metadata"]["ambiguity_level"] = "high"
+
+    return payload
+
+
+def _normalize_score_from_rank(rank: int, max_items: int) -> float:
+    if max_items <= 1:
+        return 1.0
+    return max(0.0, 1.0 - (rank - 1) / max_items)
+
+
+def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
+    text_query_parts = [understanding.get("brand"), understanding.get("model"), understanding.get("product_type"), understanding.get("raw_query")]
+    text_query = " ".join([p for p in text_query_parts if p]) or understanding.get("raw_query", "")
+
+    search_results = hybrid_search(text_query, phone=phone, top_k=SEARCH_TOP_K)
+    fused = search_results.get("fused") if isinstance(search_results, dict) else []
+    if not fused:
+        candidates = search_results.get("final_candidates") if isinstance(search_results, dict) else []
+        fused = [(c, 0.0) for c in (candidates or [])]
+
+    structured_results = []
+    for idx, (product, score) in enumerate(fused[:SEARCH_TOP_K], 1):
+        structured_results.append(
+            {
+                "product_id": product.get("code") or str(idx),
+                "name": product.get("name") or product.get("description", ""),
+                "bm25_score": _normalize_score_from_rank(idx, SEARCH_TOP_K),
+                "faiss_similarity": _normalize_score_from_rank(idx, SEARCH_TOP_K) if score else 0.5,
+                "hybrid_rank": idx,
+                "catalog_data": {
+                    "marca_moto": product.get("moto_brand") or product.get("brand") or None,
+                    "modelo_moto": product.get("moto_model") or product.get("model") or None,
+                    "cilindrada": product.get("displacement") or product.get("cilindrada") or None,
+                    "compatibilidad_declarada": product.get("compatibilidad_declarada") or product.get("compatibility"),
+                },
+            }
+        )
+
+    payload = {
+        "phase": "search",
+        "query_params": {
+            "text_query": text_query,
+            "filters": {
+                "brand": understanding.get("brand"),
+                "model": understanding.get("model"),
+                "displacement_cc": understanding.get("displacement_cc"),
+            },
+        },
+        "results": structured_results,
+        "total_results": len(structured_results),
+    }
+
+    if not _validate_phase(payload, SEARCH_PHASE_SCHEMA, "FASE2"):
+        payload["results"] = []
+        payload["total_results"] = 0
+
+    return payload
+
+
+def _phase3_compatibility_filter(search_payload: dict) -> dict:
+    candidates_after_filter = []
+    hard_rejected = 0
+
+    for cand in search_payload.get("results", [])[:SEARCH_TOP_K]:
+        catalog_data = cand.get("catalog_data") or {}
+        brand = catalog_data.get("marca_moto")
+        model = catalog_data.get("modelo_moto")
+        compatibility_declared = (catalog_data.get("compatibilidad_declarada") or "").lower() if catalog_data.get("compatibilidad_declarada") else None
+
+        if compatibility_declared == "incompatible":
+            hard_rejected += 1
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "hard_incompatible",
+                    "reason": "Compatibilidad explícita marcada como incompatible",
+                    "confidence": 1.0,
+                    "proceedes_to_llm2": False,
+                }
+            )
+            continue
+
+        if compatibility_declared == "compatible" and brand and model:
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "hard_compatible",
+                    "reason": "Catalogo marca/modelo coincide",
+                    "confidence": 0.9,
+                    "proceedes_to_llm2": True,
+                }
+            )
+            continue
+
+        if not ALLOW_MISSING_MOTO_DATA and (not brand or not model):
+            hard_rejected += 1
+            candidates_after_filter.append(
+                {
+                    "product_id": cand["product_id"],
+                    "status": "hard_incompatible",
+                    "reason": "Datos incompletos y ALLOW_MISSING_MOTO_DATA=false",
+                    "confidence": 0.5,
+                    "proceedes_to_llm2": False,
+                }
+            )
+            continue
+
+        candidates_after_filter.append(
+            {
+                "product_id": cand["product_id"],
+                "status": "pending_reasoning",
+                "reason": "Faltan datos estructurados para decisión dura",
+                "confidence": 0.6,
+                "proceedes_to_llm2": True,
+            }
+        )
+
+    return {
+        "phase": "compatibility_filter",
+        "candidates_after_filter": candidates_after_filter,
+        "hard_rejected_count": hard_rejected,
+    }
+
+
+def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_payload: dict) -> dict:
+    evaluated = []
+    excluded = []
+
+    results_lookup = {r["product_id"]: r for r in search_payload.get("results", [])}
+    for cand in filter_payload.get("candidates_after_filter", []):
+        if not cand.get("proceedes_to_llm2"):
+            continue
+
+        product = results_lookup.get(cand["product_id"], {})
+        catalog_data = product.get("catalog_data") or {}
+        brand_match = catalog_data.get("marca_moto") and understanding.get("brand") and understanding.get("brand").lower() in catalog_data.get("marca_moto", "").lower()
+        model_match = catalog_data.get("modelo_moto") and understanding.get("model") and understanding.get("model").lower() in catalog_data.get("modelo_moto", "").lower()
+        displacement_match = False
+        if understanding.get("displacement_cc") and catalog_data.get("cilindrada"):
+            try:
+                displacement_match = int(catalog_data.get("cilindrada")) == int(understanding.get("displacement_cc"))
+            except Exception:
+                displacement_match = False
+
+        confidence_local = 0.6
+        decision = "marginal"
+        justification_type = "semantic_similarity"
+        if brand_match or model_match or displacement_match:
+            decision = "compatible"
+            justification_type = "catalog_match"
+            confidence_local = 0.82 if (brand_match and model_match) else 0.7
+
+        if STRICT_MODE and confidence_local < 0.6:
+            excluded.append(
+                {
+                    "product_id": cand["product_id"],
+                    "exclusion_reason": "Confianza insuficiente en compatibilidad",
+                    "confidence": confidence_local,
+                }
+            )
+            continue
+
+        evaluated.append(
+            {
+                "product_id": cand["product_id"],
+                "name": product.get("name") or "",
+                "compatibility_decision": decision,
+                "confidence_score": _normalize_confidence(confidence_local, minimum=0.3),
+                "technical_reasoning": "Coincidencia parcial de marca/modelo" if decision != "marginal" else "Sin datos completos, se usa similitud semántica",
+                "justification_type": justification_type,
+                "risk_level": "low" if decision == "compatible" else "medium",
+            }
+        )
+
+    if not evaluated and excluded and STRICT_MODE:
+        overall_confidence = 0.3
+    elif evaluated:
+        overall_confidence = sum([e.get("confidence_score", 0) for e in evaluated]) / len(evaluated)
+    else:
+        overall_confidence = 0.4
+
+    payload = {
+        "phase": "llm2_reasoning",
+        "candidates_evaluated": evaluated,
+        "products_excluded": excluded,
+        "llm2_confidence_overall": _normalize_confidence(overall_confidence, minimum=0.0),
+        "needs_requery": overall_confidence < CONFIDENCE_THRESHOLD,
+    }
+
+    if not _validate_phase(payload, LLM2_SCHEMA, "FASE4"):
+        payload["llm2_confidence_overall"] = 0.3
+        payload["needs_requery"] = True
+
+    return payload
+
+
+def _phase5_requery(understanding: dict, attempt: int) -> tuple[str, str]:
+    strategy = "ambiguous_terms"
+    new_query_parts = []
+
+    if not understanding.get("brand"):
+        strategy = "brand_missing"
+        new_query_parts = [str(understanding.get("displacement_cc") or ""), understanding.get("product_type") or "", understanding.get("usage_context") or ""]
+    elif not understanding.get("model"):
+        strategy = "model_missing"
+        new_query_parts = [understanding.get("brand") or "", str(understanding.get("displacement_cc") or ""), understanding.get("product_type") or "familia"]
+    elif understanding.get("metadata", {}).get("ambiguity_level") == "high":
+        strategy = "normalize_and_expand"
+        new_query_parts = [normalize_search_query(understanding.get("raw_query", ""))]
+
+    if attempt == 2:
+        strategy = f"{strategy}_broad"
+        new_query_parts.append("universal")
+
+    new_query = " ".join([p for p in new_query_parts if p]).strip() or understanding.get("raw_query", "")
+    return strategy, new_query
+
+
+def _phase6_fallback(reason: str) -> dict:
+    return {
+        "phase": "fallback",
+        "status": reason,
+        "fallback_action": "return_top_N_with_disclaimer",
+        "results": [],
+    }
+
+
+def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback_payload: dict | None = None) -> dict:
+    candidates = reasoning_payload.get("candidates_evaluated") or []
+    message_type = "confident_match" if reasoning_payload.get("llm2_confidence_overall", 0) >= CONFIDENCE_THRESHOLD else "partial_match"
+    recommendations = []
+
+    for cand in candidates:
+        badge = "✅ Coincide exactamente" if cand.get("compatibility_decision") == "compatible" else "⚠️ Probablemente compatible"
+        recommendations.append(
+            {
+                "product_id": cand.get("product_id"),
+                "product_name": cand.get("name", ""),
+                "confidence_badge": badge,
+            }
+        )
+
+    whatsapp_response = ""
+    if recommendations:
+        lines = ["Te dejo opciones:"]
+        for rec in recommendations[:5]:
+            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']})")
+        whatsapp_response = "\n".join(lines)
+    elif fallback_payload:
+        whatsapp_response = fallback_payload.get("fallback_message") or "No tengo resultados seguros, ¿me compartís más detalles?"
+
+    return {
+        "phase": "response_generation",
+        "message_type": message_type if recommendations else "clarification_needed",
+        "whatsapp_response": whatsapp_response[:1000],
+        "product_recommendations": recommendations,
+        "fallback_message": fallback_payload.get("fallback_message") if fallback_payload else None,
+    }
+
 def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
-    """
-    Orquestador híbrido que combina lo mejor de Fran 3.14 y 3.15.
+    """Orquestador JSON-first con fases controladas y re-query automático."""
 
-    ARQUITECTURA:
-    1. Understanding con Template estructurado (3.15)
-    2. Intent detection temprano con skip logic para sociales
-    3. Búsqueda híbrida (compartida)
-    4. Reasoning con re-query capability (3.14)
-    5. Response con Template estructurado (3.15)
-    6. Validación anti-alucinación (compartida)
-
-    VENTAJAS:
-    - Structured outputs nativos (más rápido, confiable)
-    - Razonamiento explícito para casos complejos
-    - Re-búsqueda adaptativa
-    - Skip de reasoning para intents sociales (optimización de latencia y costo)
-    - Fallbacks automáticos por fase
-    """
     start_time = time.time()
     user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
 
@@ -4962,368 +5366,85 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
 
     save_message(phone, user_message, "user")
 
-    semantic_signals = detect_semantic_entities(user_message)
+    # --------------------------------------------
+    # FASE 1: LLM1 Understanding (JSON)
+    # --------------------------------------------
+    understanding = _phase1_llm1_understanding(user_message)
+    logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
-    # ============================================
-    # FASE 1: UNDERSTANDING (Template 3.15)
-    # ============================================
-    logger.info(f"[v3.16 - FASE 1] Understanding query: {user_message}")
+    reasoning_payload = None
+    fallback_payload = None
+    requery_attempt = 0
 
-    understanding = complete_template(
-        "query_understanding",
-        {
-            "phone": phone,
-            "user_message": user_message,
-            "conversation_history": get_history_since(phone, days=1, limit=5),
-            "last_search_query": (get_last_search(phone) or {}).get("query", "")
-        },
-    )
-
-    if understanding.get("needs_clarification"):
-        reply = understanding.get("clarification_question") or "¿Me pasás más detalles de la moto y el repuesto?"
-        save_message(phone, reply, "assistant")
-        return reply
-
-    normalized_query = understanding.get("normalized_query") or user_message
-    intent = understanding.get("intent") or "product_search"
-    entities = understanding.get("entities", {})
-    semantic_intents = [i for i in (understanding.get("semantic_intents") or []) if i]
-
-    parser_detected_technical = bool(
-        semantic_signals.get("has_technical")
-        or semantic_signals.get("technical_tokens")
-        or semantic_signals.get("brands")
-        or semantic_signals.get("models")
-        or semantic_signals.get("purchase_verbs")
-        or semantic_signals.get("codes")
-    )
-
-    intents_detected = merge_intents_with_semantics(semantic_signals, intent, semantic_intents)
-
-    if parser_detected_technical and "product_search" not in intents_detected:
-        intents_detected.insert(0, "product_search")
-
-    semantic_has_product = "product_search" in semantic_intents
-    intent_final = "product_search" if semantic_has_product or parser_detected_technical else intent
-    primary_intent = intent_final if intent_final else intents_detected[0]
-
-    logger.info(
-        f"[v3.16 - FASE 1] Normalized: '{normalized_query}' | Intent: {intent} | Semantic intents: {semantic_intents or intents_detected} | Corrections: {understanding.get('corrections')}"
-    )
-
-    # ============================================
-    # FASE 2: SKIP LOGIC PARA INTENTS SOCIALES
-    # ============================================
-    has_social_intent = "social" in semantic_intents or "social" in intents_detected
-    product_intent_active = "product_search" in intents_detected or semantic_has_product or parser_detected_technical
-    should_return_social_only = has_social_intent and not product_intent_active and primary_intent in [
-        "social",
-        "greeting",
-        "small_talk",
-        "conversation",
-    ]
-
-    social_intro = None
-    if has_social_intent and (should_return_social_only or product_intent_active):
-        logger.info("[v3.16 - FASE 2] Generando respuesta social mínima")
-        social_response = complete_template(
-            "response_generation",
-            {
-                "phone": phone,
-                "intent": "social",
-                "selected_products": [],
-                "customer_analysis": {
-                    "customer_type": "nuevo",
-                    "interest_level": "bajo",
-                    "key_arguments": []
-                },
-                "query_context": {
-                    "original": user_message,
-                    "normalized": normalized_query,
-                    "corrections": understanding.get("corrections", []),
-                },
-                "conversation_state": {
-                    "sales_phase": get_sales_phase(phone),
-                    "cart_total": format_price(cart_totals(phone)[0]),
-                },
-            },
-        )
-        social_intro = social_response.get("message", "")
-
-    if should_return_social_only:
-        reply = social_intro or "¿En qué te puedo ayudar?"
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, primary_intent, 0)
-        log_performance(phone, "social_direct", time.time() - start_time, 0)
-        update_sales_phase_from_intent(phone, primary_intent)
-
-        logger.info(f"[v3.16 - DONE] Social response | Duration: {time.time()-start_time:.2f}s")
-        return reply
-
-    # ============================================
-    # FASE 3: BÚSQUEDA HÍBRIDA (compartida)
-    # ============================================
-    logger.info(f"[v3.16 - FASE 3] Hybrid search for product intent...")
-
-    allowed_products = run_allowed_products_search(normalized_query, phone=phone)
-    logger.info(f"[v3.16 - FASE 3] Found: {len(allowed_products) if isinstance(allowed_products, list) else 'multi-search'}")
-
-    if isinstance(allowed_products, dict):
-        if allowed_products.get("error") == "too_many_combinations":
-            reply = allowed_products.get("message", "Pasame una sola moto o categoría.")
-            save_message(phone, reply, "assistant")
-            return reply
-
-        reply = format_multi_search_response(allowed_products)
-        if reply:
-            save_message(phone, reply, "assistant")
-            return reply
-        allowed_products = []
-
-    quality = assess_context_quality(normalized_query, allowed_products)
-
-    if not quality["sufficient"]:
-        if quality["action"] == "ask_clarification":
-            reply = quality.get("message") or "Necesito un dato más (marca/modelo/año)."
-        else:
-            top_products = quality.get("top_products", [])[:3]
-            suggestions = "\n".join(
-                [
-                    f"- {p.get('name', '')} ({p.get('code', '')}) - {format_price(p.get('price_ars', 0))}"
-                    for p in top_products
-                ]
-            )
-            reply = (
-                "No encontré coincidencia perfecta. Tengo:\n\n"
-                f"{suggestions}\n\n"
-                "¿Te sirve alguna o dame más detalles?"
-            )
-
-        save_message(phone, reply, "assistant")
-        log_interaction(phone, user_message, f"low_quality_{quality.get('reason', 'unknown')}", 0)
-        log_performance(phone, "low_quality", time.time() - start_time, len(allowed_products))
-        return reply
-
-    save_last_search(
-        phone,
-        [
-            {
-                "code": p["code"],
-                "name": p.get("name", ""),
-                "price_ars": p.get("price_ars"),
-                "price_usd": p.get("price_usd"),
-                "qty": 1,
-            }
-            for p in allowed_products[:150]
-        ],
-        normalized_query,
-    )
-
-    logger.info(f"[v3.16 - FASE 3] Quality: {quality.get('confidence')} | Products: {len(allowed_products)}")
-
-    # ============================================
-    # FASE 4: REASONING CON RE-QUERY (estilo 3.14)
-    # ============================================
-    logger.info(f"[v3.16 - FASE 4] Internal reasoning with re-query capability...")
-
-    history = get_history_since(phone, days=1, limit=12)
-    if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
-        history = history[:-1]
-    short_history = history[-8:]
-    primer_mensaje = len(short_history) == 0
-
-    execution_context = {
-        "intent_detected": primary_intent,
-        "intents_detected": intents_detected,
-        "search_query": normalized_query,
-        "entities": entities,
-    }
-
-    memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
-
-    contexto = {
-        "mensaje_usuario": user_message,
-        "search_query": normalized_query,
-        "historial": [{"role": h["role"], "content": h["content"]} for h in short_history],
-        "metadata_catalogo": {"productos_total": len(allowed_products or [])},
-        "memoria_viva": memory,
-        "pending_actions": memory.get("pending_action"),
-        "cart_state": memory.get("cart_state", []),
-        "most_recent_bike": memory.get("most_recent_bike", ""),
-    }
-
-    # Análisis comercial
-    historial_comercial = short_history[-6:] if short_history else []
-    conversacion_completa = [h.get("content", "") for h in historial_comercial]
-
-    sales_result = run_sales_analysis_llm(
-        conversacion_completa=conversacion_completa,
-        productos_disponibles=allowed_products,
-        contexto_cliente=memory,
-        perfil_cliente=memory.get("perfil_cliente", {}),
-    )
-
-    parsed_sales = sales_result or {}
-    sales = parsed_sales.get("sales_analysis", {}) or {}
-
-    sales_analysis = {
-        "tipo_de_cliente": sales.get("tipo_de_cliente", ""),
-        "nivel_de_interes": sales.get("nivel_de_interes", "medio"),
-        "senales_de_cierre": sales.get("senales_de_cierre", []),
-        "producto_recomendado": sales.get("producto_recomendado", ""),
-        "argumentos_clave": sales.get("argumentos_clave", []),
-        "alternativas_seguras": sales.get("alternativas_seguras", []),
-        "tono_sugerido": sales.get("tono_sugerido", "concise"),
-        "nivel_de_confianza": float(sales.get("nivel_de_confianza", 0.0) or 0.0),
-    }
-
-    contexto["sales_analysis"] = sales_analysis
-
-    # Razonamiento interno
-    plan_interno = pensar_con_llm(
-        PLANNING_UNIFIED_PROMPT,
-        contexto,
-        allowed_products[:MAX_PRODUCTS_FOR_LLM],
-    )
-
-    parsed_plan = validate_reasoning_json(plan_interno, allowed_products[:MAX_PRODUCTS_FOR_LLM])
-
-    # Re-query si es necesario (capacidad de 3.14)
-    max_requery_attempts = 1
-    requery_count = 0
-    while parsed_plan and parsed_plan.get("requery", {}).get("NEED_REQUERY") and requery_count < max_requery_attempts:
-        requery_count += 1
-        nueva_query = parsed_plan.get("requery", {}).get("new_query")
-        logger.info(f"[v3.16 - FASE 4] Re-query triggered: {nueva_query}")
-
-        try:
-            semantic_results = hybrid_search(nueva_query, phone=phone, top_k=MAX_SEARCH_RESULTS)
-            if isinstance(semantic_results, dict):
-                allowed_products = list(semantic_results.get("final_candidates") or [])[:MAX_PRODUCTS_FOR_LLM]
-            else:
-                allowed_products = [p for p, _ in semantic_results][:MAX_PRODUCTS_FOR_LLM]
-
-            memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), allowed_products)
-            contexto.update({
-                "search_query": nueva_query,
-                "memoria_viva": memory,
-                "metadata_catalogo": {"productos_total": len(allowed_products)},
-                "cart_state": memory.get("cart_state", []),
-            })
-
-            plan_interno = pensar_con_llm(
-                PLANNING_UNIFIED_PROMPT,
-                contexto,
-                allowed_products,
-            )
-            parsed_plan = validate_reasoning_json(plan_interno, allowed_products)
-        except Exception as e:
-            logger.error(f"Error en re-query: {e}")
+    while requery_attempt <= MAX_REQUERY_ATTEMPTS:
+        elapsed_ms = (time.time() - start_time) * 1000
+        if elapsed_ms > RESPONSE_TIMEOUT_MS:
+            logger.warning("[v3.16] Timeout global, activando fallback")
+            fallback_payload = _phase6_fallback("timeout")
             break
 
-    if not parsed_plan:
-        logger.warning("[v3.16 - FASE 4] Plan parsing failed, usando fallback")
-        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
-        save_message(phone, reply, "assistant")
-        return reply
+        # --------------------------------------------
+        # FASE 2: Búsqueda híbrida (BM25 + FAISS)
+        # --------------------------------------------
+        search_payload = _phase2_hybrid_search(understanding, phone)
+        logger.info(f"[v3.16][FASE2] {json.dumps(search_payload, ensure_ascii=False)}")
 
-    # Ejecutar plan
-    plan_ejecutado = ejecutar_plan_interno(parsed_plan, phone, allowed_products[:MAX_PRODUCTS_FOR_LLM])
+        # --------------------------------------------
+        # FASE 3: Filtro de compatibilidad inteligente
+        # --------------------------------------------
+        compatibility_payload = _phase3_compatibility_filter(search_payload)
+        logger.info(f"[v3.16][FASE3] {json.dumps(compatibility_payload, ensure_ascii=False)}")
 
-    if not plan_ejecutado:
-        reply = "Tengo estas opciones:\n\n" + format_search_results(allowed_products[:5])
-        save_message(phone, reply, "assistant")
-        return reply
+        # --------------------------------------------
+        # FASE 4: LLM2 Reasoning (heurístico si LLM off)
+        # --------------------------------------------
+        if LLM_REASONING_ENABLED:
+            reasoning_payload = _phase4_llm2_reasoning(understanding, search_payload, compatibility_payload)
+        else:
+            reasoning_payload = {
+                "phase": "llm2_reasoning",
+                "candidates_evaluated": [],
+                "products_excluded": [],
+                "llm2_confidence_overall": 0.5,
+                "needs_requery": False,
+            }
+        logger.info(f"[v3.16][FASE4] {json.dumps(reasoning_payload, ensure_ascii=False)}")
 
-    productos_finales = plan_ejecutado.get("productos_finales", [])
-    customer_state = plan_ejecutado.get("customer_state", {})
+        low_llm1_conf = understanding.get("confidence", 0) < CONFIDENCE_THRESHOLD
+        trigger_requery = reasoning_payload.get("needs_requery") or low_llm1_conf
 
-    logger.info(f"[v3.16 - FASE 4] Reasoning complete | Selected: {len(productos_finales)} products")
+        if not trigger_requery:
+            break
 
-    # ============================================
-    # FASE 5: RESPONSE GENERATION (Template 3.15)
-    # ============================================
-    logger.info(f"[v3.16 - FASE 5] Generating response with template...")
+        requery_attempt += 1
+        if requery_attempt > MAX_REQUERY_ATTEMPTS:
+            break
 
-    # Convertir productos_finales a formato para template
-    selected_for_template = [
-        {
-            "code": p.get("code", ""),
-            "reason": p.get("razon", ""),
-            "rank": p.get("rol", "principal"),
-            "compatibility": 1.0 if p.get("rol") == "principal" else 0.8
-        }
-        for p in productos_finales
-    ]
+        strategy, new_query = _phase5_requery(understanding, requery_attempt)
+        logger.info(f"[v3.16][FASE5] intento={requery_attempt} estrategia={strategy} nueva_query='{new_query}'")
+        understanding["raw_query"] = new_query
+        understanding["metadata"]["ambiguity_level"] = "medium"
 
-    response = complete_template(
-        "response_generation",
-        {
-            "phone": phone,
-            "intent": primary_intent,
-            "selected_products": selected_for_template,
-            "customer_analysis": sales_analysis,
-            "query_context": {
-                "original": user_message,
-                "normalized": normalized_query,
-                "corrections": understanding.get("corrections", []),
-            },
-            "conversation_state": {
-                "sales_phase": get_sales_phase(phone),
-                "cart_total": format_price(cart_totals(phone)[0]),
-            },
-        },
-    )
+    # --------------------------------------------
+    # FASE 6: Fallback si no hay confianza
+    # --------------------------------------------
+    if (not reasoning_payload or reasoning_payload.get("llm2_confidence_overall", 0) < CONFIDENCE_THRESHOLD) and not fallback_payload:
+        fallback_payload = _phase6_fallback("low_confidence_results")
+        fallback_payload["fallback_message"] = "No encontré una coincidencia clara, ¿podés darme más detalles?"
 
-    reply = response.get("message", "")
-    products_cited = response.get("products_cited", [])
+    # --------------------------------------------
+    # FASE 7: LLM3 Response Generation
+    # --------------------------------------------
+    response_payload = _phase7_llm3_response(understanding, reasoning_payload or {}, fallback_payload)
+    logger.info(f"[v3.16][FASE7] {json.dumps(response_payload, ensure_ascii=False)}")
 
-    reply_segments = []
-    if social_intro:
-        reply_segments.append(social_intro)
-
-    if "follow_up" in intents_detected and "product_search" in intents_detected:
-        reply_segments.append("Sigo con lo que mencionaste y te comparto opciones:")
-
-    if reply:
-        reply_segments.append(reply)
-
-    reply = "\n\n".join([seg for seg in reply_segments if seg.strip()]) or reply
-
-    # ============================================
-    # FASE 6: VALIDACIÓN ANTI-ALUCINACIÓN
-    # ============================================
-    logger.info(f"[v3.16 - FASE 6] Anti-hallucination validation...")
-
-    allowed_codes = {p.get("code") for p in allowed_products[:MAX_PRODUCTS_FOR_LLM] if p.get("code")}
-    hallucinated = set(products_cited) - allowed_codes
-
-    if hallucinated:
-        logger.error(f"⚠️ LLM cited invalid codes: {hallucinated}")
-        reply = format_search_results(allowed_products[:5])
-        reply = f"Te muestro opciones:\n\n{reply}\n\n¿Cuál te sirve?"
-
-    # Manejar productos restantes (chunks)
-    if len(allowed_products) > MAX_PRODUCTS_FOR_LLM:
-        remaining_products = allowed_products[MAX_PRODUCTS_FOR_LLM:]
-        if remaining_products:
-            chunks = [
-                remaining_products[i : i + PRODUCTS_PER_CHUNK]
-                for i in range(0, len(remaining_products), PRODUCTS_PER_CHUNK)
-            ]
-
-            for idx, chunk in enumerate(chunks, 1):
-                chunk_text = f"━━━ Más opciones ({idx}/{len(chunks)}) ━━━\n"
-                chunk_text += format_search_results(chunk)
-                time.sleep(0.5)
-                send_long_message(phone, chunk_text)
-
+    reply = response_payload.get("whatsapp_response") or "Necesito un poco más de información para ayudarte mejor."
     save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, primary_intent, len(selected_for_template))
-    log_performance(phone, primary_intent, time.time() - start_time, len(allowed_products))
-    update_sales_phase_from_intent(phone, primary_intent)
+    log_interaction(phone, user_message, understanding.get("intent", "otro"), len(response_payload.get("product_recommendations", [])))
+    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("candidates_evaluated", [])) if reasoning_payload else 0)
+    update_sales_phase_from_intent(phone, understanding.get("intent", "otro"))
 
-    logger.info(f"[v3.16 - DONE] Hybrid architecture complete | Duration: {time.time()-start_time:.2f}s")
+    logger.info(f"[v3.16 - DONE] Hybrid JSON pipeline complete | Duration: {time.time()-start_time:.2f}s")
 
     return reply
 
