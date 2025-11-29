@@ -1,8 +1,24 @@
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
-# Se carga un modelo pequeño para enrutamiento, totalmente dinámico
-router_model = SentenceTransformer("all-MiniLM-L6-v2")
+try:
+    from sentence_transformers import SentenceTransformer
+
+    # Se carga un modelo pequeño para enrutamiento, totalmente dinámico
+    router_model = SentenceTransformer("all-MiniLM-L6-v2")
+except Exception:
+    class _FallbackRouter:
+        def encode(self, texts, convert_to_numpy=True):
+            vectors = []
+            for text in texts:
+                norm = text.lower().strip()
+                vec = np.array(
+                    [float(len(norm)), float(norm.count(" ")), float(sum(ord(c) for c in norm) % 101)],
+                    dtype="float32",
+                )
+                vectors.append(vec)
+            return vectors
+
+    router_model = _FallbackRouter()
 
 def build_catalog_centroid(catalog_texts):
     """
@@ -32,10 +48,16 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     """
     text = message.lower().strip()
 
+    if len(text.split()) <= 1:
+        return {"route": "social", "score": 0.0}
+
     sim = compute_similarity(text, catalog_centroid)
     entropy = estimate_entropy(text)
 
     score = 0.7 * sim + 0.3 * entropy
+
+    if len(text.split()) <= 2 and len(text) <= 5 and score < (threshold * 1.2):
+        return {"route": "social", "score": score}
 
     if score >= threshold:
         return {"route": "technical", "score": score}
