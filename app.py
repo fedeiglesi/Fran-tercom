@@ -1233,6 +1233,9 @@ def detect_semantic_entities(message: str) -> dict:
         or numeric_codes
     )
 
+    has_social = bool(social_hits)
+    has_follow_up = bool(follow_up_hits)
+
     return {
         "tokens": tokens,
         "technical_tokens": list(set(technical_tokens)),
@@ -1242,6 +1245,8 @@ def detect_semantic_entities(message: str) -> dict:
         "codes": numeric_codes,
         "social_markers": list(set(social_hits)),
         "follow_up_markers": list(set(follow_up_hits)),
+        "has_social": has_social,
+        "has_follow_up": has_follow_up,
         "has_technical": has_technical,
     }
 
@@ -5175,12 +5180,12 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
 
     lower_query = (user_message or "").lower()
     intent = "busca_producto"
-    if any(token in lower_query for token in ["compar", "vs", "versus"]):
+    if semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
+        intent = "social"
+    elif any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
     elif "especific" in lower_query:
         intent = "especificacion"
-    elif semantic_signals.get("has_social"):
-        intent = "otro"
 
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
     confidence = _normalize_confidence(confidence, minimum=0.3)

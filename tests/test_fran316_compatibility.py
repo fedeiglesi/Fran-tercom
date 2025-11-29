@@ -107,3 +107,12 @@ def test_response_includes_follow_up(monkeypatch):
 
     response = app._phase7_llm3_response(understanding, reasoning_payload, fallback_payload)
     assert "¿Querés precio o ver más opciones?" in response["whatsapp_response"]
+
+
+def test_social_intent_skips_product_mode():
+    semantic = app.detect_semantic_entities("Hola")
+    assert semantic["has_social"] is True
+    assert semantic["has_technical"] is False
+
+    understanding = app._phase1_llm1_understanding("Hola")
+    assert understanding["intent"] == "social"
