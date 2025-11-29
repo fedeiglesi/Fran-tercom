@@ -83,11 +83,11 @@ LAST_SEARCH_DEBUG = {}
 # ------------------------------------------------------------
 # CONFIGURACIÓN FRAN 3.16 (Pipeline JSON-first)
 # ------------------------------------------------------------
-STRICT_MODE = True
+STRICT_MODE = False
 ALLOW_MISSING_MOTO_DATA = True
 LLM_REASONING_ENABLED = True
 CONFIDENCE_THRESHOLD = 0.75
-MAX_REQUERY_ATTEMPTS = 3
+MAX_REQUERY_ATTEMPTS = 2
 RESPONSE_TIMEOUT_MS = 5000
 
 # CONSTANTS
@@ -2514,12 +2514,29 @@ def needs_llm_compatibility(family: str | None) -> bool:
     if not fam_norm:
         return True
 
+    llm_first_families = {
+        "bujia",
+        "pastilla",
+        "filtro",
+        "aceite",
+        "junta",
+        "bulbo",
+        "rayo",
+        "tornillo",
+        "pinon",
+        "corona",
+        "universal",
+    }
+
+    if any(token in fam_norm for token in llm_first_families):
+        return True
+
     stats = FAMILY_COMPATIBILITY_PROFILE.get(fam_norm)
     if not stats or not stats.get("total"):
         return True
 
     ratio = stats.get("with_structured", 0) / max(stats.get("total", 1), 1)
-    return ratio < 0.5
+    return ratio < 0.05
 
 
 def save_faiss_index(index, catalog):
@@ -5083,19 +5100,31 @@ SEARCH_PHASE_SCHEMA = {
 
 LLM2_SCHEMA = {
     "type": "object",
-    "required": ["phase", "decisions", "llm2_confidence_overall", "needs_requery"],
+    "required": ["phase", "candidates_evaluated", "llm2_confidence_overall", "needs_requery", "products_excluded"],
     "properties": {
         "phase": {"const": "llm2_reasoning"},
-        "decisions": {
+        "candidates_evaluated": {
             "type": "array",
             "items": {
                 "type": "object",
-                "required": ["product_id", "compatibility", "confidence", "reason"],
+                "required": [
+                    "product_id",
+                    "compatibility_decision",
+                    "confidence_score",
+                    "technical_reasoning",
+                    "justification_type",
+                    "risk_level",
+                ],
                 "properties": {
                     "product_id": {"type": ["string", "integer"]},
-                    "compatibility": {"enum": ["compatible", "no", "incierto"]},
-                    "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                    "reason": {"type": "string"},
+                    "compatibility_decision": {"enum": ["compatible", "incompatible", "marginal"]},
+                    "confidence_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "technical_reasoning": {"type": "string"},
+                    "justification_type": {
+                        "enum": ["catalog_match", "specification_inference", "semantic_similarity"],
+                    },
+                    "risk_level": {"enum": ["low", "medium", "high"]},
+                    "name": {"type": ["string", "null"]},
                 },
             },
         },
@@ -5144,18 +5173,32 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
             except Exception:
                 continue
 
+    lower_query = (user_message or "").lower()
+    intent = "busca_producto"
+    if any(token in lower_query for token in ["compar", "vs", "versus"]):
+        intent = "comparacion"
+    elif "especific" in lower_query:
+        intent = "especificacion"
+    elif semantic_signals.get("has_social"):
+        intent = "otro"
+
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
     confidence = _normalize_confidence(confidence, minimum=0.3)
+
+    product_type = None
+    detected_families = detect_families_in_query(user_message)
+    if detected_families:
+        product_type = detected_families[0]
 
     payload = {
         "phase": "understanding",
         "raw_query": user_message,
-        "intent": "busca_producto" if semantic_signals.get("has_technical") or semantic_signals.get("brands") else "otro",
+        "intent": intent,
         "brand": brand,
         "model": model,
         "displacement_cc": displacement,
         "usage_context": None,
-        "product_type": None,
+        "product_type": product_type,
         "metadata": {
             "year_range": None,
             "additional_constraints": None,
@@ -5210,10 +5253,8 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
                     "marca_moto": product.get("moto_brand") or product.get("brand") or None,
                     "modelo_moto": product.get("moto_model") or product.get("model") or None,
                     "cilindrada": product.get("displacement") or product.get("cilindrada") or None,
+                    "familia": fam_name,
                     "compatibilidad_declarada": product.get("compatibilidad_declarada") or product.get("compatibility"),
-                    "family": fam_name,
-                    "has_structured_compatibility": has_structured,
-                    "needs_llm_compatibility": needs_llm_family,
                 },
                 "family": fam_name,
                 "has_structured_compatibility": has_structured,
@@ -5251,126 +5292,76 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
 def _phase3_compatibility_filter(understanding: dict, search_payload: dict) -> dict:
     candidates_after_filter = []
     hard_rejected = 0
-    filter_policy = "normal"
-
+    filter_policy = "layered"
     target_brand = understanding.get("brand")
     target_model = understanding.get("model")
     target_family = search_payload.get("target_family")
-    llm_family_mode = search_payload.get("needs_llm_compatibility") or needs_llm_compatibility(target_family)
+    target_displacement = understanding.get("displacement_cc")
 
     for cand in search_payload.get("results", [])[:SEARCH_TOP_K]:
         catalog_data = cand.get("catalog_data") or {}
         brand = catalog_data.get("marca_moto")
         model = catalog_data.get("modelo_moto")
-        family = catalog_data.get("family")
-        candidate_needs_llm = llm_family_mode or catalog_data.get("needs_llm_compatibility") or not catalog_data.get("has_structured_compatibility")
-        compatibility_declared = (catalog_data.get("compatibilidad_declarada") or "").lower() if catalog_data.get("compatibilidad_declarada") else None
+        family = catalog_data.get("familia") or cand.get("family")
+        has_structured = bool(brand and model)
+        declared = (catalog_data.get("compatibilidad_declarada") or "").lower() or None
+        needs_llm = needs_llm_compatibility(family) or not has_structured
 
-        if compatibility_declared == "incompatible":
-            hard_rejected += 1
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "hard_incompatible",
-                    "reason": "Compatibilidad explícita marcada como incompatible",
-                    "confidence": 1.0,
-                    "proceedes_to_llm2": False,
-                }
-            )
-            continue
-
-        if compatibility_declared == "compatible" and brand and model:
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "hard_compatible",
-                    "reason": "Catalogo marca/modelo coincide",
-                    "confidence": 0.9,
-                    "proceedes_to_llm2": True,
-                }
-            )
-            continue
-
-        if candidate_needs_llm:
+        if needs_llm:
             filter_policy = "llm_assisted"
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "llm_assisted",
-                    "reason": "Familia sin compatibilidad estructurada, delega en LLM2",
-                    "confidence": 0.6,
-                    "proceedes_to_llm2": True,
-                }
-            )
-            continue
 
-        brand_norm = normalize_search_query(brand or "")
-        model_norm = normalize_search_query(model or "")
-        target_brand_norm = normalize_search_query(target_brand or "")
-        target_model_norm = normalize_search_query(target_model or "")
-        target_family_norm = normalize_search_query(target_family or "")
+        status = "pending_reasoning"
+        reason = "Faltan datos estructurados para decisión"
+        confidence = 0.6
+        proceed = True
 
-        if target_brand_norm and brand_norm and target_brand_norm not in brand_norm:
-            hard_rejected += 1
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "hard_incompatible",
-                    "reason": "brand_mismatch",
-                    "confidence": 0.7,
-                    "proceedes_to_llm2": False,
-                }
-            )
-            continue
-
-        if target_model_norm and model_norm and target_model_norm not in model_norm:
-            hard_rejected += 1
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "hard_incompatible",
-                    "reason": "model_mismatch",
-                    "confidence": 0.7,
-                    "proceedes_to_llm2": False,
-                }
-            )
-            continue
-
-        if target_family_norm and family:
-            fam_norm = normalize_search_query(family)
-            if fam_norm and target_family_norm not in fam_norm:
-                candidates_after_filter.append(
-                    {
-                        "product_id": cand["product_id"],
-                        "status": "hard_incompatible",
-                        "reason": "family_mismatch",
-                        "confidence": 0.65,
-                        "proceedes_to_llm2": False,
-                    }
-                )
+        if has_structured and target_brand and target_model:
+            brand_match = target_brand.lower() in (brand or "").lower()
+            model_match = target_model.lower() in (model or "").lower()
+            if declared == "incompatible" or (target_brand and target_model and not (brand_match and model_match)):
+                status = "hard_incompatible"
+                reason = "Catálogo contradice compatibilidad declarada"
+                confidence = 0.95
+                proceed = False
                 hard_rejected += 1
-                continue
-
-        if not ALLOW_MISSING_MOTO_DATA and (not brand or not model):
+            elif brand_match and model_match:
+                status = "hard_compatible"
+                reason = "Compatibilidad dura por coincidencia marca/modelo"
+                confidence = 0.9
+                proceed = needs_llm
+        elif declared == "incompatible":
+            status = "hard_incompatible"
+            reason = "Compatibilidad explícita marcada como incompatible"
+            confidence = 0.95
+            proceed = False
             hard_rejected += 1
-            candidates_after_filter.append(
-                {
-                    "product_id": cand["product_id"],
-                    "status": "hard_incompatible",
-                    "reason": "Datos incompletos y ALLOW_MISSING_MOTO_DATA=false",
-                    "confidence": 0.5,
-                    "proceedes_to_llm2": False,
-                }
-            )
-            continue
+
+        if status == "pending_reasoning" and needs_llm:
+            reason = "Familia sin compatibilidad estructurada, enviar a LLM2"
+            confidence = 0.6
+
+        if not ALLOW_MISSING_MOTO_DATA and status == "pending_reasoning" and not has_structured:
+            status = "hard_incompatible"
+            reason = "Datos incompletos y ALLOW_MISSING_MOTO_DATA=false"
+            confidence = 0.5
+            proceed = False
+            hard_rejected += 1
+
+        if status == "pending_reasoning" and target_displacement and catalog_data.get("cilindrada"):
+            try:
+                if int(target_displacement) == int(catalog_data.get("cilindrada")):
+                    reason = "Coincidencia por cilindrada, verificar compatibilidad"
+                    confidence = 0.72
+            except Exception:
+                pass
 
         candidates_after_filter.append(
             {
                 "product_id": cand["product_id"],
-                "status": "pending_reasoning",
-                "reason": "Faltan datos estructurados para decisión dura",
-                "confidence": 0.6,
-                "proceedes_to_llm2": True,
+                "status": status,
+                "reason": reason,
+                "confidence": confidence,
+                "proceedes_to_llm2": proceed and status != "hard_incompatible",
             }
         )
 
@@ -5383,14 +5374,11 @@ def _phase3_compatibility_filter(understanding: dict, search_payload: dict) -> d
 
 
 def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_payload: dict) -> dict:
-    decisions = []
+    evaluated = []
     excluded = []
 
     results_lookup = {r["product_id"]: r for r in search_payload.get("results", [])}
     for cand in filter_payload.get("candidates_after_filter", []):
-        if not cand.get("proceedes_to_llm2"):
-            continue
-
         product = results_lookup.get(cand["product_id"], {})
         catalog_data = product.get("catalog_data") or {}
 
@@ -5403,45 +5391,50 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
             except Exception:
                 displacement_match = False
 
-        name = product.get("name") or ""
-        family = catalog_data.get("family")
-
-        compatibility = "incierto"
+        justification = "semantic_similarity"
+        decision = "marginal"
         confidence_local = 0.55
-        reasons = []
+        technical_reasoning = "Sin datos declarados, se infiere por similitud semántica y familia."
 
         if cand.get("status") == "hard_compatible" or (brand_match and model_match):
-            compatibility = "compatible"
-            confidence_local = 0.92 if (brand_match and model_match) else 0.85
-            reasons.append("Coincidencia directa de catálogo (marca/modelo)")
+            decision = "compatible"
+            confidence_local = 0.9 if cand.get("status") == "hard_compatible" else 0.82
+            justification = "catalog_match"
+            technical_reasoning = "Catálogo declara marca/modelo compatibles."
         elif brand_match or model_match or displacement_match:
-            compatibility = "compatible"
+            decision = "compatible"
             confidence_local = 0.78
-            reasons.append("Coincidencia parcial de catálogo")
-        elif cand.get("status") == "llm_assisted":
-            compatibility = "incierto"
-            confidence_local = 0.65 if (understanding.get("brand") or understanding.get("model")) else 0.6
-            reasons.append("Compatibilidad estimada por conocimiento general de motos")
-        else:
-            reasons.append("Sin datos completos, pero no hay rechazo duro")
+            justification = "specification_inference"
+            technical_reasoning = "Coincidencia parcial en marca/modelo/cilindrada, falta confirmación completa."
+        elif cand.get("status") == "hard_incompatible":
+            decision = "incompatible"
+            confidence_local = 0.9
+            justification = "catalog_match"
+            technical_reasoning = "Catálogo indica incompatibilidad o contradicción con la moto declarada."
 
-        if STRICT_MODE and compatibility == "no":
-            excluded.append({"product_id": cand["product_id"], "exclusion_reason": "Compatibilidad marcada como no"})
+        risk_level = "high" if confidence_local < 0.6 else "medium"
+        if decision == "compatible" and confidence_local >= 0.85:
+            risk_level = "low"
+
+        record = {
+            "product_id": cand["product_id"],
+            "name": product.get("name"),
+            "compatibility_decision": decision,
+            "confidence_score": _normalize_confidence(confidence_local, minimum=0.0),
+            "technical_reasoning": technical_reasoning,
+            "justification_type": justification,
+            "risk_level": risk_level,
+        }
+
+        if STRICT_MODE and decision == "incompatible":
+            excluded.append({"product_id": cand["product_id"], "exclusion_reason": "Compatibilidad marcada como incompatible"})
             continue
 
-        decisions.append(
-            {
-                "product_id": cand["product_id"],
-                "product_name": name,
-                "family": family,
-                "compatibility": compatibility,
-                "confidence": _normalize_confidence(confidence_local, minimum=0.3),
-                "reason": "; ".join(reasons) or "Compatibilidad estimada por contexto general de motos",
-            }
-        )
+        if cand.get("proceedes_to_llm2") or cand.get("status") == "hard_compatible":
+            evaluated.append(record)
 
-    if decisions:
-        overall_confidence = sum([d.get("confidence", 0) for d in decisions]) / len(decisions)
+    if evaluated:
+        overall_confidence = sum([d.get("confidence_score", 0) for d in evaluated]) / len(evaluated)
     elif excluded:
         overall_confidence = 0.3
     else:
@@ -5449,7 +5442,7 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
 
     payload = {
         "phase": "llm2_reasoning",
-        "decisions": decisions,
+        "candidates_evaluated": evaluated,
         "products_excluded": excluded,
         "llm2_confidence_overall": _normalize_confidence(overall_confidence, minimum=0.0),
         "needs_requery": overall_confidence < CONFIDENCE_THRESHOLD,
@@ -5513,18 +5506,24 @@ def _phase6_fallback(reason: str) -> dict:
 
 
 def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback_payload: dict | None = None) -> dict:
-    decisions = reasoning_payload.get("decisions") or []
+    evaluations = reasoning_payload.get("candidates_evaluated") or []
     message_type = "confident_match" if reasoning_payload.get("llm2_confidence_overall", 0) >= CONFIDENCE_THRESHOLD else "partial_match"
     recommendations = []
 
-    for dec in decisions:
-        if dec.get("compatibility") == "no":
+    badge_map = {
+        "compatible": "✅ Coincide exactamente",
+        "marginal": "⚠️ Probablemente compatible",
+        "incompatible": "❓ Verificar con vendedor",
+    }
+
+    for dec in evaluations:
+        if dec.get("compatibility_decision") == "incompatible" and STRICT_MODE:
             continue
-        badge = "✅ Compatible" if dec.get("compatibility") == "compatible" else "⚠️ A confirmar"
+        badge = badge_map.get(dec.get("compatibility_decision"), "❓ Verificar con vendedor")
         recommendations.append(
             {
                 "product_id": dec.get("product_id"),
-                "product_name": dec.get("product_name", ""),
+                "product_name": dec.get("name", ""),
                 "confidence_badge": badge,
             }
         )
@@ -5601,7 +5600,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         else:
             reasoning_payload = {
                 "phase": "llm2_reasoning",
-                "decisions": [],
+                "candidates_evaluated": [],
                 "products_excluded": [],
                 "llm2_confidence_overall": 0.5,
                 "needs_requery": False,
@@ -5639,7 +5638,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     reply = response_payload.get("whatsapp_response") or "Necesito un poco más de información para ayudarte mejor."
     save_message(phone, reply, "assistant")
     log_interaction(phone, user_message, understanding.get("intent", "otro"), len(response_payload.get("product_recommendations", [])))
-    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("decisions", [])) if reasoning_payload else 0)
+    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("candidates_evaluated", [])) if reasoning_payload else 0)
     update_sales_phase_from_intent(phone, understanding.get("intent", "otro"))
 
     logger.info(f"[v3.16 - DONE] Hybrid JSON pipeline complete | Duration: {time.time()-start_time:.2f}s")
