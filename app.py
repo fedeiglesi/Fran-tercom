@@ -5393,7 +5393,7 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
 
         justification = "semantic_similarity"
         decision = "marginal"
-        confidence_local = 0.55
+        confidence_local = _normalize_confidence(cand.get("confidence", 0.55), minimum=0.0)
         technical_reasoning = "Sin datos declarados, se infiere por similitud semántica y familia."
 
         if cand.get("status") == "hard_compatible" or (brand_match and model_match):
