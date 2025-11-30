@@ -1168,6 +1168,18 @@ FOLLOW_UP_MARKERS = {
     "ahora",
     "ademas",
     "además",
+    "precio",  # Follow-up: "tenes los precios?"
+    "precios",
+    "cuanto",
+    "cuánto",
+    "cuesta",
+    "cuestan",
+    "cotizacion",
+    "cotización",
+    "dame",  # Follow-up: "dame precio"
+    "pasame",
+    "mandame",
+    "mándame",
 }
 
 # AUTOCORRECT_VOCAB is a list; convert to set for union operations.
@@ -1218,7 +1230,7 @@ def detect_semantic_entities(message: str) -> dict:
     # Solo hacer fuzzy matching si NO es un saludo simple
     if not is_simple_greeting:
         for tok in tokens:
-            if len(tok) < 3:
+            if len(tok) < 4:  # FIX: Aumentar mínimo de 3 a 4 caracteres para reducir falsos positivos
                 continue
             try:
                 brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
@@ -1227,9 +1239,10 @@ def detect_semantic_entities(message: str) -> dict:
                 brand_match = None
                 model_match = None
 
-            if brand_match and brand_match[1] >= 88:
+            # FIX: Aumentar threshold de 88 a 92 para evitar "copiones" → "flash"
+            if brand_match and brand_match[1] >= 92:
                 fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
-            if model_match and model_match[1] >= 88:
+            if model_match and model_match[1] >= 92:
                 fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
 
     has_technical = bool(
@@ -1242,6 +1255,12 @@ def detect_semantic_entities(message: str) -> dict:
 
     has_social = bool(social_hits)
     has_follow_up = bool(follow_up_hits)
+
+    # FIX: Detectar si es una pregunta sobre precio sin contexto técnico
+    # Ej: "tenes los precios?" debería ser follow-up, no buscar "llave allen tipo t"
+    price_terms = {"precio", "precios", "cuanto", "cuánto", "cuesta", "cuestan", "cotizacion", "cotización"}
+    has_price_query = bool(price_terms & set(tokens))
+    is_price_only_query = has_price_query and not (technical_tokens or fuzzy_brands or fuzzy_models or numeric_codes)
 
     return {
         "tokens": tokens,
@@ -1256,6 +1275,7 @@ def detect_semantic_entities(message: str) -> dict:
         "has_follow_up": has_follow_up,
         "has_technical": has_technical,
         "is_simple_greeting": is_simple_greeting,
+        "is_price_only_query": is_price_only_query,  # Nueva señal
     }
 
 
@@ -5184,6 +5204,10 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
     if semantic_signals.get("is_simple_greeting"):
         # Solo clasificar como social puro si es un saludo simple SIN señales técnicas
         intent = "social"
+    elif semantic_signals.get("is_price_only_query"):
+        # FIX: Si pregunta solo por precio sin contexto, es un follow-up
+        # Ej: "tenes los precios?" → Necesita contexto conversacional
+        intent = "follow_up_precio"
     elif semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
         # Social sin ninguna señal técnica
         intent = "social"
@@ -5200,8 +5224,13 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
     displacement = None
     product_type = None
 
-    # Solo NO extraer entidades si es un saludo PURO (is_simple_greeting Y no has_technical)
-    should_extract_entities = not (semantic_signals.get("is_simple_greeting") and not semantic_signals.get("has_technical"))
+    # NO extraer entidades si:
+    # - Es un saludo PURO (is_simple_greeting Y no has_technical)
+    # - Es un follow-up de precio sin contexto técnico (is_price_only_query)
+    should_extract_entities = not (
+        (semantic_signals.get("is_simple_greeting") and not semantic_signals.get("has_technical"))
+        or semantic_signals.get("is_price_only_query")
+    )
 
     if should_extract_entities:
         brand = (semantic_signals.get("brands") or [None])[0]
@@ -5238,6 +5267,7 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
             "is_simple_greeting": semantic_signals.get("is_simple_greeting", False),
             "has_technical": semantic_signals.get("has_technical", False),
             "has_social": semantic_signals.get("has_social", False),
+            "is_price_only_query": semantic_signals.get("is_price_only_query", False),
         },
         "confidence": confidence,
     }
@@ -5618,6 +5648,32 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         log_interaction(phone, user_message, "social", 0)
         logger.info(f"[v3.16] Saludo puro detectado, bypass de búsqueda | Duration: {time.time()-start_time:.2f}s")
         return reply
+
+    # FIX: Manejar follow-up de precio sin contexto técnico
+    # Ej: "tenes los precios?" → Usar contexto de última búsqueda
+    if understanding.get("intent") == "follow_up_precio":
+        last_search = get_last_search(phone)
+        if last_search and last_search.get("products"):
+            # Hay contexto reciente, responder con precios de esos productos
+            productos = last_search["products"][:5]  # Primeros 5
+            reply_lines = ["Precios de los productos que te mostré:"]
+            for p in productos:
+                nombre = p.get("name", "Sin nombre")
+                precio = format_price(p.get("price_ars", 0))
+                reply_lines.append(f"• {nombre}: {precio}")
+            reply_lines.append("\n¿Alguno te interesa?")
+            reply = "\n".join(reply_lines)
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "follow_up_precio", len(productos))
+            logger.info(f"[v3.16] Follow-up precio con contexto | Duration: {time.time()-start_time:.2f}s")
+            return reply
+        else:
+            # Sin contexto reciente, pedir más información
+            reply = "¿Precio de qué producto? Decime qué repuesto buscás y te paso el precio."
+            save_message(phone, reply, "assistant")
+            log_interaction(phone, user_message, "follow_up_precio_sin_contexto", 0)
+            logger.info(f"[v3.16] Follow-up precio SIN contexto | Duration: {time.time()-start_time:.2f}s")
+            return reply
 
     reasoning_payload = None
     fallback_payload = None
