@@ -4522,6 +4522,63 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
     return msgs
 
 
+def build_social_reply(phone: str, user_message: str, semantic_signals: dict | None = None) -> str:
+    """Return a warm greeting crafted by the LLM; fall back to a smart template if needed."""
+
+    semantic_signals = semantic_signals or {}
+    normalized = (user_message or "").strip()
+
+    # Contexto breve para el LLM: historial cercano y señales sociales detectadas
+    recent_history = get_history_since(phone, days=1, limit=6)
+    social_context = {
+        "message": normalized,
+        "semantic_signals": semantic_signals,
+        "recent_user_messages": [h["content"] for h in recent_history if h.get("role") == "user"][-3:],
+        "recent_assistant_messages": [h["content"] for h in recent_history if h.get("role") == "assistant"][-2:],
+    }
+
+    system_prompt = (
+        "Sos Fran de Tercom. Respondé saludos o charla social en 1-3 líneas, tono humano y cercano. "
+        "Si hay follow-ups, retoma la conversación sin repetir listas; mencioná que podés ayudar con repuestos "
+        "si el cliente quiere. No inventes códigos ni precios, no armes listados."
+    )
+
+    try:
+        with openai_sem:
+            llm_resp = llm_client.completion(
+                model=MODEL_RESPONSE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(social_context, ensure_ascii=False)},
+                ],
+                temperature=0.5,
+                max_tokens=120,
+            )
+
+        candidate = (llm_resp.choices[0].message.content or "").strip()
+        if candidate:
+            return candidate
+    except Exception as e:
+        logger.warning(f"Fallo LLM en social reply: {e}")
+
+    # Fallback ligero y personalizado si el LLM no responde
+    follow_up = semantic_signals.get("follow_up_markers")
+    base_templates = [
+        "¡Hola! Soy Fran de Tercom 🙌. Contame qué repuesto buscás y el modelo/año de tu moto y te paso opciones.",
+        "¡Hola! Acá Fran de Tercom. Decime qué repuesto necesitás y qué moto tenés; te comparto precios rápido.",
+        "¡Hola! Soy Fran. Contame el repuesto que buscás y el modelo de tu moto, así te ayudo al toque.",
+    ]
+
+    if follow_up:
+        return (
+            "¡Hola de nuevo! Soy Fran. Avisame qué repuesto y modelo de moto y te sigo ayudando en base a lo anterior."
+        )
+
+    selector_seed = f"{phone}:{normalized}" or "default"
+    idx = int(hashlib.sha256(selector_seed.encode()).hexdigest(), 16) % len(base_templates)
+    return base_templates[idx]
+
+
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
@@ -5240,6 +5297,7 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
             "has_social": semantic_signals.get("has_social", False),
         },
         "confidence": confidence,
+        "semantic_signals": semantic_signals,
     }
 
     if payload["confidence"] < 0.7:
@@ -5622,6 +5680,15 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     reasoning_payload = None
     fallback_payload = None
     requery_attempt = 0
+
+    if understanding.get("intent") == "social":
+        reply = build_social_reply(phone, user_message, understanding.get("semantic_signals"))
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "social", 0)
+        log_performance(phone, "social", time.time() - start_time, 0)
+        update_sales_phase_from_intent(phone, "social")
+        logger.info("[v3.16] Ruta social detectada en fase 1, se responde sin búsqueda")
+        return reply
 
     while requery_attempt <= MAX_REQUERY_ATTEMPTS:
         elapsed_ms = (time.time() - start_time) * 1000
