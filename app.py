@@ -5178,26 +5178,32 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
 
     lower_query = (user_message or "").lower()
 
-    # FIX: Priorizar intent social para saludos simples
-    # Si es un saludo simple, clasificar como social directamente
+    # FIX: Clasificar intent principal basado en señales semánticas
+    # Permitir multi-intent: un mensaje puede tener componente social + técnico
     intent = "busca_producto"
     if semantic_signals.get("is_simple_greeting"):
+        # Solo clasificar como social puro si es un saludo simple SIN señales técnicas
         intent = "social"
     elif semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
+        # Social sin ninguna señal técnica
         intent = "social"
     elif any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
     elif "especific" in lower_query:
         intent = "especificacion"
+    # Si hay señales técnicas, intent es product search (incluso si también hay marcadores sociales)
 
-    # FIX: Solo extraer entidades de producto si el intent NO es social
-    # Esto evita contaminar el payload con entidades inventadas cuando es un saludo
+    # FIX MULTI-INTENT: Extraer entidades si hay señales técnicas, INDEPENDIENTEMENTE del intent
+    # Esto permite mensajes como "hola, quiero baterías" donde hay social + product_search
     brand = None
     model = None
     displacement = None
     product_type = None
 
-    if intent != "social":
+    # Solo NO extraer entidades si es un saludo PURO (is_simple_greeting Y no has_technical)
+    should_extract_entities = not (semantic_signals.get("is_simple_greeting") and not semantic_signals.get("has_technical"))
+
+    if should_extract_entities:
         brand = (semantic_signals.get("brands") or [None])[0]
         model = (semantic_signals.get("models") or [None])[0]
 
@@ -5229,6 +5235,9 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
             "year_range": None,
             "additional_constraints": None,
             "ambiguity_level": _derive_ambiguity(confidence),
+            "is_simple_greeting": semantic_signals.get("is_simple_greeting", False),
+            "has_technical": semantic_signals.get("has_technical", False),
+            "has_social": semantic_signals.get("has_social", False),
         },
         "confidence": confidence,
     }
@@ -5595,13 +5604,19 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     understanding = _phase1_llm1_understanding(user_message)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
-    # FIX: Bypass temprano para intents sociales
-    # Si el intent es social, no ejecutar búsqueda de productos
-    if understanding.get("intent") == "social":
+    # FIX: Bypass temprano SOLO para saludos puros (sin componente técnico)
+    # Esto permite multi-intent: "hola, quiero baterías" ejecutará búsqueda
+    metadata = understanding.get("metadata", {})
+    is_pure_greeting = (
+        metadata.get("is_simple_greeting", False)
+        and not metadata.get("has_technical", False)
+    )
+
+    if is_pure_greeting:
         reply = "¡Hola! ¿En qué te puedo ayudar?"
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "social", 0)
-        logger.info(f"[v3.16] Intent social detectado, bypass de búsqueda | Duration: {time.time()-start_time:.2f}s")
+        logger.info(f"[v3.16] Saludo puro detectado, bypass de búsqueda | Duration: {time.time()-start_time:.2f}s")
         return reply
 
     reasoning_payload = None

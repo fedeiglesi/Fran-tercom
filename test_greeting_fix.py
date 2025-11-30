@@ -93,20 +93,90 @@ def test_other_greetings():
 
     print("\n✅ Test 3 PASADO: Todos los saludos funcionan correctamente")
 
+def test_multi_intent_messages():
+    """Test mensajes con múltiples intenciones (social + product_search)"""
+
+    print("\n" + "=" * 60)
+    print("TEST 4: Multi-intent (social + product_search)")
+    print("=" * 60)
+
+    test_cases = [
+        {
+            "message": "hola, quiero baterías de gel",
+            "expected_intent": "busca_producto",
+            "should_extract_entities": True,
+            "should_have_technical": True,
+            "should_have_social": True,
+        },
+        {
+            "message": "hola Fra, gracias! Ahora necesito amortiguadores para honda wave",
+            "expected_intent": "busca_producto",
+            "should_extract_entities": True,
+            "should_have_technical": True,
+            "should_have_social": True,
+        },
+        {
+            "message": "buenas! quiero precio de pastillas de freno",
+            "expected_intent": "busca_producto",
+            "should_extract_entities": True,
+            "should_have_technical": True,
+            "should_have_social": True,
+        },
+    ]
+
+    for test_case in test_cases:
+        message = test_case["message"]
+        signals = detect_semantic_entities(message)
+        understanding = _phase1_llm1_understanding(message)
+        metadata = understanding.get("metadata", {})
+
+        print(f"\nMensaje: '{message}'")
+        print(f"  - Intent: {understanding.get('intent')}")
+        print(f"  - Has social: {signals.get('has_social')}")
+        print(f"  - Has technical: {signals.get('has_technical')}")
+        print(f"  - Is simple greeting: {signals.get('is_simple_greeting')}")
+        print(f"  - Product type: {understanding.get('product_type')}")
+        print(f"  - Technical tokens: {signals.get('technical_tokens')}")
+
+        # Assertions
+        assert signals.get('has_social') == test_case["should_have_social"], \
+            f"❌ Mensaje debe tener señal social"
+        assert signals.get('has_technical') == test_case["should_have_technical"], \
+            f"❌ Mensaje debe tener señal técnica"
+        assert signals.get('is_simple_greeting') == False, \
+            f"❌ Multi-intent NO debe ser simple greeting"
+        assert understanding.get('intent') == test_case["expected_intent"], \
+            f"❌ Intent debe ser '{test_case['expected_intent']}' para multi-intent"
+
+        # Si tiene señales técnicas, debe extraer entidades (aunque también tenga componente social)
+        if test_case["should_extract_entities"]:
+            has_entities = (
+                understanding.get('product_type') is not None
+                or understanding.get('brand') is not None
+                or len(signals.get('technical_tokens', [])) > 0
+            )
+            assert has_entities, \
+                f"❌ Debe extraer entidades técnicas en multi-intent: {message}"
+
+    print("\n✅ Test 4 PASADO: Multi-intent funciona correctamente")
+
 if __name__ == "__main__":
     try:
         test_greeting_detection()
         test_phase1_intent_classification()
         test_other_greetings()
+        test_multi_intent_messages()
 
         print("\n" + "=" * 60)
         print("✅ TODOS LOS TESTS PASARON EXITOSAMENTE")
         print("=" * 60)
         print("\nResumen de correcciones:")
         print("1. ✅ Detección de saludos simples sin fuzzy matching")
-        print("2. ✅ Intent 'social' clasificado correctamente")
-        print("3. ✅ No se extraen entidades de producto para intents sociales")
-        print("4. ✅ Bypass temprano en orquestador v316 para evitar búsqueda")
+        print("2. ✅ Intent 'social' clasificado correctamente para saludos puros")
+        print("3. ✅ No se extraen entidades para saludos puros")
+        print("4. ✅ Bypass temprano solo para saludos puros (no multi-intent)")
+        print("5. ✅ Multi-intent funciona: mensajes con saludo + búsqueda extraen entidades")
+        print("6. ✅ Fuzzy matching solo se ejecuta cuando hay señales técnicas")
 
     except Exception as e:
         print(f"\n❌ TEST FALLIDO: {e}")
