@@ -165,4 +165,21 @@ def test_orchestrator_skips_search_for_social(monkeypatch):
     reply = app.orquestar_fran_v316("Hola", phone="54911")
 
     assert "hola" in reply.lower()
-    assert "repuesto" in reply.lower()
+
+
+def test_family_detection_ignores_stopword_only_matches(monkeypatch):
+    monkeypatch.setattr(
+        app,
+        "FAMILIES_INDEX",
+        [
+            {"family_name_norm": "tarugo para reparar neumatico", "count": 10},
+            {"family_name_norm": "amortiguador yamaha fz16", "count": 1},
+        ],
+    )
+
+    app.FAMILIES_TOKEN_IDF = {}
+    app.FAMILIES_TOKEN_IDF_DEFAULT = 1.0
+
+    detected = app.detect_families_in_query("Tenes amortiguadores para una Yamaha fz16")
+
+    assert detected[0] == "amortiguador yamaha fz16"

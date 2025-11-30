@@ -23,7 +23,7 @@
 # - Manejo de listas masivas y chunks para WhatsApp
 # =========================================================
 
-import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib
+import os, json, csv, io, sqlite3, logging, re, unicodedata, time, threading, pickle, random, hashlib, math
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from collections import defaultdict, Counter
@@ -419,6 +419,8 @@ _fuzzy_match_cache = LRUCache(maxsize=20000)
 
 # Índice de familias (global)
 FAMILIES_INDEX = []
+FAMILIES_TOKEN_IDF = {}
+FAMILIES_TOKEN_IDF_DEFAULT = 1.0
 FAMILY_COMPATIBILITY_PROFILE = {}
 
 TEMPLATE_FALLBACKS = {
@@ -1081,38 +1083,75 @@ def autocorrect_keywords(text: str):
 # ------------------------------------------------------------
 # DETECCIÓN DE FAMILIAS EN QUERY
 # ------------------------------------------------------------
+def _ensure_family_idf():
+    global FAMILIES_TOKEN_IDF, FAMILIES_TOKEN_IDF_DEFAULT
+
+    if FAMILIES_TOKEN_IDF and FAMILIES_TOKEN_IDF_DEFAULT:
+        return
+
+    if not FAMILIES_INDEX:
+        FAMILIES_TOKEN_IDF = {}
+        FAMILIES_TOKEN_IDF_DEFAULT = 1.0
+        return
+
+    total_families = len(FAMILIES_INDEX)
+    df = Counter()
+
+    for fam in FAMILIES_INDEX:
+        tokens = fam.get("tokens") or []
+        for t in set(tokens):
+            df[t] += 1
+
+    if not df:
+        FAMILIES_TOKEN_IDF = {}
+        FAMILIES_TOKEN_IDF_DEFAULT = 1.0
+        return
+
+    FAMILIES_TOKEN_IDF = {
+        token: max(0.0, math.log((total_families + 1) / (freq + 1)))
+        for token, freq in df.items()
+    }
+
+    values = list(FAMILIES_TOKEN_IDF.values())
+    FAMILIES_TOKEN_IDF_DEFAULT = float(np.median(values)) if values else 1.0
+
+
 def detect_families_in_query(query: str):
     """
     Usa FAMILIES_INDEX para detectar familias mencionadas en el texto.
-    - Palabras de la familia con len >= 3
-    - matching_words * 10 como boost principal
-    - +15 si la familia completa aparece como substring
+    - Pondera tokens por IDF dinámico construido desde las familias del catálogo
+    - Evita descartar palabras manualmente y privilegia términos distintivos
     """
     if not query or not FAMILIES_INDEX:
         return []
+
+    _ensure_family_idf()
 
     q_norm = normalize_search_query(query)
     if not q_norm:
         return []
 
+    query_tokens = {w for w in q_norm.split() if len(w) >= 3}
+
     results = []
     for fam in FAMILIES_INDEX:
         fam_name_norm = fam.get("family_name_norm", "")
-        if not fam_name_norm:
+        fam_tokens = fam.get("tokens") or [w for w in fam_name_norm.split() if len(w) >= 3]
+
+        if not fam_name_norm or not fam_tokens:
             continue
 
-        fam_words = [w for w in fam_name_norm.split() if w]
-
-        if not any(w in q_norm for w in fam_words):
+        matching_tokens = [w for w in fam_tokens if (w in query_tokens or w in q_norm)]
+        if not matching_tokens:
             continue
 
-        matching_words = sum(1 for w in fam_words if w in q_norm)
-        score = matching_words * 10
+        token_score = sum(FAMILIES_TOKEN_IDF.get(w, FAMILIES_TOKEN_IDF_DEFAULT) for w in matching_tokens)
+        popularity_bonus = min(fam.get("count", 0), 50) / 20.0
 
         if fam_name_norm in q_norm:
-            score += 15
+            token_score *= 1.25
 
-        score += min(fam.get("count", 0), 50) / 10.0
+        score = token_score + popularity_bonus
 
         if score > 0:
             results.append((fam_name_norm, score))
@@ -1121,7 +1160,8 @@ def detect_families_in_query(query: str):
         return []
 
     results.sort(key=lambda x: x[1], reverse=True)
-    selected = [name for name, score in results if score >= 10]
+    dynamic_threshold = max(np.percentile([s for _, s in results], 60), 0.5)
+    selected = [name for name, score in results if score >= dynamic_threshold]
     return selected[:5]
 
 # ------------------------------------------------------------
@@ -2472,6 +2512,25 @@ def build_families_index_from_catalog(catalog):
     return sorted_fams
 
 
+def build_family_token_idf_from_catalog(catalog):
+    df = Counter()
+    total_docs = len(catalog)
+
+    for p in catalog:
+        text = p.get("search_text") or p.get("name") or ""
+        tokens = {w for w in normalize_search_query(text).split() if len(w) >= 3}
+        for t in tokens:
+            df[t] += 1
+
+    if not df:
+        return {}
+
+    return {
+        token: max(0.0, math.log((total_docs + 1) / (freq + 1)))
+        for token, freq in df.items()
+    }
+
+
 def initialize_families_index(catalog):
     global FAMILIES_INDEX
     try:
@@ -2481,6 +2540,13 @@ def initialize_families_index(catalog):
             logger.info(f"Top 20 familias: {top_names}")
         else:
             logger.warning("FAMILIES_INDEX vacío: no se encontraron familias en el catálogo")
+
+        family_idf = build_family_token_idf_from_catalog(catalog) if catalog else {}
+        if family_idf:
+            global FAMILIES_TOKEN_IDF, FAMILIES_TOKEN_IDF_DEFAULT
+            FAMILIES_TOKEN_IDF = family_idf
+            values = list(family_idf.values())
+            FAMILIES_TOKEN_IDF_DEFAULT = float(np.median(values)) if values else 1.0
     except Exception as e:
         logger.error(f"Error construyendo FAMILIES_INDEX: {e}", exc_info=True)
 
