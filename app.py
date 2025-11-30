@@ -1208,22 +1208,29 @@ def detect_semantic_entities(message: str) -> dict:
     technical_tokens = [t for t in tokens if t in TECH_LEXICAL_ROOTS]
     numeric_codes = [t for t in tokens if _looks_like_code_or_number(t)]
 
+    # FIX: Si es un saludo simple (1-2 palabras con marcador social), no hacer fuzzy matching
+    # para evitar falsos positivos que contaminen el flujo
+    is_simple_greeting = bool(social_hits) and len(tokens) <= 2 and not purchase_hits and not technical_tokens
+
     fuzzy_brands = []
     fuzzy_models = []
-    for tok in tokens:
-        if len(tok) < 3:
-            continue
-        try:
-            brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
-            model_match = process.extractOne(tok, _MODELS_NORMALIZED, scorer=fuzz.partial_ratio)
-        except Exception:
-            brand_match = None
-            model_match = None
 
-        if brand_match and brand_match[1] >= 88:
-            fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
-        if model_match and model_match[1] >= 88:
-            fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
+    # Solo hacer fuzzy matching si NO es un saludo simple
+    if not is_simple_greeting:
+        for tok in tokens:
+            if len(tok) < 3:
+                continue
+            try:
+                brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
+                model_match = process.extractOne(tok, _MODELS_NORMALIZED, scorer=fuzz.partial_ratio)
+            except Exception:
+                brand_match = None
+                model_match = None
+
+            if brand_match and brand_match[1] >= 88:
+                fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
+            if model_match and model_match[1] >= 88:
+                fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
 
     has_technical = bool(
         technical_tokens
@@ -1248,6 +1255,7 @@ def detect_semantic_entities(message: str) -> dict:
         "has_social": has_social,
         "has_follow_up": has_follow_up,
         "has_technical": has_technical,
+        "is_simple_greeting": is_simple_greeting,
     }
 
 
@@ -5167,33 +5175,46 @@ def _derive_ambiguity(confidence: float) -> str:
 
 def _phase1_llm1_understanding(user_message: str) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
-    brand = (semantic_signals.get("brands") or [None])[0]
-    model = (semantic_signals.get("models") or [None])[0]
-    displacement = None
-    for code in semantic_signals.get("codes") or []:
-        if code.isdigit():
-            try:
-                displacement = int(code)
-                break
-            except Exception:
-                continue
 
     lower_query = (user_message or "").lower()
+
+    # FIX: Priorizar intent social para saludos simples
+    # Si es un saludo simple, clasificar como social directamente
     intent = "busca_producto"
-    if semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
+    if semantic_signals.get("is_simple_greeting"):
+        intent = "social"
+    elif semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
         intent = "social"
     elif any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
     elif "especific" in lower_query:
         intent = "especificacion"
 
+    # FIX: Solo extraer entidades de producto si el intent NO es social
+    # Esto evita contaminar el payload con entidades inventadas cuando es un saludo
+    brand = None
+    model = None
+    displacement = None
+    product_type = None
+
+    if intent != "social":
+        brand = (semantic_signals.get("brands") or [None])[0]
+        model = (semantic_signals.get("models") or [None])[0]
+
+        for code in semantic_signals.get("codes") or []:
+            if code.isdigit():
+                try:
+                    displacement = int(code)
+                    break
+                except Exception:
+                    continue
+
+        detected_families = detect_families_in_query(user_message)
+        if detected_families:
+            product_type = detected_families[0]
+
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
     confidence = _normalize_confidence(confidence, minimum=0.3)
-
-    product_type = None
-    detected_families = detect_families_in_query(user_message)
-    if detected_families:
-        product_type = detected_families[0]
 
     payload = {
         "phase": "understanding",
@@ -5573,6 +5594,15 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     understanding = _phase1_llm1_understanding(user_message)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
+
+    # FIX: Bypass temprano para intents sociales
+    # Si el intent es social, no ejecutar búsqueda de productos
+    if understanding.get("intent") == "social":
+        reply = "¡Hola! ¿En qué te puedo ayudar?"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "social", 0)
+        logger.info(f"[v3.16] Intent social detectado, bypass de búsqueda | Duration: {time.time()-start_time:.2f}s")
+        return reply
 
     reasoning_payload = None
     fallback_payload = None
