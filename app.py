@@ -4514,6 +4514,63 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
     return msgs
 
 
+def build_social_reply(phone: str, user_message: str, semantic_signals: dict | None = None) -> str:
+    """Return a warm greeting crafted by the LLM; fall back to a smart template if needed."""
+
+    semantic_signals = semantic_signals or {}
+    normalized = (user_message or "").strip()
+
+    # Contexto breve para el LLM: historial cercano y señales sociales detectadas
+    recent_history = get_history_since(phone, days=1, limit=6)
+    social_context = {
+        "message": normalized,
+        "semantic_signals": semantic_signals,
+        "recent_user_messages": [h["content"] for h in recent_history if h.get("role") == "user"][-3:],
+        "recent_assistant_messages": [h["content"] for h in recent_history if h.get("role") == "assistant"][-2:],
+    }
+
+    system_prompt = (
+        "Sos Fran de Tercom. Respondé saludos o charla social en 1-3 líneas, tono humano y cercano. "
+        "Si hay follow-ups, retoma la conversación sin repetir listas; mencioná que podés ayudar con repuestos "
+        "si el cliente quiere. No inventes códigos ni precios, no armes listados."
+    )
+
+    try:
+        with openai_sem:
+            llm_resp = llm_client.completion(
+                model=MODEL_RESPONSE,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(social_context, ensure_ascii=False)},
+                ],
+                temperature=0.5,
+                max_tokens=120,
+            )
+
+        candidate = (llm_resp.choices[0].message.content or "").strip()
+        if candidate:
+            return candidate
+    except Exception as e:
+        logger.warning(f"Fallo LLM en social reply: {e}")
+
+    # Fallback ligero y personalizado si el LLM no responde
+    follow_up = semantic_signals.get("follow_up_markers")
+    base_templates = [
+        "¡Hola! Soy Fran de Tercom 🙌. Contame qué repuesto buscás y el modelo/año de tu moto y te paso opciones.",
+        "¡Hola! Acá Fran de Tercom. Decime qué repuesto necesitás y qué moto tenés; te comparto precios rápido.",
+        "¡Hola! Soy Fran. Contame el repuesto que buscás y el modelo de tu moto, así te ayudo al toque.",
+    ]
+
+    if follow_up:
+        return (
+            "¡Hola de nuevo! Soy Fran. Avisame qué repuesto y modelo de moto y te sigo ayudando en base a lo anterior."
+        )
+
+    selector_seed = f"{phone}:{normalized}" or "default"
+    idx = int(hashlib.sha256(selector_seed.encode()).hexdigest(), 16) % len(base_templates)
+    return base_templates[idx]
+
+
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
         history = get_history_since(phone, days=1, limit=12)
@@ -5165,8 +5222,10 @@ def _derive_ambiguity(confidence: float) -> str:
     return "low"
 
 
-def _phase1_llm1_understanding(user_message: str) -> dict:
+def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
+    intents = merge_intents_with_semantics(semantic_signals, llm_intent=None, llm_semantic_intents=None)
+
     brand = (semantic_signals.get("brands") or [None])[0]
     model = (semantic_signals.get("models") or [None])[0]
     displacement = None
@@ -5179,12 +5238,10 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
                 continue
 
     lower_query = (user_message or "").lower()
-    intent = "busca_producto"
-    if semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
-        intent = "social"
-    elif any(token in lower_query for token in ["compar", "vs", "versus"]):
+    intent = "product_search" if semantic_signals.get("has_technical") else intents[0]
+    if intent == "product_search" and any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
-    elif "especific" in lower_query:
+    elif intent == "product_search" and "especific" in lower_query:
         intent = "especificacion"
 
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
@@ -5199,6 +5256,7 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
         "phase": "understanding",
         "raw_query": user_message,
         "intent": intent,
+        "intents": intents,
         "brand": brand,
         "model": model,
         "displacement_cc": displacement,
@@ -5210,7 +5268,66 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
             "ambiguity_level": _derive_ambiguity(confidence),
         },
         "confidence": confidence,
+        "semantic_signals": semantic_signals,
     }
+
+    # Completar la moto usando contexto reciente si el usuario viene de otra consulta
+    if phone and intent == "product_search" and semantic_signals.get("has_follow_up"):
+        last_search = get_last_search(phone)
+        if last_search:
+            last_meta = last_search.get("metadata") or {}
+            last_products = last_search.get("products") or []
+            mentioned_brands = {t for t in semantic_signals.get("tokens", []) if t in _BRANDS_NORMALIZED}
+            mentioned_models = {t for t in semantic_signals.get("tokens", []) if t in _MODELS_NORMALIZED}
+            if not brand:
+                brand = (last_meta.get("brand") or last_meta.get("moto_brand") or "").strip() or None
+                if not brand and last_products:
+                    brand = (
+                        last_products[0].get("brand")
+                        or last_products[0].get("moto_brand")
+                        or ""
+                    ).strip() or None
+            elif semantic_signals.get("has_follow_up") and (
+                not mentioned_brands or brand.lower() not in mentioned_brands
+            ):
+                brand = (
+                    (last_meta.get("brand") or last_meta.get("moto_brand") or "").strip()
+                    or (
+                        (last_products[0].get("brand") if last_products else None)
+                        or (last_products[0].get("moto_brand") if last_products else None)
+                        or ""
+                    ).strip()
+                )
+                if brand == "":
+                    brand = None
+            if not model:
+                model = (last_meta.get("model") or last_meta.get("moto_model") or "").strip() or None
+                if not model and last_products:
+                    model = (
+                        last_products[0].get("model")
+                        or last_products[0].get("moto_model")
+                        or ""
+                    ).strip() or None
+            elif semantic_signals.get("has_follow_up") and (
+                not mentioned_models or model.lower() not in mentioned_models
+            ):
+                model = (
+                    (last_meta.get("model") or last_meta.get("moto_model") or "").strip()
+                    or (
+                        (last_products[0].get("model") if last_products else None)
+                        or (last_products[0].get("moto_model") if last_products else None)
+                        or ""
+                    ).strip()
+                )
+                if model == "":
+                    model = None
+
+            if brand:
+                payload["brand"] = brand
+            if model:
+                payload["model"] = model
+            if brand or model:
+                payload.setdefault("metadata", {})["contextual_moto_source"] = "last_search"
 
     if payload["confidence"] < 0.7:
         payload["metadata"]["ambiguity_level"] = "high"
@@ -5571,12 +5688,22 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     # FASE 1: LLM1 Understanding (JSON)
     # --------------------------------------------
-    understanding = _phase1_llm1_understanding(user_message)
+    understanding = _phase1_llm1_understanding(user_message, phone=phone)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
     reasoning_payload = None
     fallback_payload = None
     requery_attempt = 0
+
+    intents = understanding.get("intents") or [understanding.get("intent")]
+    if intents == ["social"]:
+        reply = build_social_reply(phone, user_message, understanding.get("semantic_signals"))
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "social", 0)
+        log_performance(phone, "social", time.time() - start_time, 0)
+        update_sales_phase_from_intent(phone, "social")
+        logger.info("[v3.16] Ruta social detectada en fase 1, se responde sin búsqueda")
+        return reply
 
     while requery_attempt <= MAX_REQUERY_ATTEMPTS:
         elapsed_ms = (time.time() - start_time) * 1000

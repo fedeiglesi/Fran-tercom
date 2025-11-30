@@ -116,3 +116,76 @@ def test_social_intent_skips_product_mode():
 
     understanding = app._phase1_llm1_understanding("Hola")
     assert understanding["intent"] == "social"
+
+
+class DummyChoice:
+    def __init__(self, content: str):
+        self.message = types.SimpleNamespace(content=content)
+
+
+def test_social_reply_prefers_llm(monkeypatch):
+    captured = {}
+
+    def _fake_completion(**kwargs):
+        captured["called"] = True
+        return types.SimpleNamespace(choices=[DummyChoice("¡Hola! Te ayudo con repuestos cuando quieras.")])
+
+    monkeypatch.setattr(app, "llm_client", types.SimpleNamespace(completion=_fake_completion))
+
+    reply = app.build_social_reply("54911", "Hola Fran")
+
+    assert captured.get("called") is True
+    assert "hola" in reply.lower()
+    assert "repuesto" in reply.lower()
+
+
+def test_social_reply_has_fallback(monkeypatch):
+    monkeypatch.setattr(app, "llm_client", types.SimpleNamespace(completion=lambda **kwargs: (_ for _ in ()).throw(Exception("boom"))))
+
+    reply = app.build_social_reply("54911", "Hola, gracias!", {"follow_up_markers": ["gracias"]})
+
+    assert "hola" in reply.lower()
+    assert "repuesto" in reply.lower()
+    assert "de nuevo" in reply.lower()
+
+
+def test_orchestrator_skips_search_for_social(monkeypatch):
+    monkeypatch.setattr(app, "rate_limit_check", lambda phone: True)
+    monkeypatch.setattr(app, "save_message", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "log_interaction", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "log_performance", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "update_sales_phase_from_intent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "sanitize_input", lambda text, max_length=1500: text)
+
+    def _fail_search(*args, **kwargs):
+        raise AssertionError("Hybrid search should not run for social intent")
+
+    monkeypatch.setattr(app, "_phase2_hybrid_search", _fail_search)
+
+    reply = app.orquestar_fran_v316("Hola", phone="54911")
+
+    assert "hola" in reply.lower()
+    assert "repuesto" in reply.lower()
+
+
+def test_multi_intent_keeps_search_context(monkeypatch):
+    message = "Fran, genio, gracias por el consejo de la batería. Ahora necesito amortiguadores para esa misma moto"
+
+    last_search = {
+        "products": [
+            {"brand": "Honda", "model": "Wave 110", "moto_brand": "Honda", "moto_model": "Wave 110"}
+        ],
+        "query": "bateria honda wave 110",
+        "metadata": {"brand": "Honda", "model": "Wave 110"},
+    }
+
+    monkeypatch.setattr(app, "get_last_search", lambda phone: last_search)
+
+    understanding = app._phase1_llm1_understanding(message, phone="54911")
+
+    assert understanding["intent"] == "product_search"
+    assert "product_search" in understanding["intents"]
+    assert "social" in understanding["intents"]
+    assert understanding["brand"] == "Honda"
+    assert understanding["model"].startswith("Wave")
+    assert understanding["metadata"].get("contextual_moto_source") == "last_search"
