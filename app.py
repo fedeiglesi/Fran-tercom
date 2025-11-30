@@ -1208,22 +1208,29 @@ def detect_semantic_entities(message: str) -> dict:
     technical_tokens = [t for t in tokens if t in TECH_LEXICAL_ROOTS]
     numeric_codes = [t for t in tokens if _looks_like_code_or_number(t)]
 
+    # FIX: Si es un saludo simple (1-2 palabras con marcador social), no hacer fuzzy matching
+    # para evitar falsos positivos que contaminen el flujo
+    is_simple_greeting = bool(social_hits) and len(tokens) <= 2 and not purchase_hits and not technical_tokens
+
     fuzzy_brands = []
     fuzzy_models = []
-    for tok in tokens:
-        if len(tok) < 3:
-            continue
-        try:
-            brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
-            model_match = process.extractOne(tok, _MODELS_NORMALIZED, scorer=fuzz.partial_ratio)
-        except Exception:
-            brand_match = None
-            model_match = None
 
-        if brand_match and brand_match[1] >= 88:
-            fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
-        if model_match and model_match[1] >= 88:
-            fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
+    # Solo hacer fuzzy matching si NO es un saludo simple
+    if not is_simple_greeting:
+        for tok in tokens:
+            if len(tok) < 3:
+                continue
+            try:
+                brand_match = process.extractOne(tok, _BRANDS_NORMALIZED, scorer=fuzz.partial_ratio)
+                model_match = process.extractOne(tok, _MODELS_NORMALIZED, scorer=fuzz.partial_ratio)
+            except Exception:
+                brand_match = None
+                model_match = None
+
+            if brand_match and brand_match[1] >= 88:
+                fuzzy_brands.append(_BRAND_NORMALIZED_MAP.get(brand_match[0], brand_match[0]))
+            if model_match and model_match[1] >= 88:
+                fuzzy_models.append(_MODEL_NORMALIZED_MAP.get(model_match[0], model_match[0]))
 
     has_technical = bool(
         technical_tokens
@@ -1248,6 +1255,7 @@ def detect_semantic_entities(message: str) -> dict:
         "has_social": has_social,
         "has_follow_up": has_follow_up,
         "has_technical": has_technical,
+        "is_simple_greeting": is_simple_greeting,
     }
 
 
@@ -5224,33 +5232,52 @@ def _derive_ambiguity(confidence: float) -> str:
 
 def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
-    intents = merge_intents_with_semantics(semantic_signals, llm_intent=None, llm_semantic_intents=None)
-
-    brand = (semantic_signals.get("brands") or [None])[0]
-    model = (semantic_signals.get("models") or [None])[0]
-    displacement = None
-    for code in semantic_signals.get("codes") or []:
-        if code.isdigit():
-            try:
-                displacement = int(code)
-                break
-            except Exception:
-                continue
 
     lower_query = (user_message or "").lower()
-    intent = "product_search" if semantic_signals.get("has_technical") else intents[0]
-    if intent == "product_search" and any(token in lower_query for token in ["compar", "vs", "versus"]):
+
+    # FIX: Clasificar intent principal basado en señales semánticas
+    # Permitir multi-intent: un mensaje puede tener componente social + técnico
+    intent = "busca_producto"
+    if semantic_signals.get("is_simple_greeting"):
+        # Solo clasificar como social puro si es un saludo simple SIN señales técnicas
+        intent = "social"
+    elif semantic_signals.get("has_social") and not semantic_signals.get("has_technical"):
+        # Social sin ninguna señal técnica
+        intent = "social"
+    elif any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
     elif intent == "product_search" and "especific" in lower_query:
         intent = "especificacion"
+    # Si hay señales técnicas, intent es product search (incluso si también hay marcadores sociales)
+
+    # FIX MULTI-INTENT: Extraer entidades si hay señales técnicas, INDEPENDIENTEMENTE del intent
+    # Esto permite mensajes como "hola, quiero baterías" donde hay social + product_search
+    brand = None
+    model = None
+    displacement = None
+    product_type = None
+
+    # Solo NO extraer entidades si es un saludo PURO (is_simple_greeting Y no has_technical)
+    should_extract_entities = not (semantic_signals.get("is_simple_greeting") and not semantic_signals.get("has_technical"))
+
+    if should_extract_entities:
+        brand = (semantic_signals.get("brands") or [None])[0]
+        model = (semantic_signals.get("models") or [None])[0]
+
+        for code in semantic_signals.get("codes") or []:
+            if code.isdigit():
+                try:
+                    displacement = int(code)
+                    break
+                except Exception:
+                    continue
+
+        detected_families = detect_families_in_query(user_message)
+        if detected_families:
+            product_type = detected_families[0]
 
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
     confidence = _normalize_confidence(confidence, minimum=0.3)
-
-    product_type = None
-    detected_families = detect_families_in_query(user_message)
-    if detected_families:
-        product_type = detected_families[0]
 
     payload = {
         "phase": "understanding",
@@ -5266,6 +5293,9 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
             "year_range": None,
             "additional_constraints": None,
             "ambiguity_level": _derive_ambiguity(confidence),
+            "is_simple_greeting": semantic_signals.get("is_simple_greeting", False),
+            "has_technical": semantic_signals.get("has_technical", False),
+            "has_social": semantic_signals.get("has_social", False),
         },
         "confidence": confidence,
         "semantic_signals": semantic_signals,
@@ -5691,12 +5721,26 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     understanding = _phase1_llm1_understanding(user_message, phone=phone)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
+    # FIX: Bypass temprano SOLO para saludos puros (sin componente técnico)
+    # Esto permite multi-intent: "hola, quiero baterías" ejecutará búsqueda
+    metadata = understanding.get("metadata", {})
+    is_pure_greeting = (
+        metadata.get("is_simple_greeting", False)
+        and not metadata.get("has_technical", False)
+    )
+
+    if is_pure_greeting:
+        reply = "¡Hola! ¿En qué te puedo ayudar?"
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "social", 0)
+        logger.info(f"[v3.16] Saludo puro detectado, bypass de búsqueda | Duration: {time.time()-start_time:.2f}s")
+        return reply
+
     reasoning_payload = None
     fallback_payload = None
     requery_attempt = 0
 
-    intents = understanding.get("intents") or [understanding.get("intent")]
-    if intents == ["social"]:
+    if understanding.get("intent") == "social":
         reply = build_social_reply(phone, user_message, understanding.get("semantic_signals"))
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "social", 0)

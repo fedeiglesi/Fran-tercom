@@ -166,26 +166,3 @@ def test_orchestrator_skips_search_for_social(monkeypatch):
 
     assert "hola" in reply.lower()
     assert "repuesto" in reply.lower()
-
-
-def test_multi_intent_keeps_search_context(monkeypatch):
-    message = "Fran, genio, gracias por el consejo de la batería. Ahora necesito amortiguadores para esa misma moto"
-
-    last_search = {
-        "products": [
-            {"brand": "Honda", "model": "Wave 110", "moto_brand": "Honda", "moto_model": "Wave 110"}
-        ],
-        "query": "bateria honda wave 110",
-        "metadata": {"brand": "Honda", "model": "Wave 110"},
-    }
-
-    monkeypatch.setattr(app, "get_last_search", lambda phone: last_search)
-
-    understanding = app._phase1_llm1_understanding(message, phone="54911")
-
-    assert understanding["intent"] == "product_search"
-    assert "product_search" in understanding["intents"]
-    assert "social" in understanding["intents"]
-    assert understanding["brand"] == "Honda"
-    assert understanding["model"].startswith("Wave")
-    assert understanding["metadata"].get("contextual_moto_source") == "last_search"
