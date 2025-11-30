@@ -5230,7 +5230,7 @@ def _derive_ambiguity(confidence: float) -> str:
     return "low"
 
 
-def _phase1_llm1_understanding(user_message: str) -> dict:
+def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
 
     lower_query = (user_message or "").lower()
@@ -5246,7 +5246,7 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
         intent = "social"
     elif any(token in lower_query for token in ["compar", "vs", "versus"]):
         intent = "comparacion"
-    elif "especific" in lower_query:
+    elif intent == "product_search" and "especific" in lower_query:
         intent = "especificacion"
     # Si hay señales técnicas, intent es product search (incluso si también hay marcadores sociales)
 
@@ -5283,6 +5283,7 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
         "phase": "understanding",
         "raw_query": user_message,
         "intent": intent,
+        "intents": intents,
         "brand": brand,
         "model": model,
         "displacement_cc": displacement,
@@ -5299,6 +5300,64 @@ def _phase1_llm1_understanding(user_message: str) -> dict:
         "confidence": confidence,
         "semantic_signals": semantic_signals,
     }
+
+    # Completar la moto usando contexto reciente si el usuario viene de otra consulta
+    if phone and intent == "product_search" and semantic_signals.get("has_follow_up"):
+        last_search = get_last_search(phone)
+        if last_search:
+            last_meta = last_search.get("metadata") or {}
+            last_products = last_search.get("products") or []
+            mentioned_brands = {t for t in semantic_signals.get("tokens", []) if t in _BRANDS_NORMALIZED}
+            mentioned_models = {t for t in semantic_signals.get("tokens", []) if t in _MODELS_NORMALIZED}
+            if not brand:
+                brand = (last_meta.get("brand") or last_meta.get("moto_brand") or "").strip() or None
+                if not brand and last_products:
+                    brand = (
+                        last_products[0].get("brand")
+                        or last_products[0].get("moto_brand")
+                        or ""
+                    ).strip() or None
+            elif semantic_signals.get("has_follow_up") and (
+                not mentioned_brands or brand.lower() not in mentioned_brands
+            ):
+                brand = (
+                    (last_meta.get("brand") or last_meta.get("moto_brand") or "").strip()
+                    or (
+                        (last_products[0].get("brand") if last_products else None)
+                        or (last_products[0].get("moto_brand") if last_products else None)
+                        or ""
+                    ).strip()
+                )
+                if brand == "":
+                    brand = None
+            if not model:
+                model = (last_meta.get("model") or last_meta.get("moto_model") or "").strip() or None
+                if not model and last_products:
+                    model = (
+                        last_products[0].get("model")
+                        or last_products[0].get("moto_model")
+                        or ""
+                    ).strip() or None
+            elif semantic_signals.get("has_follow_up") and (
+                not mentioned_models or model.lower() not in mentioned_models
+            ):
+                model = (
+                    (last_meta.get("model") or last_meta.get("moto_model") or "").strip()
+                    or (
+                        (last_products[0].get("model") if last_products else None)
+                        or (last_products[0].get("moto_model") if last_products else None)
+                        or ""
+                    ).strip()
+                )
+                if model == "":
+                    model = None
+
+            if brand:
+                payload["brand"] = brand
+            if model:
+                payload["model"] = model
+            if brand or model:
+                payload.setdefault("metadata", {})["contextual_moto_source"] = "last_search"
 
     if payload["confidence"] < 0.7:
         payload["metadata"]["ambiguity_level"] = "high"
@@ -5659,7 +5718,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     # FASE 1: LLM1 Understanding (JSON)
     # --------------------------------------------
-    understanding = _phase1_llm1_understanding(user_message)
+    understanding = _phase1_llm1_understanding(user_message, phone=phone)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
     # FIX: Bypass temprano SOLO para saludos puros (sin componente técnico)
