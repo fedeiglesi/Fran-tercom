@@ -5302,6 +5302,7 @@ def _derive_ambiguity(confidence: float) -> str:
 
 def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
+    implicit_cart_action = detect_implicit_cart_action(user_message, phone) if phone else None
 
     lower_query = (user_message or "").lower()
 
@@ -5328,6 +5329,10 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
     product_type = None
 
     intents = merge_intents_with_semantics(semantic_signals, intent)
+    if implicit_cart_action:
+        intent = "cart_action"
+        if "cart_action" not in intents:
+            intents = ["cart_action"] + intents
     if semantic_signals.get("has_technical") and "product_search" in intents:
         intent = "product_search"
     elif intents:
@@ -5375,6 +5380,7 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
         },
         "confidence": confidence,
         "semantic_signals": semantic_signals,
+        "implicit_cart_action": implicit_cart_action,
     }
 
     # Completar la moto usando contexto reciente si el usuario viene de otra consulta
@@ -5709,11 +5715,11 @@ def _phase5_requery(understanding: dict, attempt: int) -> tuple[str, str]:
         strategy = "expand_moto_variants"
         variants = _expand_model_variants(model)
         core = variants[0] if variants else model
-        new_query = " ".join([brand, core, displacement, family]).strip()
+        new_query = " ".join([t for t in [brand, core, displacement, family] if t]).strip()
     elif attempt == 2:
         strategy = "minimal_core_query"
         main_token = family or (model.split()[0] if model else "") or (normalize_search_query(understanding.get("raw_query", "")).split()[:1] or [""])[0]
-        new_query = " ".join([brand, model, main_token]).strip()
+        new_query = " ".join([t for t in [brand, model, main_token] if t]).strip()
     else:
         strategy = "semantic_expansion"
         semantic_terms = [brand, model, displacement, family, understanding.get("usage_context") or "", understanding.get("raw_query")]
@@ -5823,6 +5829,30 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         log_performance(phone, "social", time.time() - start_time, 0)
         update_sales_phase_from_intent(phone, "social")
         logger.info("[v3.16] Ruta social detectada en fase 1, se responde sin búsqueda")
+        return reply
+
+    if understanding.get("intent") == "cart_action":
+        implicit_cart_action = understanding.get("implicit_cart_action") or detect_implicit_cart_action(user_message, phone)
+        reply = None
+
+        if implicit_cart_action and implicit_cart_action.get("action") == "add_each_quantity":
+            pending = {
+                "action_data": {
+                    "qty": max(1, int(implicit_cart_action.get("quantity") or 1)),
+                    "products": implicit_cart_action.get("products") or [],
+                    "cart_hash": compute_cart_hash_from_items(cart_get(phone)),
+                },
+                "created_at": datetime.now().isoformat(),
+            }
+            reply = apply_add_each_quantity_pending(phone, pending)
+        else:
+            reply = handle_cart_action(phone, user_message)
+
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, "cart_action", 0)
+        log_performance(phone, "cart_action", time.time() - start_time, 0)
+        update_sales_phase_from_intent(phone, "cart_action")
+        logger.info("[v3.16] Ruta de carrito detectada, se ejecuta acción sin búsqueda")
         return reply
 
     while requery_attempt <= MAX_REQUERY_ATTEMPTS:
