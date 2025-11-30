@@ -5237,7 +5237,7 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
 
     # FIX: Clasificar intent principal basado en señales semánticas
     # Permitir multi-intent: un mensaje puede tener componente social + técnico
-    intent = "busca_producto"
+    intent = "product_search"
     if semantic_signals.get("is_simple_greeting"):
         # Solo clasificar como social puro si es un saludo simple SIN señales técnicas
         intent = "social"
@@ -5256,6 +5256,12 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
     model = None
     displacement = None
     product_type = None
+
+    intents = merge_intents_with_semantics(semantic_signals, intent)
+    if semantic_signals.get("has_technical") and "product_search" in intents:
+        intent = "product_search"
+    elif intents:
+        intent = intents[0]
 
     # Solo NO extraer entidades si es un saludo PURO (is_simple_greeting Y no has_technical)
     should_extract_entities = not (semantic_signals.get("is_simple_greeting") and not semantic_signals.get("has_technical"))
