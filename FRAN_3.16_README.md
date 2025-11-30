@@ -89,6 +89,12 @@ Fran 3.16 combina lo mejor de Fran 3.14 (razonamiento agentic) y Fran 3.15 (stru
    - Tracking de LLM calls y duración
    - Debug mode con logs extendidos
 
+### 🔎 Normalización y alcance de respuestas
+
+- **Query + catálogo alineados:** la relevancia usa `normalize_search_query` para quitar tildes tanto del texto de la consulta como de campos de producto (nombre, categoría, keywords, marca/modelo) antes de calcular overlap y fuzzy matching. Esto permite que abreviaturas o faltas de acentos en el catálogo (ej. "amort" vs. "amortiguador") sigan matcheando con la query normalizada.
+- **Correcciones semánticas solo en la query:** el LLM de `query_understanding` corrige términos mal escritos en la entrada del usuario, pero no reescribe el catálogo; se apoya en la normalización previa y en los tokens indexados desde `search_text`/`family_name` para cubrir catálogos incompletos.
+- **Respuestas técnicas controladas:** el modo experto (`build_tech_expert_answer`) usa el historial y el prompt `TECH_SYSTEM_PROMPT`. Puede ampliar con conocimiento general del dominio y, cuando falta un dato puntual, apoyarse en conocimiento técnico público (p. ej. rangos típicos o specs conocidas) siempre aclarando si es una estimación. Nunca inventa códigos, precios ni productos del catálogo.
+
 ### 📊 Metadata Capturada
 
 ```json
