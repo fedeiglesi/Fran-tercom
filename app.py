@@ -5480,6 +5480,8 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
             {
                 "product_id": product.get("code") or str(idx),
                 "name": product.get("name") or product.get("description", ""),
+                "price_ars": product.get("price_ars"),
+                "price_usd": product.get("price_usd"),
                 "bm25_score": _normalize_score_from_rank(idx, SEARCH_TOP_K),
                 "faiss_similarity": _normalize_score_from_rank(idx, SEARCH_TOP_K) if score else 0.5,
                 "hybrid_rank": idx,
@@ -5629,6 +5631,12 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
         decision = "marginal"
         confidence_local = _normalize_confidence(cand.get("confidence", 0.55), minimum=0.0)
         technical_reasoning = "Sin datos declarados, se infiere por similitud semántica y familia."
+        price_ars = product.get("price_ars")
+        if price_ars is not None:
+            try:
+                price_ars = float(to_decimal_money(price_ars))
+            except Exception:
+                price_ars = None
 
         if cand.get("status") == "hard_compatible" or (brand_match and model_match):
             decision = "compatible"
@@ -5658,6 +5666,7 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
             "technical_reasoning": technical_reasoning,
             "justification_type": justification,
             "risk_level": risk_level,
+            "price_ars": price_ars,
         }
 
         if STRICT_MODE and decision == "incompatible":
@@ -5754,11 +5763,16 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
         if dec.get("compatibility_decision") == "incompatible" and STRICT_MODE:
             continue
         badge = badge_map.get(dec.get("compatibility_decision"), "❓ Verificar con vendedor")
+        price_value = dec.get("price_ars")
+        price_decimal = to_decimal_money(price_value) if price_value is not None else None
+        price_formatted = format_price(price_decimal) if price_decimal is not None else None
         recommendations.append(
             {
                 "product_id": dec.get("product_id"),
                 "product_name": dec.get("name", ""),
                 "confidence_badge": badge,
+                "price_ars": float(price_decimal) if price_decimal is not None else None,
+                "price_formatted": price_formatted,
             }
         )
 
@@ -5767,7 +5781,8 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
     if recommendations:
         lines = ["Te dejo opciones compatibles:"]
         for rec in recommendations[:5]:
-            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']})")
+            price_text = rec.get("price_formatted") or "Precio a confirmar"
+            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']}) | {price_text}")
         lines.append(follow_up)
         whatsapp_response = "\n".join(lines)
     elif fallback_payload:
