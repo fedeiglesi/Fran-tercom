@@ -1437,7 +1437,7 @@ def generate_embeddings_with_cache(texts):
                         with openai_sem:
                             resp = client.embeddings.create(
                                 input=chunk,
-                                model="text-embedding-3-small",
+                                model="text-embedding-3-large",
                             )
                         chunk_vectors = [d.embedding for d in resp.data]
 

@@ -108,7 +108,7 @@ OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "test-key").strip()
 if os.environ.get("OPENAI_API_KEY") is None:
     logger.warning("OPENAI_API_KEY no configurada, usando clave dummy solo para tests")
 
-EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small").strip()
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large").strip()
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
