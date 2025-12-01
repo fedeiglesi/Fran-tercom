@@ -104,6 +104,7 @@ OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "test-key").strip()
 if os.environ.get("OPENAI_API_KEY") is None:
     logger.warning("OPENAI_API_KEY no configurada, usando clave dummy solo para tests")
 
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small").strip()
 MODEL_NAME = (os.environ.get("MODEL_NAME") or "gpt-4o-mini").strip()
 # Usar modelo más barato para reasoning
 MODEL_REASONING = "gpt-4o-mini"  # más barato, rápido
@@ -2782,13 +2783,13 @@ def generate_embeddings_with_cache(texts):
             for i in range(0, len(texts_to_embed), batch):
                 chunk = texts_to_embed[i:i + batch]
 
-                for retry in range(max_retries):
-                    try:
-                        with openai_sem:
-                            resp = client.embeddings.create(
-                                input=chunk,
-                                model="text-embedding-3-small",
-                            )
+                        for retry in range(max_retries):
+                            try:
+                                with openai_sem:
+                                    resp = client.embeddings.create(
+                                        input=chunk,
+                                        model=EMBEDDING_MODEL,
+                                    )
                         chunk_vectors = [d.embedding for d in resp.data]
 
                         for text, vec in zip(chunk, chunk_vectors):

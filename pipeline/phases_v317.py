@@ -33,6 +33,9 @@ except ImportError:
                 raise ValueError(f"Missing required field: {field}")
 
 
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+
 def _normalize_text(text: str) -> str:
     text = (text or "").lower().strip()
     text = unicodedata.normalize("NFD", text)
@@ -46,7 +49,7 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _default_embedding_fn(texts: List[str]) -> List[np.ndarray]:
-    """Try OpenAI text-embedding-3-large first, then fall back locally."""
+    """Generate normalized embeddings using the configured OpenAI model with fallbacks."""
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
@@ -55,7 +58,7 @@ def _default_embedding_fn(texts: List[str]) -> List[np.ndarray]:
 
             client = OpenAI(api_key=api_key)
             response = client.embeddings.create(
-                model="text-embedding-3-large",
+                model=EMBEDDING_MODEL,
                 input=texts,
             )
             vectors = [np.array(item.embedding, dtype="float32") for item in response.data]
