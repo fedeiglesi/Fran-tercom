@@ -68,15 +68,67 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     entropy = estimate_entropy(text)
     vowel_rich = sum(ch in "aeiouáéíóú" for ch in text)
     if len(text.split()) == 1 and len(text) <= 4 and vowel_rich >= 2 and entropy < 0.25:
-        return {"route": "social", "score": entropy, "reason": "short_vowel_token"}
+        result = {"route": "social", "score": entropy, "reason": "short_vowel_token"}
+        if catalog_centroid is None:
+            result["fallback"] = True
+        return result
 
     # Si no tenemos centroide (por ejemplo, si el catálogo todavía no cargó),
-    # no podemos medir similitud. En ese caso priorizamos técnico salvo que el
-    # mensaje sea muy corto y con baja entropía (saludos genéricos).
+    # usamos un fallback basado en keywords técnicas para evitar clasificar todo
+    # como social cuando el mensaje es corto.
     if catalog_centroid is None:
+        technical_keywords = [
+            "filtro",
+            "bujia",
+            "pastilla",
+            "amortiguador",
+            "aceite",
+            "corona",
+            "piñon",
+            "cadena",
+            "cdi",
+            "pastillas",
+            "bateria",
+            "llanta",
+            "freno",
+            "embrague",
+            "carburador",
+            "llantas",
+        ]
+
+        technical_brands = [
+            "honda",
+            "yamaha",
+            "kawasaki",
+            "suzuki",
+            "bajaj",
+        ]
+
+        if any(keyword in text for keyword in technical_keywords):
+            return {
+                "route": "technical",
+                "score": 1.0,
+                "reason": "fallback_keywords",
+                "fallback": True,
+            }
+
+        if any(brand in text for brand in technical_brands):
+            return {
+                "route": "technical",
+                "score": 0.6,
+                "reason": "fallback_brand",
+                "fallback": True,
+            }
+
         if entropy < 0.2 and len(text.split()) <= 4:
-            return {"route": "social", "score": entropy, "reason": "low_entropy_no_centroid"}
-        return {"route": "technical", "score": 1.0, "reason": "no_centroid"}
+            return {
+                "route": "social",
+                "score": entropy,
+                "reason": "low_entropy_no_centroid",
+                "fallback": True,
+            }
+
+        return {"route": "technical", "score": 0.75, "reason": "no_centroid", "fallback": True}
 
     sim = compute_similarity(text, catalog_centroid)
 
