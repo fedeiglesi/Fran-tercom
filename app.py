@@ -4979,7 +4979,9 @@ def format_search_results(products):
     for i, p in enumerate(products, 1):
         name_lower = p.get("name", "").lower()
         emoji = next((CATEGORY_EMOJIS[k] for k in CATEGORY_EMOJIS if k in name_lower), "📦")
-        price = format_price(p.get("price_ars", 0))
+        price_raw = p.get("price_ars")
+        has_price = price_raw not in (None, "", 0, "0", "0.0", "0.00")
+        price = format_price(price_raw) if has_price else "Precio a confirmar"
         name = p.get("name", "").strip()
         code = p.get("code", "")
         brand = p.get("brand", "")
@@ -5939,7 +5941,9 @@ def _phase6_fallback(reason: str) -> dict:
         "status": reason,
         "fallback_action": "return_top_N_with_disclaimer",
         "results": [],
-        "fallback_message": "Necesito más datos para asegurar compatibilidad. ¿Querés precio o ver más opciones?",
+        "fallback_message": (
+            "Necesito más datos para asegurar compatibilidad. Si querés ver más productos o tenés dudas, avisame."
+        ),
     }
 
 
@@ -5971,7 +5975,7 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
             }
         )
 
-    follow_up = "¿Querés precio o ver más opciones?"
+    follow_up = "¿Cuál de estas opciones preferís? Si tenés dudas o querés ver más productos avisame."
     whatsapp_response = ""
     if recommendations:
         lines = ["Te dejo opciones compatibles:"]
@@ -6131,7 +6135,9 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     if (not reasoning_payload or reasoning_payload.get("llm2_confidence_overall", 0) < CONFIDENCE_THRESHOLD) and not fallback_payload:
         fallback_payload = _phase6_fallback("low_confidence_results")
-        fallback_payload["fallback_message"] = "Tengo algunas opciones pero necesito confirmar la moto. ¿Querés precio o ver más opciones?"
+        fallback_payload["fallback_message"] = (
+            "Tengo algunas opciones pero necesito confirmar la moto. Contame cuál preferís o si querés que te muestre más productos."
+        )
 
     # --------------------------------------------
     # FASE 7: LLM3 Response Generation
