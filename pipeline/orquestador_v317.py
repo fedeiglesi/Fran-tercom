@@ -56,7 +56,7 @@ def orquestar_v317(message, df, catalog_centroid, schema, embedding_fn=None, max
         trace.append(fallback_output)
 
         # --- FASE 7 ---
-        response_output = fase7_whatsapp_response(search_output, reasoning_output, fallback_output)
+        response_output = fase7_whatsapp_response(search_output, reasoning_output, fallback_output, clasif)
         trace.append(response_output)
 
         return {"trace": trace, "final_response": response_output}
