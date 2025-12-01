@@ -5179,7 +5179,7 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
         return reply
 
     normalized_query = understanding.get("normalized_query") or user_message
-    intent = understanding.get("intent") or "product_search"
+    intent = _canonical_intent(understanding.get("intent"))
 
     logger.info(
         f"[STEP 1] Normalized: '{normalized_query}' | Intent: {intent} | Corrections: {understanding.get('corrections')}"
@@ -5647,11 +5647,16 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None, sess
     confidence = 0.85 if brand or model or semantic_signals.get("technical_tokens") else 0.65
     confidence = _normalize_confidence(confidence, minimum=0.3)
 
+    intent_compat = "busca_producto" if intent == "product_search" else intent
+    intents_compat = ["busca_producto" if i == "product_search" else i for i in intents]
+
     payload = {
         "phase": "understanding",
         "raw_query": user_message,
-        "intent": intent,
-        "intents": intents,
+        "intent": intent_compat,
+        "intents": intents_compat,
+        "intent_canonical": intent,
+        "intents_canonical": intents,
         "brand": brand,
         "model": model,
         "displacement_cc": displacement,
@@ -5757,6 +5762,12 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None, sess
     payload["follow_up"] = follow_up_block
 
     return payload
+
+
+def _canonical_intent(intent: str | None) -> str:
+    if intent == "busca_producto":
+        return "product_search"
+    return intent or "product_search"
 
 
 def _normalize_score_from_rank(rank: int, max_items: int) -> float:
@@ -6098,20 +6109,18 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
             }
         )
 
-    follow_up = "¿Cuál de estas opciones preferís? Si tenés dudas o querés ver más productos avisame."
     whatsapp_response = ""
     if recommendations:
         lines = ["Te dejo opciones compatibles:"]
         for rec in recommendations[:5]:
             price_text = rec.get("price_formatted") or "Precio a confirmar"
             lines.append(f"- {rec['product_name']} ({rec['confidence_badge']}) | {price_text}")
-        lines.append(follow_up)
         whatsapp_response = "\n".join(lines)
     elif fallback_payload:
         fallback_msg = fallback_payload.get("fallback_message") or "Necesito más datos para asegurar compatibilidad."
-        whatsapp_response = f"{fallback_msg}\n\n{follow_up}".strip()
+        whatsapp_response = fallback_msg.strip()
     else:
-        whatsapp_response = f"Necesito confirmar la moto para asegurarte compatibilidad. {follow_up}"
+        whatsapp_response = "Necesito confirmar la moto para asegurarte compatibilidad."
 
     return {
         "phase": "response_generation",
@@ -6160,7 +6169,10 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     fallback_payload = None
     requery_attempt = 0
 
-    if understanding.get("intent") == "social":
+    canonical_intent = _canonical_intent(understanding.get("intent_canonical") or understanding.get("intent"))
+    understanding["intent_canonical"] = canonical_intent
+
+    if canonical_intent == "social":
         reply = build_social_reply(phone, user_message, understanding.get("semantic_signals"))
         save_message(phone, reply, "assistant")
         log_interaction(phone, user_message, "social", 0)
@@ -6169,7 +6181,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         logger.info("[v3.16] Ruta social detectada en fase 1, se responde sin búsqueda")
         return reply
 
-    if understanding.get("intent") == "cart_action":
+    if canonical_intent == "cart_action":
         implicit_cart_action = understanding.get("implicit_cart_action") or detect_implicit_cart_action(user_message, phone)
         reply = None
 
@@ -6270,9 +6282,10 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
 
     reply = response_payload.get("whatsapp_response") or "Necesito un poco más de información para ayudarte mejor."
     save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, understanding.get("intent", "otro"), len(response_payload.get("product_recommendations", [])))
-    log_performance(phone, understanding.get("intent", "otro"), time.time() - start_time, len(reasoning_payload.get("candidates_evaluated", [])) if reasoning_payload else 0)
-    update_sales_phase_from_intent(phone, understanding.get("intent", "otro"))
+    intent_for_logs = _canonical_intent(understanding.get("intent_canonical") or understanding.get("intent"))
+    log_interaction(phone, user_message, intent_for_logs, len(response_payload.get("product_recommendations", [])))
+    log_performance(phone, intent_for_logs, time.time() - start_time, len(reasoning_payload.get("candidates_evaluated", [])) if reasoning_payload else 0)
+    update_sales_phase_from_intent(phone, intent_for_logs)
 
     logger.info(f"[v3.16 - DONE] Hybrid JSON pipeline complete | Duration: {time.time()-start_time:.2f}s")
 

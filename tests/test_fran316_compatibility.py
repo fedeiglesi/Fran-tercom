@@ -110,7 +110,8 @@ def test_response_includes_follow_up(monkeypatch):
     fallback_payload = {"fallback_message": "Necesito más datos"}
 
     response = app._phase7_llm3_response(understanding, reasoning_payload, fallback_payload)
-    assert "¿Querés precio o ver más opciones?" in response["whatsapp_response"]
+    assert fallback_payload["fallback_message"] in response["whatsapp_response"]
+    assert "¿Querés precio o ver más opciones?" not in response["whatsapp_response"]
 
 
 def test_response_includes_prices(monkeypatch):
