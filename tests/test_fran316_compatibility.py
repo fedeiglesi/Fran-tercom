@@ -109,6 +109,32 @@ def test_response_includes_follow_up(monkeypatch):
     assert "¿Querés precio o ver más opciones?" in response["whatsapp_response"]
 
 
+def test_response_includes_prices(monkeypatch):
+    understanding = {"brand": "Honda", "model": "Wave", "raw_query": "pastillas"}
+    reasoning_payload = {
+        "candidates_evaluated": [
+            {
+                "product_id": "PF-W110-001",
+                "name": "Pastilla de freno Wave 110",
+                "compatibility_decision": "compatible",
+                "confidence_score": 0.9,
+                "technical_reasoning": "",
+                "justification_type": "catalog_match",
+                "risk_level": "low",
+                "price_ars": 1850,
+            }
+        ],
+        "llm2_confidence_overall": 0.9,
+    }
+
+    response = app._phase7_llm3_response(understanding, reasoning_payload)
+
+    recommendation = response["product_recommendations"][0]
+    assert recommendation["price_ars"] == float(app.to_decimal_money(1850))
+    assert recommendation["price_formatted"] == "$1.850"
+    assert "$1.850" in response["whatsapp_response"]
+
+
 def test_social_intent_skips_product_mode():
     semantic = app.detect_semantic_entities("Hola")
     assert semantic["has_social"] is True
