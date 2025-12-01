@@ -1,4 +1,5 @@
-import math
+import json
+import os
 import re
 import unicodedata
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -43,6 +44,23 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _default_embedding_fn(texts: List[str]) -> List[np.ndarray]:
+    """Try OpenAI text-embedding-3-large first, then fall back locally."""
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        try:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key)
+            response = client.embeddings.create(
+                model="text-embedding-3-large",
+                input=texts,
+            )
+            vectors = [np.array(item.embedding, dtype="float32") for item in response.data]
+            return [vec / (np.linalg.norm(vec) or 1.0) for vec in vectors]
+        except Exception:
+            pass
+
     try:
         from sentence_transformers import SentenceTransformer
 
@@ -78,6 +96,8 @@ PHASE2_SCHEMA = {
                 "properties": {
                     "product_id": {"type": "string"},
                     "name": {"type": "string"},
+                    "price_ars": {"type": ["number", "null"]},
+                    "price_usd": {"type": ["number", "null"]},
                     "bm25_score": {"type": "number"},
                     "faiss_score": {"type": "number"},
                     "hybrid_rank": {"type": "integer"},
@@ -139,10 +159,26 @@ PHASE4_SCHEMA = {
                     "confidence_score": {"type": "number"},
                     "technical_reasoning": {"type": "string"},
                     "risk_level": {"enum": ["low", "medium", "high"]},
+                    "name": {"type": ["string", "null"]},
+                    "price_ars": {"type": ["number", "null"]},
+                    "price_usd": {"type": ["number", "null"]},
                 },
             },
         },
         "needs_requery": {"type": "boolean"},
+        "reranked_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["product_id", "rank", "score"],
+                "properties": {
+                    "product_id": {"type": "string"},
+                    "rank": {"type": "integer"},
+                    "score": {"type": "number"},
+                    "justification": {"type": ["string", "null"]},
+                },
+            },
+        },
     },
 }
 
@@ -163,7 +199,20 @@ PHASE6_SCHEMA = {
     "properties": {
         "phase": {"const": "fallback"},
         "disclaimer": {"type": "string"},
-        "items": {"type": "array"},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["product_id"],
+                "properties": {
+                    "product_id": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "price_ars": {"type": ["number", "null"]},
+                    "price_usd": {"type": ["number", "null"]},
+                    "confidence_score": {"type": ["number", "null"]},
+                },
+            },
+        },
     },
 }
 
@@ -175,6 +224,41 @@ PHASE7_SCHEMA = {
         "message": {"type": "string"},
         "type": {"enum": ["confident_match", "partial_match", "clarification_needed"]},
         "badge": {"type": "string"},
+        "products": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["product_id"],
+                "properties": {
+                    "product_id": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                    "price_ars": {"type": ["number", "null"]},
+                    "price_usd": {"type": ["number", "null"]},
+                    "badge": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+RERANK_SCHEMA = {
+    "type": "object",
+    "required": ["reranked"],
+    "properties": {
+        "reranked": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["product_id", "score", "rank"],
+                "properties": {
+                    "product_id": {"type": "string"},
+                    "score": {"type": "number"},
+                    "rank": {"type": "integer"},
+                    "justification": {"type": ["string", "null"]},
+                },
+            },
+        }
     },
 }
 
@@ -186,6 +270,20 @@ def _prepare_catalog(df: Any) -> List[Dict[str, Any]]:
         except Exception:
             pass
     return list(df or [])
+
+
+def _extract_prices(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    ars = row.get("precio_pesos") if isinstance(row, dict) else None
+    usd = row.get("precio_dolares") if isinstance(row, dict) else None
+    try:
+        ars_float = float(ars) if ars not in (None, "", "nan") else None
+    except Exception:
+        ars_float = None
+    try:
+        usd_float = float(usd) if usd not in (None, "", "nan") else None
+    except Exception:
+        usd_float = None
+    return ars_float, usd_float
 
 
 def _build_bm25_index(catalog: List[Dict[str, Any]]) -> Tuple[Optional[BM25Okapi], List[List[str]]]:
@@ -265,6 +363,7 @@ def fase2_hybrid_search(query: str, df: Any, embedding_fn: Optional[Callable[[Li
     results: List[Dict[str, Any]] = []
     for hybrid_rank, (idx, _) in enumerate(ranks[:top_k], start=1):
         row = catalog[idx]
+        price_ars, price_usd = _extract_prices(row)
         catalog_data = {
             "categoria": row.get("categoria_final") or row.get("categoria") or None,
             "marca_moto": row.get("marca_moto") or None,
@@ -276,6 +375,8 @@ def fase2_hybrid_search(query: str, df: Any, embedding_fn: Optional[Callable[[Li
             {
                 "product_id": str(row.get("codigo") or row.get("id") or str(idx)),
                 "name": str(row.get("descripcion") or row.get("descripcion_normalizada") or ""),
+                "price_ars": price_ars,
+                "price_usd": price_usd,
                 "bm25_score": float(bm25_scores[idx]) if bm25_scores else 0.0,
                 "faiss_score": float(faiss_scores[idx]) if faiss_scores else 0.0,
                 "hybrid_rank": hybrid_rank,
@@ -355,6 +456,9 @@ def fase4_llm2_reasoning(
                     "confidence_score": float(confidence),
                     "technical_reasoning": reasoning,
                     "risk_level": _risk_from_conf(confidence),
+                    "name": catalog_lookup.get(candidate["product_id"], {}).get("name"),
+                    "price_ars": catalog_lookup.get(candidate["product_id"], {}).get("price_ars"),
+                    "price_usd": catalog_lookup.get(candidate["product_id"], {}).get("price_usd"),
                 }
             )
             continue
@@ -396,13 +500,19 @@ def fase4_llm2_reasoning(
                 "confidence_score": float(confidence),
                 "technical_reasoning": reasoning,
                 "risk_level": _risk_from_conf(confidence),
+                "name": catalog_item.get("name"),
+                "price_ars": catalog_item.get("price_ars"),
+                "price_usd": catalog_item.get("price_usd"),
             }
         )
+
+    reranked = _structured_rerank(evaluated)
 
     payload = {
         "phase": "llm2_reasoning",
         "candidates_evaluated": evaluated,
         "needs_requery": bool(needs_requery),
+        "reranked_candidates": reranked,
     }
     validate(instance=payload, schema=PHASE4_SCHEMA)
     return payload
@@ -446,10 +556,28 @@ def fase6_fallback(search_output: Dict[str, Any], reasoning_output: Dict[str, An
     confident = [c for c in reasoning_output.get("candidates_evaluated", []) if c.get("confidence_score", 0) >= 0.6 and c.get("compatibility_decision") == "compatible"]
 
     if confident:
-        items = confident
+        items = [
+            {
+                "product_id": c.get("product_id", ""),
+                "name": c.get("name"),
+                "price_ars": c.get("price_ars"),
+                "price_usd": c.get("price_usd"),
+                "confidence_score": c.get("confidence_score"),
+            }
+            for c in confident
+        ]
         disclaimer = "Opciones confirmadas según datos actuales."
     else:
-        items = search_output.get("results", [])[:5]
+        items = [
+            {
+                "product_id": r.get("product_id", ""),
+                "name": r.get("name"),
+                "price_ars": r.get("price_ars"),
+                "price_usd": r.get("price_usd"),
+                "confidence_score": r.get("hybrid_rank"),
+            }
+            for r in search_output.get("results", [])[:5]
+        ]
         disclaimer = "Resultados sugeridos con información parcial, confirma compatibilidad."
 
     payload = {"phase": "fallback", "disclaimer": disclaimer, "items": items}
@@ -469,28 +597,84 @@ def fase7_whatsapp_response(
         chosen = confident[:3]
         resp_type = "confident_match"
         badge = "🟢"
-        items_desc = [f"{badge} {c['product_id']} ({c['confidence_score']:.2f})" for c in chosen]
-        message = "Encontré opciones compatibles:\n" + "\n".join(items_desc)
+        formatted = []
+        for c in chosen:
+            price = _format_price(c.get("price_ars"), c.get("price_usd"))
+            formatted.append(f"{badge} {c['product_id']} · {c.get('name','')} · {price} ({c['confidence_score']:.2f})")
+        message = "Encontré opciones compatibles:\n" + "\n".join(formatted)
+        products = [
+            {
+                "product_id": c.get("product_id", ""),
+                "name": c.get("name"),
+                "price_ars": c.get("price_ars"),
+                "price_usd": c.get("price_usd"),
+                "badge": badge,
+            }
+            for c in chosen
+        ]
     elif fallback_output.get("items"):
         resp_type = "partial_match"
         badge = "🟠"
         items = fallback_output["items"]
         formatted = []
+        products = []
         for item in items[:3]:
-            if "product_id" in item:
-                formatted.append(f"{badge} {item.get('product_id')} - revisión sugerida")
-            elif "name" in item:
-                formatted.append(f"{badge} {item.get('name')}")
+            price = _format_price(item.get("price_ars"), item.get("price_usd"))
+            formatted.append(f"{badge} {item.get('product_id')} · {item.get('name','')} · {price}")
+            products.append(
+                {
+                    "product_id": item.get("product_id", ""),
+                    "name": item.get("name"),
+                    "price_ars": item.get("price_ars"),
+                    "price_usd": item.get("price_usd"),
+                    "badge": badge,
+                }
+            )
         message = fallback_output.get("disclaimer", "") + "\n" + "\n".join(formatted)
     else:
         resp_type = "clarification_needed"
         badge = "⚪"
         message = "Necesito más datos para asegurarte compatibilidad. ¿Marca y modelo de la moto?"
+        products = []
 
     if len(message) > 1000:
         message = message[:997] + "..."
 
-    payload = {"phase": "whatsapp_response", "message": message, "type": resp_type, "badge": badge}
+    payload = {"phase": "whatsapp_response", "message": message, "type": resp_type, "badge": badge, "products": products}
     validate(instance=payload, schema=PHASE7_SCHEMA)
     return payload
+
+
+def _format_price(price_ars: Optional[float], price_usd: Optional[float]) -> str:
+    if price_ars is not None:
+        return f"ARS {price_ars:,.2f}"
+    if price_usd is not None:
+        return f"USD {price_usd:,.2f}"
+    return "precio a confirmar"
+
+
+def _structured_rerank(evaluated: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ordered = sorted(
+        evaluated,
+        key=lambda item: (
+            0 if item.get("compatibility_decision") == "incompatible" else 1,
+            float(item.get("confidence_score") or 0),
+        ),
+        reverse=True,
+    )
+
+    reranked = []
+    for rank, item in enumerate(ordered, start=1):
+        reranked.append(
+            {
+                "product_id": item.get("product_id", ""),
+                "score": float(item.get("confidence_score") or 0.0),
+                "rank": rank,
+                "justification": item.get("technical_reasoning"),
+            }
+        )
+
+    payload = {"reranked": reranked}
+    validate(instance=payload, schema=RERANK_SCHEMA)
+    return reranked
 

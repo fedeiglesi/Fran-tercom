@@ -9,22 +9,29 @@ in lightweight environments (e.g., tests or sandboxes).
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 Intent = dict[str, Any]
 
 
-def parse_multi_intent(llm: Callable[[str], str], message: str) -> Iterable[Intent]:
+def parse_multi_intent(
+    llm: Callable[[str], str], message: str, *, history: Sequence[str] | None = None, max_history_chars: int = 6000
+) -> Iterable[Intent]:
     """Use the LLM to split a message into intent spans.
 
     The prompt is designed to avoid word-spotting and instead asks the
     model to identify coherent spans grouped by the communicative act.
     """
 
+    history_text = ""
+    if history:
+        history_joined = " \n".join(history)
+        history_text = history_joined[-max_history_chars:]
+
     prompt = f'''
     Sos un analista LLM-first de conversaciones. Detectá TODAS las intenciones en el
     mensaje sin usar palabras clave. Segmentar en spans exactos del usuario.
-
+    
     Formato JSON obligatorio:
     {{
       "intents": [
@@ -36,6 +43,8 @@ def parse_multi_intent(llm: Callable[[str], str], message: str) -> Iterable[Inte
         }}
       ]
     }}
+
+    Historial reciente (para memoria larga, truncado a {max_history_chars} chars): """{history_text}"""
 
     Mensaje del usuario: """{message}"""
     '''
@@ -88,6 +97,7 @@ def orchestrate(
     *,
     run_allowed_products_search: Callable[[str], Any],
     aplicar_accion_carrito: Callable[[str], str],
+    history: Sequence[str] | None = None,
 ) -> str:
     """Execute multiple intents in priority order.
 
@@ -96,7 +106,7 @@ def orchestrate(
     first, followed by technical guidance.
     """
 
-    intents_detected = parse_multi_intent(llm, message)
+    intents_detected = parse_multi_intent(llm, message, history=history)
 
     normalized_intents = []
     for intent in intents_detected:
