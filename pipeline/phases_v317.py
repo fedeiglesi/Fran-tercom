@@ -33,7 +33,7 @@ except ImportError:
                 raise ValueError(f"Missing required field: {field}")
 
 
-EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
 WHATSAPP_MESSAGE_LIMIT = int(os.environ.get("WHATSAPP_MESSAGE_LIMIT", "1600"))
 
 
