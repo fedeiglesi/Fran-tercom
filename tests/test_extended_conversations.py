@@ -19,7 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 
 @pytest.fixture
-def extended_app(monkeypatch):
+def extended_app(monkeypatch, tmp_path):
     """Setup para tests de conversaciones extensas con estado conversacional."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent))
@@ -54,7 +54,11 @@ def extended_app(monkeypatch):
 
     app = importlib.import_module("app")
 
-    # Estado conversacional simulado
+    # Configurar storage persistente simulado (SQLite temporal)
+    db_path = tmp_path / "chat_mem.db"
+    monkeypatch.setattr(app, "DB_PATH", str(db_path))
+    app.init_db()
+
     conversation_state = {
         "history": [],
         "cart": [],
@@ -95,14 +99,11 @@ def extended_app(monkeypatch):
         },
     ]
 
-    def fake_save_message(phone, content, role):
-        conversation_state["history"].append(
-            {"phone": phone, "content": content, "role": role}
-        )
+    original_save_message = app.save_message
 
-    def fake_get_history_since(phone, days=1, limit=2000):
-        relevant = [h for h in conversation_state["history"] if h["phone"] == phone]
-        return relevant[-limit:]
+    def fake_save_message(phone, content, role):
+        original_save_message(phone, content, role)
+        conversation_state["history"] = app.get_history_since(phone)
 
     def fake_hybrid_search(query, phone=None, top_k=None):
         # Búsqueda contextual basada en el query
@@ -132,7 +133,7 @@ def extended_app(monkeypatch):
         return results[:top_k] if top_k else results
 
     def fake_generate_reply(phone, user_message, catalog_products, execution_context, system_prompt=None):
-        history = fake_get_history_since(phone)
+        history = app.get_history_since(phone)
         turn_number = len([h for h in history if h["role"] == "user"])
 
         # Simular respuestas contextuales
@@ -147,6 +148,11 @@ def extended_app(monkeypatch):
             conversation_state["current_moto"] = "YBR"
         elif "wave" in user_lower:
             conversation_state["current_moto"] = "Wave"
+
+        if conversation_state["current_moto"] == "YBR":
+            catalog_products = [p for p in dummy_products if "YBR" in p["code"] or "YBR" in p["name"]] or catalog_products
+        elif conversation_state["current_moto"] == "Wave":
+            catalog_products = [p for p in dummy_products if "Wave" in p["name"]] or catalog_products
 
         # Referencias ambiguas
         if any(ref in user_lower for ref in ["el primero", "el primer", "ese"]):
@@ -203,11 +209,9 @@ def extended_app(monkeypatch):
         return {"reply": reply, "plan": plan, "execution": {}}
 
     monkeypatch.setattr(app, "save_message", fake_save_message)
-    monkeypatch.setattr(app, "get_history_since", fake_get_history_since)
     monkeypatch.setattr(app, "log_interaction", lambda *_, **__: None)
     monkeypatch.setattr(app, "log_performance", lambda *_, **__: None)
     monkeypatch.setattr(app, "update_sales_phase_from_intent", lambda *_, **__: None)
-    monkeypatch.setattr(app, "save_last_search", lambda *_, **__: None)
     monkeypatch.setattr(app, "validate_and_fix_response", lambda reply, *_: reply)
     monkeypatch.setattr(
         app,
@@ -401,3 +405,43 @@ def test_conversation_with_multiple_clarifications(extended_app):
     # Verificar que la conversación tiene 3 turnos
     user_turns = [h for h in state["history"] if h["role"] == "user"]
     assert len(user_turns) == 3
+
+
+def test_anaphoric_reference_to_last_oil(extended_app):
+    """Valida referencias anafóricas al último aceite mencionado."""
+    app, state, products = extended_app
+    phone = "+5491100013333"
+
+    r1 = app.orquestar_fran("Tenés aceite Motul 10W40?", phone)
+    assert state["last_products"]
+
+    r2 = app.orquestar_fran("Ese último aceite, pasame el precio", phone)
+    assert "aceite" in r2.lower() or "motul" in r2.lower()
+
+
+def test_switch_bike_mid_chat(extended_app):
+    """Confirma que se actualiza el contexto de moto a mitad de conversación."""
+    app, state, products = extended_app
+    phone = "+5491100014444"
+
+    app.orquestar_fran("Busco pastillas para Wave 110", phone)
+    assert state["current_moto"] == "Wave"
+
+    reply = app.orquestar_fran("En realidad es para una YBR 125", phone)
+    assert state["current_moto"] == "YBR"
+    assert "YBR" in reply or "pastilla" in reply
+
+
+def test_continuity_after_empty_or_emoji_messages(extended_app):
+    """Garantiza continuidad aun cuando hay mensajes vacíos o solo emojis."""
+    app, state, products = extended_app
+    phone = "+5491100015555"
+
+    first = app.orquestar_fran("Necesito filtro de aire", phone)
+    assert first
+
+    mid = app.orquestar_fran("🙂", phone)
+    assert mid
+
+    final = app.orquestar_fran("Ese mismo filtro, cuánto sale?", phone)
+    assert "filtro" in final.lower() or "$" in final or "ars" in final.lower()

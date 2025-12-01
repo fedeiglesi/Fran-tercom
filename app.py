@@ -457,6 +457,35 @@ class SessionMemory:
         with cls._lock:
             data = cls._store.get(user_id)
             if not data:
+                # Hydrate desde storage persistente para mantener continuidad
+                try:
+                    last_search = get_last_search(user_id)
+                    if last_search:
+                        ts = last_search.get("metadata", {}).get("timestamp") or last_search.get("age_minutes")
+                        timestamp = None
+                        if isinstance(ts, (int, float)):
+                            timestamp = time.time() - float(ts) * 60
+                        else:
+                            try:
+                                timestamp = datetime.fromisoformat(ts).timestamp() if ts else None
+                            except Exception:
+                                timestamp = None
+
+                        data = {
+                            "last_search": {
+                                "query": last_search.get("query", ""),
+                                "results": last_search.get("products", []),
+                                "metadata": last_search.get("metadata", {}),
+                                "timestamp": timestamp or time.time(),
+                                "confidence": 0.5,
+                            },
+                            "conversation_turns": 0,
+                            "context_ttl": cls.DEFAULT_TTL,
+                        }
+                        cls._store[user_id] = data
+                except Exception:
+                    data = None
+            if not data:
                 return None
 
             last_ts = data.get("last_search", {}).get("timestamp")
@@ -3954,13 +3983,17 @@ No expliques nada fuera del JSON.
 """
 
 
-def run_sales_analysis_llm(conversacion_completa, productos_disponibles, contexto_cliente, perfil_cliente):
+def run_sales_analysis_llm(conversacion_completa, productos_disponibles, contexto_cliente, perfil_cliente, phone: str | None = None):
     """
     Ejecuta el análisis comercial previo al planning.
     Devuelve el JSON con sales_analysis.
     """
+    history_block = conversacion_completa
+    if not history_block and phone:
+        history_block = [h.get("content", "") for h in _recent_history_for_prompt(phone, limit=8)]
+
     payload = {
-        "conversacion_completa": conversacion_completa,
+        "conversacion_completa": history_block,
         "productos_disponibles": productos_disponibles,
         "contexto_cliente": contexto_cliente,
         "perfil_cliente": perfil_cliente,
@@ -4038,9 +4071,10 @@ def run_planning_unificado(
             })
 
         history_text = ""
-        if short_history:
+        effective_history = short_history or _recent_history_for_prompt(phone, limit=10)
+        if effective_history:
             # Tomamos solo los últimos mensajes cortos para contexto
-            last_msgs = short_history[-10:]
+            last_msgs = effective_history[-10:]
             parts = []
             for h in last_msgs:
                 role = h.get("role", "user")
@@ -4272,6 +4306,14 @@ def run_customer_output_llm(plan, productos_finales, customer_state, primer_mens
         "customer_state": customer_state,
         "primer_mensaje": primer_mensaje,
     }
+
+    phone = plan.get("phone") or customer_state.get("phone") if isinstance(customer_state, dict) else None
+    history = _recent_history_for_prompt(phone, limit=8) if phone else []
+    if history:
+        payload["recent_history"] = [
+            {"role": h.get("role"), "content": h.get("content")}
+            for h in history
+        ]
 
     messages = [
         {"role": "system", "content": CUSTOMER_OUTPUT_PROMPT},
@@ -4782,6 +4824,16 @@ def build_full_history_prompt(phone: str, user_message: str, catalog_products: l
     return msgs
 
 
+def _recent_history_for_prompt(phone: str, limit: int = 12) -> list:
+    """Recupera historial reciente asegurando contexto consistente para el LLM."""
+
+    history = get_history_since(phone, days=7, limit=limit) if phone else []
+    if history and history[-1].get("role") == "user":
+        # Evitar duplicar el último mensaje del usuario cuando ya viene en el payload
+        history = history[:-1]
+    return history[-limit:]
+
+
 def build_social_reply(phone: str, user_message: str, semantic_signals: dict | None = None) -> str:
     """Return a warm greeting crafted by the LLM; fall back to a smart template if needed."""
 
@@ -4841,9 +4893,7 @@ def build_social_reply(phone: str, user_message: str, semantic_signals: dict | N
 
 def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_context, system_prompt=None):
     try:
-        history = get_history_since(phone, days=1, limit=12)
-        if history and history[-1].get("role") == "user" and history[-1].get("content") == user_message:
-            history = history[:-1]
+        history = _recent_history_for_prompt(phone, limit=12)
         short_history = history[-8:]
         primer_mensaje = len(short_history) == 0
         memory = build_enriched_context(phone, user_message, execution_context.get("intent_details", {}), catalog_products)
@@ -4872,6 +4922,7 @@ def generate_smart_ai_reply_v2(phone, user_message, catalog_products, execution_
             productos_disponibles=productos_permitidos,
             contexto_cliente=memory,
             perfil_cliente=memory.get("perfil_cliente", {}),
+            phone=phone,
         )
 
         # Validación final del análisis comercial
