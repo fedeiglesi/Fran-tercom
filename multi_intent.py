@@ -15,7 +15,12 @@ Intent = dict[str, Any]
 
 
 def parse_multi_intent(
-    llm: Callable[[str], str], message: str, *, history: Sequence[str] | None = None, max_history_chars: int = 6000
+    llm: Callable[[str], str],
+    message: str,
+    *,
+    history: Sequence[str] | None = None,
+    max_history_chars: int = 6000,
+    min_confidence: float = 0.55,
 ) -> Iterable[Intent]:
     """Use the LLM to split a message into intent spans.
 
@@ -30,16 +35,29 @@ def parse_multi_intent(
 
     prompt = f'''
     Sos un analista LLM-first de conversaciones. Detectá TODAS las intenciones en el
-    mensaje sin usar palabras clave. Segmentar en spans exactos del usuario.
-    
+    mensaje (saludos, consulta de productos, pedidos de precio, agregar/quitar del
+    carrito, comparaciones, checkout). No uses palabras clave: identificá spans
+    completos del usuario y listalos por separado cuando conviven varios intents en
+    la misma frase.
+
+    Instrucciones de clasificación:
+    - Siempre devolvé la lista completa de intents detectados, incluso si hay varios
+      en una sola oración (ej: saludo + consulta + agregar + pedir precio).
+    - Cada intent debe incluir: type, span exacto del usuario, confidence 0-1,
+      data con los campos relevantes (query, product, action, quantity, price_query).
+    - No descartes un intent a menos que su confidence sea menor a {min_confidence};
+      si es bajo pero plausible, incluilo igual con la confidence correspondiente.
+    - Tipos soportados: general_chat | product_search | price_question |
+      cart_action | clarification | compare | checkout.
+
     Formato JSON obligatorio:
     {{
       "intents": [
         {{
-          "type": "general_chat|product_search|cart_action|clarification|compare|checkout",
+          "type": "general_chat|product_search|price_question|cart_action|clarification|compare|checkout",
           "span": "<texto_exactamente_original>",
           "confidence": 0.0,
-          "data": {{"query": "", "product": "", "action": "", "quantity": 0}}
+          "data": {{"query": "", "product": "", "action": "", "quantity": 0, "price_query": true}}
         }}
       ]
     }}
@@ -51,7 +69,11 @@ def parse_multi_intent(
 
     llm_response = llm(prompt)
     parsed = json.loads(llm_response)
-    return parsed["intents"]
+    intents = parsed.get("intents", [])
+
+    # Respeta umbrales de confianza pero no descarta silenciosamente todos los intents
+    filtered = [i for i in intents if i.get("confidence", 0) >= min_confidence]
+    return filtered or intents
 
 
 def generate_social_prompt(text: str) -> str:
@@ -80,6 +102,19 @@ def generate_product_prompt(text: str, allowed_products: Any) -> str:
 
     Respondé de forma profesional, clara y mayorista.
     Si faltan datos, pedí SOLO lo necesario.
+
+    Texto del usuario: "{text}"
+    '''
+
+
+def generate_price_prompt(text: str, allowed_products: Any) -> str:
+    return f'''
+    El usuario pregunta por precios o costos de un producto.
+    Restringite a esta lista (allowed_products) proporcionada por el sistema:
+    {json.dumps(allowed_products, ensure_ascii=False)}
+
+    Contestá con precios claros y formato conciso. Si falta contexto,
+    pedí solo la información mínima necesaria para cotizar.
 
     Texto del usuario: "{text}"
     '''
@@ -119,6 +154,7 @@ def orchestrate(
         "clarification": 1,
         "compare": 2,
         "product_search": 3,
+        "price_question": 3,
         "cart_action": 4,
         "checkout": 5,
     }
@@ -141,6 +177,11 @@ def orchestrate(
         if intent_type == "product_search":
             allowed_products = run_allowed_products_search(span)
             respuestas.append(llm(generate_product_prompt(span, allowed_products)))
+            continue
+
+        if intent_type == "price_question":
+            allowed_products = run_allowed_products_search(span)
+            respuestas.append(llm(generate_price_prompt(span, allowed_products)))
             continue
 
         if intent_type == "cart_action":

@@ -31,6 +31,17 @@ def orquestar_v317(message, df, catalog_centroid, schema, embedding_fn=None, max
     attempts = 0
     current_query = message
 
+    multi = clasif.get("multi_intent") or []
+    # Si hay múltiples intents, usamos el span de búsqueda de mayor confianza
+    # como consulta primaria sin descartar el resto.
+    if multi:
+        product_intents = [m for m in multi if m.get("intent") in {"product_search", "busca_producto"}]
+        if product_intents:
+            best = max(product_intents, key=lambda x: x.get("confidence", 0))
+            if best.get("confidence", 0) >= 0.4 and best.get("span"):
+                current_query = best["span"]
+                clasif["primary_query_from_multi_intent"] = best
+
     while True:
         # --- FASE 2 ---
         search_output = fase2_hybrid_search(current_query, df, embedding_fn=embedding_fn)
