@@ -22,6 +22,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from multi_intent import (
     generate_clarification_prompt,
+    generate_price_prompt,
     generate_product_prompt,
     generate_social_prompt,
     orchestrate,
@@ -138,6 +139,42 @@ def partial_info_llm():
     return _llm
 
 
+@pytest.fixture
+def greeting_query_price_llm():
+    """LLM mock que combina saludo + producto + carrito + precio."""
+
+    def _llm(prompt: str) -> str:
+        if "intents" in prompt or "intenciones" in prompt.lower():
+            return json.dumps(
+                {
+                    "intents": [
+                        {"type": "general_chat", "span": "hola buen día", "confidence": 0.92, "data": {}},
+                        {
+                            "type": "product_search",
+                            "span": "quiero pastillas de freno",
+                            "confidence": 0.9,
+                            "data": {"query": "pastillas"},
+                        },
+                        {
+                            "type": "cart_action",
+                            "span": "agregalas al carrito",
+                            "confidence": 0.83,
+                            "data": {"action": "add"},
+                        },
+                        {
+                            "type": "price_question",
+                            "span": "cuánto cuestan?",
+                            "confidence": 0.8,
+                            "data": {"price_query": True},
+                        },
+                    ]
+                }
+            )
+        return f"LLM({prompt.strip()})"
+
+    return _llm
+
+
 def test_orchestrate_handles_six_intents(five_plus_intents_llm):
     """Test de orquestación con 6 intenciones en un mensaje."""
     replies = orchestrate(
@@ -193,6 +230,27 @@ def test_parse_multi_intent_with_partial_info(partial_info_llm):
     assert "cilindrada" in intents[2]["data"]
 
 
+def test_parse_multi_intent_respects_confidence_threshold():
+    """Debe descartar intents con confidence muy bajo."""
+
+    def low_conf_llm(prompt: str) -> str:
+        if "intents" in prompt or "intenciones" in prompt.lower():
+            return json.dumps(
+                {
+                    "intents": [
+                        {"type": "general_chat", "span": "hola", "confidence": 0.2, "data": {}},
+                        {"type": "product_search", "span": "pastillas", "confidence": 0.9, "data": {}},
+                    ]
+                }
+            )
+        return "LLM(response)"
+
+    intents = list(parse_multi_intent(low_conf_llm, "hola pastillas", min_confidence=0.5))
+
+    assert len(intents) == 1
+    assert intents[0]["type"] == "product_search"
+
+
 def test_orchestrate_respects_priority_with_many_intents(five_plus_intents_llm):
     """Test de que la priorización se mantiene incluso con muchas intenciones."""
     replies = orchestrate(
@@ -216,6 +274,27 @@ def test_orchestrate_respects_priority_with_many_intents(five_plus_intents_llm):
     # Clarification debe venir antes que cart_action
     if clarification_idx != -1 and cart_idx != -1:
         assert clarification_idx < cart_idx
+
+
+def test_orchestrate_handles_greeting_product_price_and_cart(greeting_query_price_llm):
+    replies = orchestrate(
+        greeting_query_price_llm,
+        "hola buen día, quiero pastillas de freno, agregalas al carrito y cuánto cuestan?",
+        run_allowed_products_search=lambda span: ["p1", "p2"],
+        aplicar_accion_carrito=lambda text: f"cart({text})",
+    )
+
+    # Prioridad mantiene saludo y consulta antes del carrito
+    social_idx = replies.find("modo de charla social")
+    product_idx = replies.find("consultando sobre productos")
+    price_idx = replies.lower().find("precio")
+    cart_idx = replies.find("cart(")
+
+    assert social_idx != -1
+    assert product_idx != -1
+    assert cart_idx != -1
+    assert social_idx < product_idx < cart_idx
+    assert price_idx == -1 or product_idx <= price_idx <= cart_idx
 
 
 def test_orchestrate_with_duplicate_intent_types():

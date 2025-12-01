@@ -168,6 +168,8 @@ Detectá follow-ups y acciones de carrito aunque sean implícitas ("me das dos?"
 Para follow-ups, marcá is_follow_up=true y mantené product_reference con la mención textual.
 Si ves cantidades, completa quantity con número entero.
 Para acciones de carrito usa action_type=add|remove|set|clear|info.
+Si hay múltiples intenciones simultáneas (saludo + consulta + precio + carrito), listalas en multi_intent
+con su span exacto y confidence independiente; no descartes intents a menos que su confidence < 0.4.
 Devolvé JSON válido usando el schema provisto por el sistema.
 Mensaje del usuario:
 {message}
