@@ -2931,7 +2931,17 @@ def get_v317_resources():
     with _v317_lock:
         catalog, _, _, _ = get_catalog_and_index()
 
-        if catalog and _v317_cache["catalog"] is None:
+        if not catalog:
+            logger.warning("[v3.17][resources] Catálogo no disponible; se deshabilita temporalmente v3.17")
+            return None, None, None
+
+        if len(catalog) < 10:
+            logger.warning(
+                "[v3.17][resources] Catálogo cargado pero con pocos productos (%s).",
+                len(catalog),
+            )
+
+        if _v317_cache["catalog"] is None:
             _v317_cache["catalog"] = catalog
 
         if _v317_cache["catalog"] and _v317_cache["centroid"] is None:
@@ -2940,7 +2950,14 @@ def get_v317_resources():
                 for row in _v317_cache["catalog"]
                 if (row.get("descripcion_normalizada") or row.get("descripcion"))
             ]
-            _v317_cache["centroid"] = build_catalog_centroid(descriptions)
+            try:
+                _v317_cache["centroid"] = build_catalog_centroid(descriptions)
+            except Exception as exc:  # pragma: no cover - log only
+                logger.exception("[v3.17][resources] Error generando centroid: %s", exc)
+                _v317_cache["centroid"] = None
+
+            if _v317_cache["centroid"] is None:
+                logger.warning("[v3.17][resources] Centroid no generado; router usará fallback de keywords")
 
         if _v317_cache["catalog"] and _v317_cache["schema"] is None:
             _v317_cache["schema"] = build_classifier_schema(_v317_cache["catalog"])

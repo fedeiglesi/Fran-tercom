@@ -67,9 +67,29 @@ def test_router_without_centroid_defaults_to_technical():
     routed_social = router_fase0_dynamic("hola", catalog_centroid=None)
 
     assert routed_tech["route"] == "technical"
-    assert routed_tech["reason"] == "no_centroid"
+    assert routed_tech.get("fallback") is True
+    assert routed_tech["reason"] in {"fallback_keywords", "no_centroid"}
     assert routed_social["route"] == "social"
+    assert routed_social.get("fallback") is True
     assert routed_social["reason"] in {"low_entropy_no_centroid", "short_vowel_token"}
+
+
+def test_router_without_centroid_uses_keyword_fallback():
+    routed_short_tech = router_fase0_dynamic("filtro aceite", catalog_centroid=None)
+    routed_short_social = router_fase0_dynamic("buenas", catalog_centroid=None)
+
+    assert routed_short_tech["route"] == "technical"
+    assert routed_short_tech["reason"] == "fallback_keywords"
+    assert routed_short_tech.get("fallback") is True
+    assert routed_short_social["route"] == "social"
+
+
+def test_router_without_centroid_uses_brand_fallback():
+    routed_brand = router_fase0_dynamic("bujia honda", catalog_centroid=None)
+
+    assert routed_brand["route"] == "technical"
+    assert routed_brand["reason"] in {"fallback_brand", "fallback_keywords"}
+    assert routed_brand.get("fallback") is True
 
 
 def test_classifier_schema_and_validation(monkeypatch, mini_catalog):
