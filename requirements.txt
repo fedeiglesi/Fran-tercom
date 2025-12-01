@@ -6,7 +6,8 @@ gunicorn==21.2.0
 twilio==9.0.4
 
 # OpenAI
-openai==0.28.1
+# Se requiere la nueva librería oficial (>=1.x) para usar la clase OpenAI
+openai==1.52.0
 jsonschema==4.23.0
 httpx==0.27.0
 
