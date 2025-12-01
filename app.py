@@ -2385,12 +2385,26 @@ def create_order(phone, customer_name, customer_address, items, total_ars):
 # CARRITO
 # ------------------------------------------------------------------
 def cart_add(phone, code, qty, name, price_ars, price_usd):
+    """Upsert un artículo en el carrito.
+
+    Args:
+        phone: Teléfono del usuario (clave de sesión de carrito).
+        code: Código TERCOM del producto.
+        qty: Cantidad a sumar (número positivo).
+        name: Nombre descriptivo para mostrar.
+        price_ars: Precio en ARS (Decimal o str convertible).
+        price_usd: Precio en USD (Decimal o str convertible).
+
+    Returns:
+        bool: True si se insertó/actualizó correctamente, False en caso de error
+        o producto inexistente.
+    """
     if not phone or not code:
         return False
     try:
         qty = max(1, min(int(qty or 1), 1000))
-        price_ars = price_ars.quantize(Decimal("0.01"))
-        price_usd = price_usd.quantize(Decimal("0.01"))
+        price_ars = to_decimal_money(price_ars).quantize(Decimal("0.01"))
+        price_usd = to_decimal_money(price_usd).quantize(Decimal("0.01"))
 
         catalog, _idx, _, _ = get_catalog_and_index()
         prod = next((p for p in catalog if p["code"] == code), None)
@@ -2424,6 +2438,7 @@ def cart_add(phone, code, qty, name, price_ars, price_usd):
 
 
 def cart_get(phone, max_age_hours=168):
+    """Devuelve un snapshot del carrito en formato [(code, qty, name, price_ars)]."""
     if not phone:
         return []
     try:
@@ -3668,6 +3683,16 @@ def match_product_from_list(message, products, key="name"):
 
 
 def handle_cart_action(phone, message):
+    """Interpreta una orden de carrito y devuelve un mensaje listo para el usuario.
+
+    Entrada: phone (session del cliente) y el texto libre del usuario. Se apoya en
+    el snapshot de carrito actual y en la última búsqueda guardada para resolver
+    referencias a productos.
+
+    Salida: string en castellano con la acción aplicada y el estado resultante.
+    Efectos: actualiza tablas `carts` vía cart_update_qty/cart_add y mantiene
+    consistencia con `last_search`.
+    """
     msg_norm = strip_accents((message or "")).lower()
     if not msg_norm:
         return "Necesito que me indiques qué producto toco del carrito."
@@ -3688,7 +3713,7 @@ def handle_cart_action(phone, message):
     add_keywords = ("agrega", "agregá", "agregame", "agregalo", "sumame", "sumalo", "sumales", "mandame", "cargame", "poneme")
     increase_keywords = ("subi", "subile", "subilo", "aumenta", "aumentale", "sumale")
     decrease_keywords = ("baja", "bajame", "bajale", "restale", "sacale")
-    set_keywords = ("dejalo", "dejala", "dejame", "ponelo", "ponela", "ponele")
+    set_keywords = ("dejalo", "dejala", "dejame", "deja", "deja la", "deja lo", "deja en", "ponelo", "ponela", "ponele")
 
     action = "unknown"
     if any(k in msg_norm for k in remove_keywords):
@@ -3732,7 +3757,8 @@ def handle_cart_action(phone, message):
         if not candidate:
             return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
 
-        qty_to_add = extract_number_from_text(message) or 1
+        number_in_message = extract_number_from_text(message)
+        qty_to_add = number_in_message or 1
         qty_to_add = max(1, qty_to_add)
         price_ars = candidate.get("price_ars")
         if isinstance(price_ars, Decimal):
@@ -3745,6 +3771,17 @@ def handle_cart_action(phone, message):
                 price_usd = (price_dec / get_exchange_rate()).quantize(Decimal("0.01"))
             except Exception:
                 price_usd = Decimal("0")
+
+        existing_item = next((item for item in cart_snapshot if item["code"] == candidate.get("code")), None)
+        if existing_item:
+            if number_in_message is not None or explicit_qty:
+                cart_update_qty(phone, existing_item["code"], qty_to_add)
+                return (
+                    f"Actualicé {existing_item['name']} a {qty_to_add}u en tu carrito."
+                )
+            new_qty = existing_item["qty"] + qty_to_add
+            cart_update_qty(phone, existing_item["code"], new_qty)
+            return f"Sumé {qty_to_add}u más de {existing_item['name']}. Total: {new_qty}u."
 
         ok = cart_add(
             phone,
