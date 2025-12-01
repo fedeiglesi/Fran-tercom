@@ -149,9 +149,9 @@ Mensaje del usuario:
 
     should_stream = stream or len(message) > 1500
 
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+        input=prompt,
         response_format={"type": "json_schema", "json_schema": schema},
         temperature=0,
         stream=should_stream,
@@ -160,12 +160,21 @@ Mensaje del usuario:
 
     if should_stream:
         chunks = []
-        for chunk in response:
-            delta = chunk.choices[0].delta.content or ""
-            chunks.append(delta)
-        content_text = "".join(chunks)
+        final_text = None
+        for event in response:
+            delta = getattr(event, "output_text_delta", None) or ""
+            if delta:
+                chunks.append(delta)
+
+            event_output = getattr(event, "output_text", None)
+            if event_output:
+                final_text = event_output
+
+        content_text = "".join(chunks) if chunks else final_text
+        if content_text is None:
+            content_text = getattr(response, "output_text", None)
     else:
-        content_text = response.choices[0].message.content
+        content_text = response.output_text
 
     content = json.loads(content_text)
     # Validación JSON-first
