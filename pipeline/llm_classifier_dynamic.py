@@ -129,6 +129,32 @@ def build_classifier_schema(df):
 
     return schema
 
+
+def _get_output_text(obj):
+    text = getattr(obj, "output_text", None)
+    if text:
+        return text
+
+    output = getattr(obj, "output", None)
+    if output:
+        first_output = output[0] if isinstance(output, (list, tuple)) and output else None
+        if first_output:
+            content = getattr(first_output, "content", None) or (
+                first_output.get("content") if isinstance(first_output, dict) else None
+            )
+            if content:
+                first_content = content[0] if isinstance(content, (list, tuple)) and content else None
+                if first_content:
+                    text_block = getattr(first_content, "text", None) or (
+                        first_content.get("text") if isinstance(first_content, dict) else None
+                    )
+                    if text_block:
+                        return getattr(text_block, "value", None) or (
+                            text_block.get("value") if isinstance(text_block, dict) else None
+                        )
+
+    return None
+
 def fase1_llm_classifier_dynamic(message, df, schema, *, stream: bool = False):
     """
     Clasificación sin hardcodeos, respetando enums dinámicos.
@@ -149,9 +175,9 @@ Mensaje del usuario:
 
     should_stream = stream or len(message) > 1500
 
-    response = client.chat.completions.create(
+    response = client.responses.create(
         model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+        input=prompt,
         response_format={"type": "json_schema", "json_schema": schema},
         temperature=0,
         stream=should_stream,
@@ -160,12 +186,21 @@ Mensaje del usuario:
 
     if should_stream:
         chunks = []
-        for chunk in response:
-            delta = chunk.choices[0].delta.content or ""
-            chunks.append(delta)
-        content_text = "".join(chunks)
+        last_event = None
+        for event in response:
+            last_event = event
+            delta = getattr(event, "output_text_delta", None)
+            if delta:
+                chunks.append(delta)
+
+        content_text = "".join(chunks) if chunks else _get_output_text(last_event)
+        if content_text is None:
+            content_text = _get_output_text(response)
     else:
-        content_text = response.choices[0].message.content
+        content_text = _get_output_text(response)
+
+    if content_text is None:
+        raise ValueError("No output_text received from LLM response")
 
     content = json.loads(content_text)
     # Validación JSON-first
