@@ -4,9 +4,11 @@ import sys
 from itertools import islice
 from pathlib import Path
 
-import pytest
-
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+import app
+
+import pytest
 
 from multi_intent import orchestrate
 
@@ -60,6 +62,36 @@ def complex_llm():
         return f"LLM::{prompt.strip()}"
 
     return _llm
+
+
+@pytest.fixture
+def typo_llm():
+    def _llm(prompt: str) -> str:
+        if "\"intents\"" in prompt:
+            return json.dumps(
+                {
+                    "intents": [
+                        {
+                            "type": "product_search",
+                            "span": "pastilas freno tian 150",
+                            "confidence": 0.81,
+                            "data": {"query": "pastillas freno titan"},
+                        }
+                    ]
+                }
+            )
+        return f"LLM::{prompt.strip()}"
+
+    return _llm
+
+
+@pytest.fixture
+def reranker_products():
+    return [
+        {"code": "R1", "name": "Pastillas freno delantero titan", "_score": 0.81},
+        {"code": "R2", "name": "Pastillas freno tian 150 reforzadas", "_score": 0.93},
+        {"code": "R3", "name": "Kit frenos alternativo", "_score": 0.41},
+    ]
 
 
 def _search_catalog(span: str, rows):
@@ -122,3 +154,19 @@ def test_multiple_product_spans_keep_order(complex_llm, catalog_sample, monkeypa
     second_product_idx = replies.rindex("El usuario está consultando sobre productos")
     assert first_product_idx < second_product_idx
     assert "mayorista" in replies.lower()
+
+
+def test_reranker_limits_and_orders_allowed_products(typo_llm, reranker_products, monkeypatch):
+    monkeypatch.setattr(app, "MAX_PRODUCTS_FOR_LLM", 2)
+    monkeypatch.setattr(app, "PRODUCTS_PER_CHUNK", 2)
+
+    replies = orchestrate(
+        typo_llm,
+        "pastilas freno tian 150",
+        run_allowed_products_search=lambda span: app._slice_products_for_llm(reranker_products)[0],
+        aplicar_accion_carrito=lambda text: f"cart::{text}",
+    )
+
+    assert "R2" in replies
+    assert "R1" in replies
+    assert "R3" not in replies
