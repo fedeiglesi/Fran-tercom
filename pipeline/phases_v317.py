@@ -2,10 +2,12 @@ import json
 import os
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import faiss
 import numpy as np
+from rapidfuzz import fuzz
 
 try:
     from rank_bm25 import BM25Okapi
@@ -31,6 +33,9 @@ except ImportError:
                 raise ValueError(f"Missing required field: {field}")
 
 
+EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+
 def _normalize_text(text: str) -> str:
     text = (text or "").lower().strip()
     text = unicodedata.normalize("NFD", text)
@@ -44,7 +49,7 @@ def _tokenize(text: str) -> List[str]:
 
 
 def _default_embedding_fn(texts: List[str]) -> List[np.ndarray]:
-    """Try OpenAI text-embedding-3-large first, then fall back locally."""
+    """Generate normalized embeddings using the configured OpenAI model with fallbacks."""
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if api_key:
@@ -53,7 +58,7 @@ def _default_embedding_fn(texts: List[str]) -> List[np.ndarray]:
 
             client = OpenAI(api_key=api_key)
             response = client.embeddings.create(
-                model="text-embedding-3-large",
+                model=EMBEDDING_MODEL,
                 input=texts,
             )
             vectors = [np.array(item.embedding, dtype="float32") for item in response.data]
@@ -305,6 +310,22 @@ def _build_bm25_index(catalog: List[Dict[str, Any]]) -> Tuple[Optional[BM25Okapi
     return BM25Okapi(corpus_tokens), corpus_tokens
 
 
+@dataclass
+class HybridSearchConfig:
+    top_k: int = 15
+    component_k: int = 50
+    rrf_k: float = 60.0
+    bm25_weight: float = 1.0
+    faiss_weight: float = 1.0
+    fuzzy_weight: float = 0.6
+    bm25_min_ratio: float = 0.25
+    faiss_min_score: float = 0.35
+    fuzzy_min_ratio: float = 65.0
+    fuzzy_max_ratio: float = 90.0
+    reranker_max_candidates: int = 10
+    reranker: Optional[Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
+
+
 def _build_faiss_index(catalog: List[Dict[str, Any]], embedding_fn: Callable[[List[str]], List[np.ndarray]]):
     texts = [
         " ".join(
@@ -329,9 +350,22 @@ def _build_faiss_index(catalog: List[Dict[str, Any]], embedding_fn: Callable[[Li
     return index, matrix
 
 
-def fase2_hybrid_search(query: str, df: Any, embedding_fn: Optional[Callable[[List[str]], List[np.ndarray]]] = None, top_k: int = 15):
+def _adaptive_fuzzy_threshold(query_tokens: List[str], config: HybridSearchConfig) -> float:
+    base = 55 + (len(query_tokens) * 3)
+    return max(config.fuzzy_min_ratio, min(config.fuzzy_max_ratio, float(base)))
+
+
+def fase2_hybrid_search(
+    query: str,
+    df: Any,
+    embedding_fn: Optional[Callable[[List[str]], List[np.ndarray]]] = None,
+    top_k: int = 15,
+    config: Optional[HybridSearchConfig] = None,
+):
     catalog = _prepare_catalog(df)
     embedding_fn = embedding_fn or _default_embedding_fn
+    config = config or HybridSearchConfig(top_k=top_k, component_k=max(top_k * 3, 30))
+    component_k = max(config.component_k, config.top_k)
 
     bm25_index, corpus_tokens = _build_bm25_index(catalog)
     faiss_index, _ = _build_faiss_index(catalog, embedding_fn) if catalog else (None, [])
@@ -344,26 +378,108 @@ def fase2_hybrid_search(query: str, df: Any, embedding_fn: Optional[Callable[[Li
     )
 
     faiss_scores: List[float] = []
+    faiss_max = 0.0
     if faiss_index:
         query_vec = embedding_fn([query])
         if query_vec:
             vector = np.array(query_vec[0], dtype="float32").reshape(1, -1)
             faiss.normalize_L2(vector)
-            sims, _ = faiss_index.search(vector, len(catalog))
-            faiss_scores = sims.flatten().tolist()
+            sims, idxs = faiss_index.search(vector, len(catalog))
+            faiss_scores = [0.0 for _ in catalog]
+            for score, idx in zip(sims[0].tolist(), idxs[0].tolist()):
+                if 0 <= idx < len(faiss_scores):
+                    faiss_scores[idx] = score
+            faiss_max = float(max(faiss_scores) if len(faiss_scores) else 0.0)
     if not faiss_scores:
         faiss_scores = [0.0 for _ in catalog]
 
-    ranks = []
-    for idx in range(len(catalog)):
-        rank_bm25 = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True).index(idx) + 1
-        rank_faiss = sorted(range(len(faiss_scores)), key=lambda i: faiss_scores[i], reverse=True).index(idx) + 1
-        fused = (1 / (60 + rank_bm25)) + (1 / (60 + rank_faiss))
-        ranks.append((idx, fused))
+    bm25_sorted = sorted(enumerate(bm25_scores), key=lambda x: x[1], reverse=True)
+    bm25_top = bm25_sorted[:component_k]
+    bm25_max = float(bm25_top[0][1]) if bm25_top else 0.0
+    bm25_min_allowed = bm25_max * config.bm25_min_ratio if bm25_max > 0 else float("inf")
+    bm25_candidates = {i for i, score in bm25_top if score >= bm25_min_allowed}
+
+    faiss_sorted = sorted(enumerate(faiss_scores), key=lambda x: x[1], reverse=True)
+    faiss_top = [(i, score) for i, score in faiss_sorted[:component_k] if score >= config.faiss_min_score]
+    faiss_candidates = {i for i, _ in faiss_top}
+
+    fuzzy_threshold = _adaptive_fuzzy_threshold(query_tokens, config)
+    fuzzy_scores: List[float] = []
+    for row in catalog:
+        text = _normalize_text(
+            " ".join(
+                [
+                    row.get("descripcion_normalizada") or row.get("descripcion") or "",
+                    row.get("sinonimos") or "",
+                    row.get("familia_nombre") or "",
+                ]
+            )
+        )
+        try:
+            fuzzy_ratio = float(fuzz.partial_ratio(" ".join(query_tokens), text))
+        except Exception:
+            fuzzy_ratio = 0.0
+        fuzzy_scores.append(fuzzy_ratio)
+    fuzzy_sorted = sorted(enumerate(fuzzy_scores), key=lambda x: x[1], reverse=True)
+    fuzzy_top = [(i, score) for i, score in fuzzy_sorted[:component_k] if score >= fuzzy_threshold]
+    fuzzy_candidates = {i for i, _ in fuzzy_top}
+
+    candidate_pool = bm25_candidates | faiss_candidates | fuzzy_candidates
+    if not candidate_pool:
+        candidate_pool = set(range(len(catalog)))
+
+    def _rank_lookup(sorted_list: List[Tuple[int, float]]) -> Dict[int, int]:
+        return {idx: position + 1 for position, (idx, _) in enumerate(sorted_list)}
+
+    bm25_ranks = _rank_lookup(bm25_sorted)
+    faiss_ranks = _rank_lookup(faiss_sorted)
+    fuzzy_ranks = _rank_lookup(fuzzy_sorted)
+
+    faiss_min = float(min(faiss_scores)) if faiss_scores else 0.0
+    faiss_range = faiss_max - faiss_min
+
+    ranks: List[Tuple[int, float, Dict[str, float]]] = []
+    for idx in candidate_pool:
+        rank_bm25 = bm25_ranks.get(idx, len(catalog) + 1)
+        rank_faiss = faiss_ranks.get(idx, len(catalog) + 1)
+        rank_fuzzy = fuzzy_ranks.get(idx, len(catalog) + 1)
+
+        bm25_norm = (bm25_scores[idx] / bm25_max) if bm25_max > 0 else 0.0
+        faiss_norm = (
+            (faiss_scores[idx] - faiss_min) / faiss_range
+            if faiss_range > 1e-6
+            else 0.0
+        )
+        fuzzy_norm = fuzzy_scores[idx] / 100.0
+
+        rrf_score = (
+            (config.bm25_weight / (config.rrf_k + rank_bm25))
+            + (config.faiss_weight / (config.rrf_k + rank_faiss))
+            + (config.fuzzy_weight / (config.rrf_k + rank_fuzzy))
+        )
+        calibrated = rrf_score + 0.25 * (
+            (config.bm25_weight * bm25_norm)
+            + (config.faiss_weight * faiss_norm)
+            + (config.fuzzy_weight * fuzzy_norm)
+        )
+
+        ranks.append(
+            (
+                idx,
+                calibrated,
+                {
+                    "rrf_score": rrf_score,
+                    "bm25_norm": bm25_norm,
+                    "faiss_norm": faiss_norm,
+                    "fuzzy_norm": fuzzy_norm,
+                },
+            )
+        )
 
     ranks.sort(key=lambda x: x[1], reverse=True)
-    results: List[Dict[str, Any]] = []
-    for hybrid_rank, (idx, _) in enumerate(ranks[:top_k], start=1):
+    rerank_limit = min(len(ranks), config.reranker_max_candidates)
+
+    def _candidate_from_rank(hybrid_rank: int, idx: int, combined_score: float, breakdown: Dict[str, float]):
         row = catalog[idx]
         price_ars, price_usd = _extract_prices(row)
         catalog_data = {
@@ -373,20 +489,36 @@ def fase2_hybrid_search(query: str, df: Any, embedding_fn: Optional[Callable[[Li
             "cilindrada": row.get("cilindrada") or None,
             "compatibilidad_declarada": row.get("compatibilidad_declarada") if "compatibilidad_declarada" in row else None,
         }
-        results.append(
-            {
-                "product_id": str(row.get("codigo") or row.get("id") or str(idx)),
-                "name": str(row.get("descripcion") or row.get("descripcion_normalizada") or ""),
-                "price_ars": price_ars,
-                "price_usd": price_usd,
-                "bm25_score": float(bm25_scores[idx]) if bm25_scores else 0.0,
-                "faiss_score": float(faiss_scores[idx]) if faiss_scores else 0.0,
-                "hybrid_rank": hybrid_rank,
-                "catalog_data": catalog_data,
-            }
-        )
+        return {
+            "product_id": str(row.get("codigo") or row.get("id") or str(idx)),
+            "name": str(row.get("descripcion") or row.get("descripcion_normalizada") or ""),
+            "price_ars": price_ars,
+            "price_usd": price_usd,
+            "bm25_score": float(bm25_scores[idx]) if bm25_scores else 0.0,
+            "faiss_score": float(faiss_scores[idx]) if faiss_scores else 0.0,
+            "fuzzy_score": float(fuzzy_scores[idx]) if fuzzy_scores else 0.0,
+            "hybrid_rank": hybrid_rank,
+            "combined_score": float(combined_score),
+            "score_breakdown": breakdown,
+            "catalog_data": catalog_data,
+        }
 
-    payload = {"phase": "search", "results": results}
+    pre_results = [
+        _candidate_from_rank(hybrid_rank, idx, combined, meta)
+        for hybrid_rank, (idx, combined, meta) in enumerate(ranks[: config.top_k], start=1)
+    ]
+
+    results = pre_results
+    if config.reranker and pre_results:
+        try:
+            reranked = config.reranker(query, pre_results[:rerank_limit])
+            order = {c["product_id"]: pos for pos, c in enumerate(reranked)} if isinstance(reranked, list) else {}
+            if order:
+                results = sorted(pre_results, key=lambda c: order.get(c["product_id"], len(order) + c["hybrid_rank"]))
+        except Exception:
+            results = pre_results
+
+    payload = {"phase": "search", "results": results[: config.top_k]}
     validate(instance=payload, schema=PHASE2_SCHEMA)
     return payload
 
