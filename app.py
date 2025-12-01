@@ -2797,13 +2797,13 @@ def generate_embeddings_with_cache(texts):
             for i in range(0, len(texts_to_embed), batch):
                 chunk = texts_to_embed[i:i + batch]
 
-                        for retry in range(max_retries):
-                            try:
-                                with openai_sem:
-                                    resp = client.embeddings.create(
-                                        input=chunk,
-                                        model=EMBEDDING_MODEL,
-                                    )
+                for retry in range(max_retries):
+                    try:
+                        with openai_sem:
+                            resp = client.embeddings.create(
+                                input=chunk,
+                                model=EMBEDDING_MODEL,
+                            )
                         chunk_vectors = [d.embedding for d in resp.data]
 
                         for text, vec in zip(chunk, chunk_vectors):
@@ -2814,7 +2814,9 @@ def generate_embeddings_with_cache(texts):
                     except RateLimitError as e:
                         if retry < max_retries - 1:
                             wait_time = min((2 ** retry) * random.uniform(2, 5), 60)
-                            logger.warning(f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s... (intento {retry+1}/{max_retries})")
+                            logger.warning(
+                                f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s... (intento {retry+1}/{max_retries})"
+                            )
                             time.sleep(wait_time)
                         else:
                             logger.error(f"RateLimitError persistente: {e}")
