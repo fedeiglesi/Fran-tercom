@@ -40,10 +40,48 @@ from openai import OpenAI, RateLimitError
 from rapidfuzz import process, fuzz
 import faiss
 import numpy as np
-from rank_bm25 import BM25Okapi
-from dotenv import load_dotenv
-from cachetools import LRUCache
-from jsonschema import validate, ValidationError
+try:  # pragma: no cover - fallback para entornos sin rank_bm25
+    from rank_bm25 import BM25Okapi
+except ImportError:  # pragma: no cover - fallback liviano
+    class BM25Okapi:  # type: ignore
+        def __init__(self, corpus):
+            self.corpus = corpus or []
+
+        def get_scores(self, tokens):
+            token_set = set(tokens or [])
+            scores = []
+            for doc in self.corpus:
+                scores.append(float(sum(1 for t in doc if t in token_set)))
+            return np.array(scores, dtype=float)
+try:  # pragma: no cover - fallback cuando dotenv no está disponible
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - fallback liviano
+    def load_dotenv(*args, **kwargs):
+        return False
+try:  # pragma: no cover - fallback cuando cachetools no está disponible
+    from cachetools import LRUCache
+except ImportError:  # pragma: no cover - fallback sencillo
+    class LRUCache(dict):  # type: ignore
+        def __init__(self, maxsize=128):
+            super().__init__()
+            self.maxsize = maxsize
+
+        def __setitem__(self, key, value):
+            if len(self) >= self.maxsize:
+                first_key = next(iter(self))
+                super().pop(first_key, None)
+            super().__setitem__(key, value)
+try:  # pragma: no cover - fallback cuando jsonschema no está disponible
+    from jsonschema import validate, ValidationError
+except ImportError:  # pragma: no cover - fallback liviano
+    class ValidationError(Exception):
+        ...
+
+    def validate(instance, schema):
+        required = schema.get("required", [])
+        for field in required:
+            if field not in instance:
+                raise ValidationError(f"Missing required field: {field}")
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
@@ -6228,28 +6266,38 @@ def orquestar_fran_v317(mensaje_usuario: str, phone: str) -> str:
         save_message(phone, reply, "assistant")
         return reply
 
-    output = orquestar_v317(user_message, catalog, centroid, schema)
-    final_response = output.get("final_response") or {}
-    reply = final_response.get("message") or "No pude procesar tu pedido, ¿podés reformularlo?"
+    try:
+        output = orquestar_v317(user_message, catalog, centroid, schema)
+        final_response = output.get("final_response") or {}
+        reply = final_response.get("message") or "No pude procesar tu pedido, ¿podés reformularlo?"
 
-    trace = output.get("trace") or []
-    classifier_phase = next(
-        (step for step in trace if isinstance(step, dict) and step.get("phase") == "classifier"),
-        {},
-    )
-    intent = classifier_phase.get("intent") or "otros"
-    search_phase = next(
-        (step for step in trace if isinstance(step, dict) and step.get("phase") == "search"),
-        {},
-    )
-    products_count = len(search_phase.get("results") or [])
+        trace = output.get("trace") or []
+        classifier_phase = next(
+            (step for step in trace if isinstance(step, dict) and step.get("phase") == "classifier"),
+            {},
+        )
+        intent = classifier_phase.get("intent") or "otros"
+        search_phase = next(
+            (step for step in trace if isinstance(step, dict) and step.get("phase") == "search"),
+            {},
+        )
+        products_count = len(search_phase.get("results") or [])
 
-    save_message(phone, reply, "assistant")
-    log_interaction(phone, user_message, intent, products_count)
-    log_performance(phone, intent, time.time() - start_time, products_count)
-    update_sales_phase_from_intent(phone, intent)
+        save_message(phone, reply, "assistant")
+        log_interaction(phone, user_message, intent, products_count)
+        log_performance(phone, intent, time.time() - start_time, products_count)
+        update_sales_phase_from_intent(phone, intent)
 
-    return reply
+        return reply
+    except Exception as exc:  # pragma: no cover - fallback vital en producción
+        logger.exception("[v3.17] Error crítico, activando fallback a v3.16: %s", exc)
+        try:
+            return orquestar_fran_v316(user_message, phone)
+        except Exception as fallback_exc:  # pragma: no cover - double safety
+            logger.exception("[v3.16] Fallback también falló: %s", fallback_exc)
+            reply = "Uy, tuve un problema técnico. Probá de nuevo en un ratito."
+            save_message(phone, reply, "assistant")
+            return reply
 
 # =========================================================
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
