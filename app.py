@@ -5117,6 +5117,33 @@ def format_multi_search_response(results: dict) -> str | None:
 
     return None
 
+
+def _persist_search_snapshot(phone: str, products: list, query: str):
+    """Guarda la última búsqueda y el historial cuando devolvemos listas directas."""
+    if not phone:
+        return
+
+    snapshot = []
+    for p in products[:MAX_ITEMS]:
+        code = p.get("code")
+        name = p.get("name", "")
+        if not code and not name:
+            continue
+
+        snapshot.append({
+            "code": code,
+            "name": name,
+            "price_ars": p.get("price_ars"),
+            "price_usd": p.get("price_usd"),
+            "qty": int(p.get("qty", 1) or 1),
+        })
+
+    if not snapshot:
+        return
+
+    save_last_search(phone, snapshot, query)
+    save_to_search_history(phone, snapshot, query)
+
 # =========================================================
 # ORQUESTADOR FRAN – VERSIÓN 3.15 (templates estructurados)
 # =========================================================
@@ -5181,6 +5208,11 @@ def orquestar_fran_v315(mensaje_usuario: str, phone: str) -> str:
 
         reply = format_multi_search_response(allowed_payload)
         if reply:
+            _persist_search_snapshot(
+                phone,
+                allowed_payload.get("final_candidates") or [],
+                normalized_query,
+            )
             save_message(phone, reply, "assistant")
             return reply
 
@@ -6363,6 +6395,11 @@ def orquestar_fran(mensaje_usuario, phone):
         execution_context["products_found"] = total_found or len(semantic_results.get("final_candidates") or [])
         reply = format_multi_search_response(semantic_results)
         if reply:
+            _persist_search_snapshot(
+                phone,
+                semantic_results.get("final_candidates") or [],
+                query_for_search,
+            )
             save_message(phone, reply, "assistant")
             log_interaction(phone, user_message, "multi_search", total_found)
             log_performance(phone, "multi_search", time.time()-start_time, total_found)
