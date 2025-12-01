@@ -2769,6 +2769,7 @@ def load_faiss_index():
 def generate_embeddings_with_cache(texts):
     with _embeddings_cache_lock:
         cache = {}
+
         if os.path.exists(EMBEDDINGS_CACHE_PATH):
             try:
                 with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
@@ -2783,10 +2784,7 @@ def generate_embeddings_with_cache(texts):
                 except Exception as e2:
                     logger.warning(f"No se pudo borrar cache corrupto: {e2}")
 
-        texts_to_embed = []
-        for idx, text in enumerate(texts):
-            if text not in cache:
-                texts_to_embed.append(text)
+        texts_to_embed = [text for text in texts if text not in cache]
 
         if texts_to_embed:
             logger.info(f"Generando embeddings para {len(texts_to_embed)} textos nuevos...")
@@ -2795,7 +2793,7 @@ def generate_embeddings_with_cache(texts):
             updated_cache = False
 
             for i in range(0, len(texts_to_embed), batch):
-                chunk = texts_to_embed[i:i + batch]
+                chunk = texts_to_embed[i : i + batch]
 
                 for retry in range(max_retries):
                     try:
@@ -2813,7 +2811,7 @@ def generate_embeddings_with_cache(texts):
                         break
                     except RateLimitError as e:
                         if retry < max_retries - 1:
-                            wait_time = min((2 ** retry) * random.uniform(2, 5), 60)
+                            wait_time = min((2**retry) * random.uniform(2, 5), 60)
                             logger.warning(
                                 f"RateLimitError en embeddings, reintentando en {wait_time:.2f}s... (intento {retry+1}/{max_retries})"
                             )
