@@ -1116,6 +1116,15 @@ def validate_and_fix_response(reply: str, allowed_products: list, phone: str, ex
         note = "Detecté un código o nombre raro. ¿Me repetís marca/modelo o querés que lo vuelva a calcular?"
         return f"{reply}\n\n_{note}_"
 
+    # Si no se citaron códigos pero hay productos permitidos, añadimos un bloque explícito
+    # para asegurar que el cliente reciba referencias con código.
+    if code_validation.get("warning") == "no_citations" and allowed_products:
+        forced_products = [p for p in allowed_products if p.get("code")]
+        if forced_products:
+            execution_context["validation"]["forced_codes"] = True
+            forced_block = format_search_results(forced_products[:3])
+            reply = f"{reply}\n\nCódigos de referencia:\n{forced_block}"
+
     return reply
 
 # ------------------------------------------------------------
