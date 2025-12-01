@@ -65,8 +65,23 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     """
     text = message.lower().strip()
 
-    sim = compute_similarity(text, catalog_centroid)
     entropy = estimate_entropy(text)
+    vowel_rich = sum(ch in "aeiouáéíóú" for ch in text)
+    if len(text.split()) == 1 and len(text) <= 4 and vowel_rich >= 2 and entropy < 0.25:
+        return {"route": "social", "score": entropy, "reason": "short_vowel_token"}
+
+    # Si no tenemos centroide (por ejemplo, si el catálogo todavía no cargó),
+    # no podemos medir similitud. En ese caso priorizamos técnico salvo que el
+    # mensaje sea muy corto y con baja entropía (saludos genéricos).
+    if catalog_centroid is None:
+        if entropy < 0.2 and len(text.split()) <= 4:
+            return {"route": "social", "score": entropy, "reason": "low_entropy_no_centroid"}
+        return {"route": "technical", "score": 1.0, "reason": "no_centroid"}
+
+    sim = compute_similarity(text, catalog_centroid)
+
+    if entropy < 0.2 and len(text.split()) <= 2 and sim < 0.85:
+        return {"route": "social", "score": sim, "reason": "low_entropy_low_similarity"}
 
     score = 0.7 * sim + 0.3 * entropy
 

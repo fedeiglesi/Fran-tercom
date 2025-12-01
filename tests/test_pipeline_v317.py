@@ -60,6 +60,18 @@ def test_router_dynamic_centroid(mini_catalog):
     assert social["route"] == "social"
 
 
+def test_router_without_centroid_defaults_to_technical():
+    # Si el centroide no está disponible (catálogo no cargado), debemos seguir
+    # la ruta técnica salvo que se trate de un saludo de baja entropía.
+    routed_tech = router_fase0_dynamic("Necesito pastillas de freno", catalog_centroid=None)
+    routed_social = router_fase0_dynamic("hola", catalog_centroid=None)
+
+    assert routed_tech["route"] == "technical"
+    assert routed_tech["reason"] == "no_centroid"
+    assert routed_social["route"] == "social"
+    assert routed_social["reason"] in {"low_entropy_no_centroid", "short_vowel_token"}
+
+
 def test_classifier_schema_and_validation(monkeypatch, mini_catalog):
     schema = build_classifier_schema(mini_catalog)
 
