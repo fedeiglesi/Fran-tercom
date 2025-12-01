@@ -65,13 +65,16 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     """
     text = message.lower().strip()
 
-    if len(text.split()) <= 1:
-        return {"route": "social", "score": 0.0}
-
     sim = compute_similarity(text, catalog_centroid)
     entropy = estimate_entropy(text)
 
     score = 0.7 * sim + 0.3 * entropy
+
+    # Para mensajes de una sola palabra, permitimos enrutar a técnico si el
+    # score es lo suficientemente alto (ej: "cdi", "corona", "piñon").
+    # Solo los marcamos como sociales cuando la señal semántica es baja.
+    if len(text.split()) <= 1 and score < (threshold * 0.8):
+        return {"route": "social", "score": score}
 
     if len(text.split()) <= 2 and len(text) <= 5 and score < (threshold * 1.2):
         return {"route": "social", "score": score}
