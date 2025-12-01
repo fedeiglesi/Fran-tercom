@@ -96,20 +96,18 @@ def test_classifier_schema_and_validation(monkeypatch, mini_catalog):
     schema = build_classifier_schema(mini_catalog)
 
     fake_response = SimpleNamespace(
-        choices=[
-            SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                "intent": "busca_producto",
-                "product_type": "bujia",
-                "brand": "Honda",
-                "model": "Wave",
-                "displacement_cc": 110,
-                "confidence": 0.88,
-            })))
-        ]
+        output_text=json.dumps({
+            "intent": "busca_producto",
+            "product_type": "bujia",
+            "brand": "Honda",
+            "model": "Wave",
+            "displacement_cc": 110,
+            "confidence": 0.88,
+        })
     )
 
     monkeypatch.setattr(
-        "pipeline.llm_classifier_dynamic.client.chat.completions.create",
+        "pipeline.llm_classifier_dynamic.client.responses.create",
         lambda *args, **kwargs: fake_response,
     )
 
@@ -143,19 +141,17 @@ def test_requery_and_fallback_loop(monkeypatch, mini_catalog):
     schema = build_classifier_schema(mini_catalog)
 
     fake_response = SimpleNamespace(
-        choices=[
-            SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-                "intent": "busca_producto",
-                "product_type": None,
-                "brand": None,
-                "model": None,
-                "displacement_cc": None,
-                "confidence": 0.4,
-            })))
-        ]
+        output_text=json.dumps({
+            "intent": "busca_producto",
+            "product_type": None,
+            "brand": None,
+            "model": None,
+            "displacement_cc": None,
+            "confidence": 0.4,
+        })
     )
     monkeypatch.setattr(
-        "pipeline.llm_classifier_dynamic.client.chat.completions.create",
+        "pipeline.llm_classifier_dynamic.client.responses.create",
         lambda *args, **kwargs: fake_response,
     )
 
