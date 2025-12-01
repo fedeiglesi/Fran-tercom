@@ -2942,7 +2942,24 @@ def get_v317_resources():
                 for row in _v317_cache["catalog"]
                 if (row.get("descripcion_normalizada") or row.get("descripcion"))
             ]
-            _v317_cache["centroid"] = build_catalog_centroid(descriptions)
+
+            # FIX: Validar que hay suficientes descripciones
+            if not descriptions or len(descriptions) < 10:
+                logger.error(f"❌ [v3.17] Catálogo insuficiente: {len(descriptions)} productos")
+                logger.error("   → v3.17 requiere al menos 10 productos para generar centroid")
+                logger.error("   → Sistema usará fallback con keywords")
+                # Permitir continuar con centroid=None, el router usará fallback
+                _v317_cache["centroid"] = None
+            else:
+                _v317_cache["centroid"] = build_catalog_centroid(descriptions)
+
+                # FIX: Validar que centroid se generó correctamente
+                if _v317_cache["centroid"] is None:
+                    logger.error("❌ [v3.17] No se pudo generar centroid del catálogo")
+                    logger.error("   → Posible causa: error en sentence-transformers")
+                    logger.error("   → Sistema usará fallback con keywords")
+                else:
+                    logger.info(f"✅ [v3.17] Centroid generado con {len(descriptions)} productos")
 
         if _v317_cache["catalog"] and _v317_cache["schema"] is None:
             _v317_cache["schema"] = build_classifier_schema(_v317_cache["catalog"])

@@ -62,9 +62,48 @@ def estimate_entropy(text):
 def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     """
     Decide si el mensaje pertenece al dominio técnico sin hardcodear palabras.
+
+    FIX: Si catalog_centroid es None (catálogo no cargado), usa fallback con keywords.
     """
     text = message.lower().strip()
 
+    # FALLBACK: Si no hay centroid, usar keywords básicas de motopartes
+    if catalog_centroid is None:
+        technical_keywords = [
+            'filtro', 'bujia', 'pastilla', 'amortiguador', 'aceite',
+            'kit', 'cadena', 'freno', 'motor', 'repuesto', 'pieza',
+            'llanta', 'neumatico', 'bateria', 'cable', 'embrague',
+            'transmision', 'suspension', 'disco', 'correa', 'tensor'
+        ]
+        has_technical = any(kw in text for kw in technical_keywords)
+
+        # También detectar marcas/modelos comunes
+        moto_keywords = ['honda', 'yamaha', 'kawasaki', 'suzuki', 'bajaj',
+                        'wave', 'fz', 'cg', 'tornado', 'xr']
+        has_moto = any(kw in text for kw in moto_keywords)
+
+        is_technical = has_technical or has_moto
+
+        # Si es técnico, siempre retornar technical (incluso con 1 palabra)
+        if is_technical:
+            return {
+                "route": "technical",
+                "score": 0.6,
+                "fallback_mode": True
+            }
+
+        # Si no es técnico y tiene 1 palabra o menos, es social
+        if len(text.split()) <= 1:
+            return {"route": "social", "score": 0.0}
+
+        # Si no es técnico pero tiene varias palabras, también social
+        return {
+            "route": "social",
+            "score": 0.1,
+            "fallback_mode": True
+        }
+
+    # Modo normal con centroid
     if len(text.split()) <= 1:
         return {"route": "social", "score": 0.0}
 
