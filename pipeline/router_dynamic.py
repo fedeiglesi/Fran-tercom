@@ -24,13 +24,30 @@ def build_catalog_centroid(catalog_texts):
     """
     Construye el vector centroide del catálogo → define el "tema" del dominio.
     """
+    if not catalog_texts:
+        return None
+
     embeddings = router_model.encode(catalog_texts, convert_to_numpy=True)
+    if embeddings is None or len(embeddings) == 0:
+        return None
+
     centroid = np.mean(embeddings, axis=0)
-    return centroid / np.linalg.norm(centroid)
+    norm = float(np.linalg.norm(centroid)) or 0.0
+    if norm == 0.0 or np.isnan(norm):
+        return None
+
+    return centroid / norm
 
 def compute_similarity(text, centroid):
+    if centroid is None:
+        return 0.0
+
     emb = router_model.encode([text], convert_to_numpy=True)[0]
-    emb = emb / np.linalg.norm(emb)
+    norm = float(np.linalg.norm(emb)) or 0.0
+    if norm == 0.0 or np.isnan(norm):
+        return 0.0
+
+    emb = emb / norm
     return float(np.dot(emb, centroid))
 
 def estimate_entropy(text):

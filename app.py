@@ -11,9 +11,10 @@
 # - Fallbacks automáticos por fase
 #
 # VERSIONES DISPONIBLES (A/B/C Testing):
-# - Fran 3.16: Arquitectura híbrida (40% de usuarios)
-# - Fran 3.15: Templates estructurados (30% de usuarios)
-# - Fran 3.14: Doble LLM con reasoning (30% de usuarios)
+# - Fran 3.17: Orquestador dinámico (router + búsqueda híbrida v3.17) (40% de usuarios)
+# - Fran 3.16: Arquitectura híbrida (30% de usuarios)
+# - Fran 3.15: Templates estructurados (15% de usuarios)
+# - Fran 3.14: Doble LLM con reasoning (15% de usuarios)
 #
 # INFRAESTRUCTURA COMPARTIDA:
 # - Búsqueda híbrida FAISS+BM25 con RRF
@@ -46,6 +47,9 @@ from jsonschema import validate, ValidationError
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+from pipeline.llm_classifier_dynamic import build_classifier_schema
+from pipeline.orquestador_v317 import orquestar_v317
+from pipeline.router_dynamic import build_catalog_centroid
 
 load_dotenv()
 app = Flask(__name__)
@@ -129,7 +133,7 @@ EMBEDDINGS_CACHE_PATH = f"embeddings_cache_{_safe_catalog_hash}.pkl"
 
 MAX_SEARCH_RESULTS = int(os.environ.get("MAX_SEARCH_RESULTS", "60"))
 MAX_PRODUCTS_FOR_LLM = int(os.environ.get("MAX_PRODUCTS_FOR_LLM", "15"))
-WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "3500"))
+WHATSAPP_MSG_LIMIT = int(os.environ.get("WHATSAPP_MSG_LIMIT", "1600"))
 PRODUCTS_PER_CHUNK = int(os.environ.get("PRODUCTS_PER_CHUNK", "30"))
 
 # Nuevos parámetros de calidad (ajustados)
@@ -512,6 +516,9 @@ _catalog_and_index_cache = {"catalog": None, "index": None, "bm25": None, "bm25_
 _catalog_lock = Lock()
 _raw_csv_cache = {"text": None}
 
+_v317_cache = {"catalog": None, "centroid": None, "schema": None}
+_v317_lock = Lock()
+
 _embeddings_cache_lock = Lock()
 
 # Cache de fuzzy matching para post-validation
@@ -681,17 +688,22 @@ def should_use_v315(phone: str) -> bool:
 
 def get_orchestrator_version(phone: str) -> str:
     """
-    Determina qué versión del orquestador usar: "3.14", "3.15", o "3.16"
+    Determina qué versión del orquestador usar: "3.14", "3.15", "3.16" o "3.17"
 
     Estrategia de rollout:
+    - USE_FRAN_317=true → todos a 3.17
     - USE_FRAN_316=true → todos a 3.16
     - USE_FRAN_315=true → todos a 3.15
-    - BETA_PHONES → 3.16
-    - Hash-based split: 40% → 3.16, 30% → 3.15, 30% → 3.14
+    - BETA_PHONES → 3.17
+    - Hash-based split: 40% → 3.17, 30% → 3.16, 15% → 3.15, 15% → 3.14
 
     Returns:
-        str: "3.14", "3.15", o "3.16"
+        str: "3.14", "3.15", "3.16" o "3.17"
     """
+    # Force v3.17 globally
+    if os.environ.get("USE_FRAN_317", "false").lower() == "true":
+        return "3.17"
+
     # Force v3.16 globally
     if os.environ.get("USE_FRAN_316", "false").lower() == "true":
         return "3.16"
@@ -700,20 +712,22 @@ def get_orchestrator_version(phone: str) -> str:
     if os.environ.get("USE_FRAN_315", "false").lower() == "true":
         return "3.15"
 
-    # Beta phones get v3.16
+    # Beta phones get v3.17
     beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
     if beta_phones and phone in beta_phones:
-        return "3.16"
+        return "3.17"
 
-    # Hash-based A/B/C split (40% v3.16, 30% v3.15, 30% v3.14)
+    # Hash-based A/B/C split (40% v3.17, 30% v3.16, 15% v3.15, 15% v3.14)
     phone_hash = int(hashlib.md5(phone.encode()).hexdigest(), 16) % 100
 
     if phone_hash < 40:
-        return "3.16"  # 40% get hybrid architecture
+        return "3.17"  # 40% get dynamic hybrid with router
     elif phone_hash < 70:
-        return "3.15"  # 30% get templates
+        return "3.16"  # 30% get hybrid architecture
+    elif phone_hash < 85:
+        return "3.15"  # 15% get templates
     else:
-        return "3.14"  # 30% get dual LLM
+        return "3.14"  # 15% get dual LLM
 
 # ------------------------------------------------------------
 # UTILS
@@ -2911,6 +2925,27 @@ def get_catalog_and_index():
         initialize_families_index(catalog)
         initialize_family_compatibility_profile(catalog)
         return catalog, index, bm25_index, tokenized_corpus
+
+
+def get_v317_resources():
+    with _v317_lock:
+        catalog, _, _, _ = get_catalog_and_index()
+
+        if catalog and _v317_cache["catalog"] is None:
+            _v317_cache["catalog"] = catalog
+
+        if _v317_cache["catalog"] and _v317_cache["centroid"] is None:
+            descriptions = [
+                row.get("descripcion_normalizada") or row.get("descripcion") or ""
+                for row in _v317_cache["catalog"]
+                if (row.get("descripcion_normalizada") or row.get("descripcion"))
+            ]
+            _v317_cache["centroid"] = build_catalog_centroid(descriptions)
+
+        if _v317_cache["catalog"] and _v317_cache["schema"] is None:
+            _v317_cache["schema"] = build_classifier_schema(_v317_cache["catalog"])
+
+        return _v317_cache["catalog"], _v317_cache["centroid"], _v317_cache["schema"]
 
 # ------------------------------------------------------------------
 # BÚSQUEDA HÍBRIDA (BM25 + FAISS con RRF)
@@ -6157,6 +6192,49 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     return reply
 
 # =========================================================
+# ORQUESTADOR PRINCIPAL – VERSIÓN 3.17
+# =========================================================
+def orquestar_fran_v317(mensaje_usuario: str, phone: str) -> str:
+    start_time = time.time()
+    user_message = sanitize_input(mensaje_usuario or "", max_length=1500)
+
+    if not rate_limit_check(phone):
+        reply = "Demasiados mensajes, esperá un minuto."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    save_message(phone, user_message, "user")
+
+    catalog, centroid, schema = get_v317_resources()
+    if not catalog or schema is None:
+        reply = "No pude acceder al catálogo en este momento. Probá de nuevo en unos instantes."
+        save_message(phone, reply, "assistant")
+        return reply
+
+    output = orquestar_v317(user_message, catalog, centroid, schema)
+    final_response = output.get("final_response") or {}
+    reply = final_response.get("message") or "No pude procesar tu pedido, ¿podés reformularlo?"
+
+    trace = output.get("trace") or []
+    classifier_phase = next(
+        (step for step in trace if isinstance(step, dict) and step.get("phase") == "classifier"),
+        {},
+    )
+    intent = classifier_phase.get("intent") or "otros"
+    search_phase = next(
+        (step for step in trace if isinstance(step, dict) and step.get("phase") == "search"),
+        {},
+    )
+    products_count = len(search_phase.get("results") or [])
+
+    save_message(phone, reply, "assistant")
+    log_interaction(phone, user_message, intent, products_count)
+    log_performance(phone, intent, time.time() - start_time, products_count)
+    update_sales_phase_from_intent(phone, intent)
+
+    return reply
+
+# =========================================================
 # ORQUESTADOR PRINCIPAL – VERSIÓN 3.14
 # =========================================================
 def orquestar_fran(mensaje_usuario, phone):
@@ -6414,7 +6492,9 @@ def whatsapp_webhook():
         version = get_orchestrator_version(from_number)
         logger.info(f"Using orchestrator version: {version} for {from_number}")
 
-        if version == "3.16":
+        if version == "3.17":
+            reply = orquestar_fran_v317(message_body, from_number)
+        elif version == "3.16":
             reply = orquestar_fran_v316(message_body, from_number)
         elif version == "3.15":
             reply = orquestar_fran_v315(message_body, from_number)
@@ -6451,10 +6531,11 @@ def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
     return jsonify({
         "status": "ok",
-        "version": "3.16",
+        "version": "3.17",
         "catalog_size": len(catalog) if catalog else 0,
-        "architecture": "hybrid_templates_reasoning_v316",
+        "architecture": "hybrid_router_v317",
         "orchestrators": {
+            "v3.17": "dynamic router + hybrid search v3.17",
             "v3.16": "hybrid (templates + reasoning + re-query)",
             "v3.15": "structured templates",
             "v3.14": "dual LLM reasoning"

@@ -34,6 +34,7 @@ except ImportError:
 
 
 EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+WHATSAPP_MESSAGE_LIMIT = int(os.environ.get("WHATSAPP_MESSAGE_LIMIT", "1600"))
 
 
 def _normalize_text(text: str) -> str:
@@ -310,6 +311,50 @@ def _build_bm25_index(catalog: List[Dict[str, Any]]) -> Tuple[Optional[BM25Okapi
     return BM25Okapi(corpus_tokens), corpus_tokens
 
 
+def _neural_rerank(
+    query: str,
+    candidates: List[Dict[str, Any]],
+    embedding_fn: Optional[Callable[[List[str]], List[np.ndarray]]] = None,
+) -> List[Dict[str, Any]]:
+    if not candidates:
+        return candidates
+
+    embedder = embedding_fn or _default_embedding_fn
+    texts = [query]
+    for cand in candidates:
+        catalog_data = cand.get("catalog_data", {})
+        text_parts = [
+            cand.get("name") or "",
+            catalog_data.get("compatibilidad_declarada") or "",
+            catalog_data.get("categoria") or "",
+            catalog_data.get("marca_moto") or "",
+            catalog_data.get("modelo_moto") or "",
+        ]
+        texts.append(" ".join(part for part in text_parts if part))
+
+    vectors = embedder(texts)
+    if not vectors or len(vectors) != len(texts):
+        return candidates
+
+    query_vec = vectors[0]
+    query_norm = float(np.linalg.norm(query_vec)) or 1.0
+    query_vec = query_vec / query_norm
+
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for cand, vec in zip(candidates, vectors[1:]):
+        norm = float(np.linalg.norm(vec)) or 0.0
+        if norm == 0.0 or np.isnan(norm):
+            score = 0.0
+        else:
+            score = float(np.dot(query_vec, vec / norm))
+        enriched = dict(cand)
+        enriched["rerank_score"] = score
+        scored.append((score, enriched))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in scored]
+
+
 @dataclass
 class HybridSearchConfig:
     top_k: int = 15
@@ -365,6 +410,7 @@ def fase2_hybrid_search(
     catalog = _prepare_catalog(df)
     embedding_fn = embedding_fn or _default_embedding_fn
     config = config or HybridSearchConfig(top_k=top_k, component_k=max(top_k * 3, 30))
+    reranker_fn = config.reranker or (lambda q, cands: _neural_rerank(q, cands, embedding_fn))
     component_k = max(config.component_k, config.top_k)
 
     bm25_index, corpus_tokens = _build_bm25_index(catalog)
@@ -509,9 +555,9 @@ def fase2_hybrid_search(
     ]
 
     results = pre_results
-    if config.reranker and pre_results:
+    if reranker_fn and pre_results:
         try:
-            reranked = config.reranker(query, pre_results[:rerank_limit])
+            reranked = reranker_fn(query, pre_results[:rerank_limit])
             order = {c["product_id"]: pos for pos, c in enumerate(reranked)} if isinstance(reranked, list) else {}
             if order:
                 results = sorted(pre_results, key=lambda c: order.get(c["product_id"], len(order) + c["hybrid_rank"]))
@@ -618,7 +664,7 @@ def fase4_llm2_reasoning(
             decision = "incompatible"
             confidence = 0.3
 
-        if confidence < 0.45:
+        if decision != "incompatible" and confidence < 0.45:
             needs_requery = True
 
         reasoning = (
@@ -814,8 +860,9 @@ def fase7_whatsapp_response(
         message = "Necesito más datos para asegurarte compatibilidad. ¿Marca y modelo de la moto?"
         products = []
 
-    if len(message) > 1000:
-        message = message[:997] + "..."
+    limit = max(10, WHATSAPP_MESSAGE_LIMIT)
+    if len(message) > limit:
+        message = message[: limit - 3] + "..."
 
     payload = {"phase": "whatsapp_response", "message": message, "type": resp_type, "badge": badge, "products": products}
     validate(instance=payload, schema=PHASE7_SCHEMA)

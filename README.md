@@ -16,4 +16,4 @@ PENDING_ACTION_TTL	30min	TTL de pending actions
 
 ## Embeddings y pipeline v3.17
 - El modelo de embeddings se estandarizó con la variable `OPENAI_EMBEDDING_MODEL` (por defecto `text-embedding-3-small`) para el pipeline híbrido y la generación de caché.
-- El orquestador `orquestar_v317` sigue siendo experimental y no está activado en `app.py`; puede probarse importándolo manualmente desde `pipeline.orquestador_v317`.
+- El orquestador `orquestar_v317` ahora está integrado en `app.py` y participa del enrutamiento principal (40% del tráfico por hash y 100% si se setea `USE_FRAN_317=true`).
