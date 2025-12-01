@@ -94,6 +94,7 @@ PHASE2_SCHEMA = {
     "required": ["phase", "results"],
     "properties": {
         "phase": {"const": "search"},
+        "query": {"type": "string"},
         "results": {
             "type": "array",
             "items": {
@@ -230,6 +231,12 @@ PHASE7_SCHEMA = {
         "message": {"type": "string"},
         "type": {"enum": ["confident_match", "partial_match", "clarification_needed"]},
         "badge": {"type": "string"},
+        "context": {
+            "type": "object",
+            "properties": {
+                "previous_query": {"type": ["string", "null"]},
+            },
+        },
         "products": {
             "type": "array",
             "items": {
@@ -564,7 +571,7 @@ def fase2_hybrid_search(
         except Exception:
             results = pre_results
 
-    payload = {"phase": "search", "results": results[: config.top_k]}
+    payload = {"phase": "search", "query": query, "results": results[: config.top_k]}
     validate(instance=payload, schema=PHASE2_SCHEMA)
     return payload
 
@@ -809,12 +816,13 @@ def fase7_whatsapp_response(
         badge = "🟢"
         formatted = []
         products = []
+        confident_ids = {c.get("product_id") for c in chosen}
         for c in chosen:
             lookup = search_lookup.get(c.get("product_id"), {})
             price = _format_price(c.get("price_ars") or lookup.get("price_ars"), c.get("price_usd") or lookup.get("price_usd"))
             compatibility = _compatibility_text(lookup)
             formatted.append(
-                f"{badge} {c['product_id']} · {c.get('name','')} · {price} ({c['confidence_score']:.2f})"
+                f"- {c.get('name','')} (Código {c['product_id']}) · {price}"
                 + (f" · Compatibilidad: {compatibility}" if compatibility else "")
             )
             products.append(
@@ -828,7 +836,25 @@ def fase7_whatsapp_response(
                     "badge": badge,
                 }
             )
-        message = "Encontré opciones compatibles:\n" + "\n".join(formatted)
+        related_candidates = [
+            r for r in search_output.get("results", []) if r.get("product_id") not in confident_ids
+        ][:2]
+        related_lines = []
+        for r in related_candidates:
+            price = _format_price(r.get("price_ars"), r.get("price_usd"))
+            compatibility = _compatibility_text(r)
+            related_lines.append(
+                f"- {r.get('name','')} (Código {r.get('product_id','')}) · {price}"
+                + (f" · Compatibilidad: {compatibility}" if compatibility else "")
+            )
+
+        message_lines = ["Listo, esto es lo que encontré para tu pedido:"]
+        message_lines.extend(formatted)
+        if related_lines:
+            message_lines.append("")
+            message_lines.append("Relacionado a lo que me pedís tengo estas opciones por si te interesa:")
+            message_lines.extend(related_lines)
+        message = "\n".join(message_lines)
     elif fallback_output.get("items"):
         resp_type = "partial_match"
         badge = "🟠"
@@ -840,7 +866,8 @@ def fase7_whatsapp_response(
             lookup = search_lookup.get(item.get("product_id"), {})
             compatibility = _compatibility_text(lookup)
             formatted.append(
-                f"{badge} {item.get('product_id')} · {item.get('name','')} · {price}" + (f" · Compatibilidad: {compatibility}" if compatibility else "")
+                f"- {item.get('name','')} (Código {item.get('product_id','')}) · {price}"
+                + (f" · Compatibilidad: {compatibility}" if compatibility else "")
             )
             products.append(
                 {
@@ -853,18 +880,34 @@ def fase7_whatsapp_response(
                     "badge": badge,
                 }
             )
-        message = fallback_output.get("disclaimer", "") + "\n" + "\n".join(formatted)
+        prefix = "Relacionado a lo que me pedís tengo estas opciones por si te interesa:" if formatted else ""
+        message = "\n".join([fallback_output.get("disclaimer", "").strip(), prefix, "\n".join(formatted)]).strip()
     else:
         resp_type = "clarification_needed"
         badge = "⚪"
-        message = "Necesito más datos para asegurarte compatibilidad. ¿Marca y modelo de la moto?"
         products = []
+        previous_query = search_output.get("query")
+        context = {"previous_query": previous_query}
+        if not search_output.get("results"):
+            message = (
+                "No encontré productos para esto. Para seguir con tu pedido, ¿me pasás marca y modelo de la moto o más detalles?"
+            )
+        else:
+            message = "Necesito más datos para asegurarte compatibilidad. ¿Marca y modelo de la moto?"
 
     limit = max(10, WHATSAPP_MESSAGE_LIMIT)
     if len(message) > limit:
         message = message[: limit - 3] + "..."
 
-    payload = {"phase": "whatsapp_response", "message": message, "type": resp_type, "badge": badge, "products": products}
+    payload = {
+        "phase": "whatsapp_response",
+        "message": message,
+        "type": resp_type,
+        "badge": badge,
+        "products": products,
+    }
+    if resp_type == "clarification_needed":
+        payload["context"] = context
     validate(instance=payload, schema=PHASE7_SCHEMA)
     return payload
 
