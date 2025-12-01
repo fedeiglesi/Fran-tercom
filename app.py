@@ -398,6 +398,105 @@ bulk_queue = Queue()
 
 openai_sem = Semaphore(3)
 
+
+class SessionMemory:
+    """In-memory session context with TTL to persist recent searches per usuario."""
+
+    _store: dict[str, dict] = {}
+    _lock = threading.Lock()
+    DEFAULT_TTL = 1800
+
+    @classmethod
+    def get(cls, user_id: str | None) -> dict | None:
+        if not user_id:
+            return None
+
+        with cls._lock:
+            data = cls._store.get(user_id)
+            if not data:
+                return None
+
+            last_ts = data.get("last_search", {}).get("timestamp")
+            ttl = data.get("context_ttl") or cls.DEFAULT_TTL
+            if last_ts and (time.time() - last_ts) > ttl:
+                cls._store.pop(user_id, None)
+                return None
+
+            return data
+
+    @classmethod
+    def update_last_search(
+        cls,
+        user_id: str,
+        *,
+        query: str,
+        results: list,
+        metadata: dict,
+        confidence: float,
+        context_ttl: int | None = None,
+    ) -> None:
+        if not user_id:
+            return
+
+        payload = {
+            "last_search": {
+                "query": query,
+                "results": results,
+                "metadata": metadata or {},
+                "timestamp": time.time(),
+                "confidence": _normalize_confidence(confidence, minimum=0.0),
+            },
+            "conversation_turns": 1,
+            "context_ttl": context_ttl or cls.DEFAULT_TTL,
+        }
+
+        with cls._lock:
+            existing = cls._store.get(user_id) or {}
+            if existing.get("conversation_turns"):
+                payload["conversation_turns"] = existing.get("conversation_turns", 0) + 1
+            if existing.get("last_cart_action"):
+                payload["last_cart_action"] = existing.get("last_cart_action")
+            cls._store[user_id] = payload
+
+
+def _build_cached_search_payload(understanding: dict, last_search: dict) -> dict | None:
+    cached_results = (last_search or {}).get("results") or []
+    if not cached_results:
+        return None
+
+    target_family = None
+    has_structured_compatibility = False
+
+    for res in cached_results:
+        fam = res.get("family") or (res.get("catalog_data") or {}).get("familia")
+        if fam and not target_family:
+            target_family = fam
+        if res.get("has_structured_compatibility"):
+            has_structured_compatibility = True
+
+    payload = {
+        "phase": "search",
+        "query_params": {
+            "text_query": understanding.get("raw_query", ""),
+            "filters": {
+                "brand": understanding.get("brand"),
+                "model": understanding.get("model"),
+                "displacement_cc": understanding.get("displacement_cc"),
+            },
+        },
+        "results": cached_results[:SEARCH_TOP_K],
+        "total_results": len(cached_results),
+        "target_family": target_family,
+        "has_structured_compatibility": has_structured_compatibility,
+        "needs_llm_compatibility": any(r.get("needs_llm_compatibility") for r in cached_results),
+        "source": "session_cache",
+    }
+
+    if not _validate_phase(payload, SEARCH_PHASE_SCHEMA, "FASE2_CACHE"):
+        return None
+
+    return payload
+
 exchange_cache = {"rate": None, "timestamp": None}
 EXCHANGE_CACHE_TTL = 3600
 
@@ -5300,7 +5399,70 @@ def _derive_ambiguity(confidence: float) -> str:
     return "low"
 
 
-def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> dict:
+def detect_follow_up_intent(query: str, session: dict | None) -> dict | None:
+    """LLM-driven follow-up detection based on the last search context."""
+
+    if not session or not session.get("last_search"):
+        return None
+
+    last_context = session.get("last_search") or {}
+
+    prompt = f"""Eres un asistente analizando si el nuevo mensaje del usuario es un 
+follow-up (refinamiento, precio, cantidad, etc) de una búsqueda anterior.
+
+BÚSQUEDA ANTERIOR:
+- Query: \"{last_context.get('query', '')}\"
+- Marca: {last_context.get('metadata', {}).get('brand')}
+- Modelo: {last_context.get('metadata', {}).get('model')}
+- Familia: {last_context.get('metadata', {}).get('family')}
+- Productos encontrados: {len(last_context.get('results') or [])}
+
+NUEVO MENSAJE:
+\"{query}\"
+
+Responde SOLO en JSON (sin markdown):
+{{
+    "is_follow_up": true/false,
+    "follow_up_type": "price" | "quantity" | "show_more" | "comparison" | "reference" | "cart_action" | null,
+    "reasoning": "breve explicación máx 50 caracteres",
+    "inherit_context": true/false,
+    "context_fields": ["brand", "model", "family"]
+}}
+"""
+
+    try:
+        with openai_sem:
+            resp = llm_client.completion(
+                model=MODEL_REASONING,
+                messages=[
+                    {"role": "system", "content": prompt},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+
+        llm_result = json.loads(resp.choices[0].message.content)
+        if llm_result.get("is_follow_up"):
+            return {
+                "detected": True,
+                "type": llm_result.get("follow_up_type"),
+                "reasoning": llm_result.get("reasoning"),
+                "use_cached_results": True,
+                "cached_product_ids": [
+                    r.get("product_id") for r in (last_context.get("results") or []) if r.get("product_id")
+                ][:5],
+                "inherit_context": llm_result.get("inherit_context"),
+                "context_fields": llm_result.get("context_fields") or [],
+                "inherited_confidence": last_context.get("confidence") or 0.0,
+            }
+    except Exception as e:
+        logger.warning(f"Follow-up detection LLM failed: {e}")
+        return None
+
+    return None
+
+
+def _phase1_llm1_understanding(user_message: str, phone: str | None = None, session: dict | None = None) -> dict:
     semantic_signals = detect_semantic_entities(user_message)
     implicit_cart_action = detect_implicit_cart_action(user_message, phone) if phone else None
 
@@ -5383,9 +5545,11 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
         "implicit_cart_action": implicit_cart_action,
     }
 
+    session_data = session or SessionMemory.get(phone)
+
     # Completar la moto usando contexto reciente si el usuario viene de otra consulta
     if phone and intent == "product_search" and semantic_signals.get("has_follow_up"):
-        last_search = get_last_search(phone)
+        last_search = session_data.get("last_search") if session_data else get_last_search(phone)
         if last_search:
             last_meta = last_search.get("metadata") or {}
             last_products = last_search.get("products") or []
@@ -5448,6 +5612,25 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None) -> d
         payload["confidence"] = 0.3
         payload["metadata"]["ambiguity_level"] = "high"
 
+    follow_up_block = {"detected": False}
+    if phone:
+        fu = detect_follow_up_intent(user_message, session_data or SessionMemory.get(phone))
+        if fu:
+            follow_up_block = fu
+            if fu.get("inherit_context") and fu.get("context_fields"):
+                last_ctx = (session_data or SessionMemory.get(phone) or {}).get("last_search", {})
+                meta = last_ctx.get("metadata") or {}
+                if "brand" in fu.get("context_fields", []) and not payload.get("brand"):
+                    payload["brand"] = meta.get("brand") or meta.get("moto_brand")
+                if "model" in fu.get("context_fields", []) and not payload.get("model"):
+                    payload["model"] = meta.get("model") or meta.get("moto_model")
+                if "family" in fu.get("context_fields", []) and not payload.get("product_type"):
+                    payload["product_type"] = meta.get("family")
+            if fu.get("inherited_confidence"):
+                payload["confidence"] = max(payload.get("confidence", 0), fu.get("inherited_confidence", 0))
+
+    payload["follow_up"] = follow_up_block
+
     return payload
 
 
@@ -5480,6 +5663,8 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
             {
                 "product_id": product.get("code") or str(idx),
                 "name": product.get("name") or product.get("description", ""),
+                "price_ars": product.get("price_ars"),
+                "price_usd": product.get("price_usd"),
                 "bm25_score": _normalize_score_from_rank(idx, SEARCH_TOP_K),
                 "faiss_similarity": _normalize_score_from_rank(idx, SEARCH_TOP_K) if score else 0.5,
                 "hybrid_rank": idx,
@@ -5519,6 +5704,18 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
     if not _validate_phase(payload, SEARCH_PHASE_SCHEMA, "FASE2"):
         payload["results"] = []
         payload["total_results"] = 0
+
+    SessionMemory.update_last_search(
+        phone,
+        query=text_query,
+        results=payload.get("results", []),
+        metadata={
+            "brand": understanding.get("brand"),
+            "model": understanding.get("model"),
+            "family": target_family,
+        },
+        confidence=understanding.get("confidence", 0),
+    )
 
     return payload
 
@@ -5629,6 +5826,12 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
         decision = "marginal"
         confidence_local = _normalize_confidence(cand.get("confidence", 0.55), minimum=0.0)
         technical_reasoning = "Sin datos declarados, se infiere por similitud semántica y familia."
+        price_ars = product.get("price_ars")
+        if price_ars is not None:
+            try:
+                price_ars = float(to_decimal_money(price_ars))
+            except Exception:
+                price_ars = None
 
         if cand.get("status") == "hard_compatible" or (brand_match and model_match):
             decision = "compatible"
@@ -5658,6 +5861,7 @@ def _phase4_llm2_reasoning(understanding: dict, search_payload: dict, filter_pay
             "technical_reasoning": technical_reasoning,
             "justification_type": justification,
             "risk_level": risk_level,
+            "price_ars": price_ars,
         }
 
         if STRICT_MODE and decision == "incompatible":
@@ -5754,11 +5958,16 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
         if dec.get("compatibility_decision") == "incompatible" and STRICT_MODE:
             continue
         badge = badge_map.get(dec.get("compatibility_decision"), "❓ Verificar con vendedor")
+        price_value = dec.get("price_ars")
+        price_decimal = to_decimal_money(price_value) if price_value is not None else None
+        price_formatted = format_price(price_decimal) if price_decimal is not None else None
         recommendations.append(
             {
                 "product_id": dec.get("product_id"),
                 "product_name": dec.get("name", ""),
                 "confidence_badge": badge,
+                "price_ars": float(price_decimal) if price_decimal is not None else None,
+                "price_formatted": price_formatted,
             }
         )
 
@@ -5767,7 +5976,8 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
     if recommendations:
         lines = ["Te dejo opciones compatibles:"]
         for rec in recommendations[:5]:
-            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']})")
+            price_text = rec.get("price_formatted") or "Precio a confirmar"
+            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']}) | {price_text}")
         lines.append(follow_up)
         whatsapp_response = "\n".join(lines)
     elif fallback_payload:
@@ -5800,7 +6010,8 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     # FASE 1: LLM1 Understanding (JSON)
     # --------------------------------------------
-    understanding = _phase1_llm1_understanding(user_message, phone=phone)
+    session_ctx = SessionMemory.get(phone)
+    understanding = _phase1_llm1_understanding(user_message, phone=phone, session=session_ctx)
     logger.info(f"[v3.16][FASE1] {json.dumps(understanding, ensure_ascii=False)}")
 
     # FIX: Bypass temprano SOLO para saludos puros (sin componente técnico)
@@ -5856,6 +6067,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         return reply
 
     while requery_attempt <= MAX_REQUERY_ATTEMPTS:
+        session_ctx = SessionMemory.get(phone)
         elapsed_ms = (time.time() - start_time) * 1000
         if elapsed_ms > RESPONSE_TIMEOUT_MS:
             logger.warning("[v3.16] Timeout global, activando fallback")
@@ -5863,9 +6075,19 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
             break
 
         # --------------------------------------------
-        # FASE 2: Búsqueda híbrida (BM25 + FAISS)
+        # FASE 2: Búsqueda híbrida (BM25 + FAISS) o cacheada
         # --------------------------------------------
-        search_payload = _phase2_hybrid_search(understanding, phone)
+        follow_up_info = understanding.get("follow_up") or {}
+        cached_search = None
+        if (
+            follow_up_info.get("use_cached_results")
+            and session_ctx
+            and session_ctx.get("last_search")
+            and requery_attempt == 0
+        ):
+            cached_search = _build_cached_search_payload(understanding, session_ctx.get("last_search"))
+
+        search_payload = cached_search or _phase2_hybrid_search(understanding, phone)
         logger.info(f"[v3.16][FASE2] {json.dumps(search_payload, ensure_ascii=False)}")
 
         # --------------------------------------------

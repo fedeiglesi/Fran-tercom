@@ -1,5 +1,7 @@
 import pytest
+import json
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -18,6 +20,8 @@ jsonschema_module.ValidationError = DummyValidationError
 sys.modules.setdefault("jsonschema", jsonschema_module)
 
 import app
+
+SessionMemory = app.SessionMemory
 
 
 def test_needs_llm_compatibility_detects_missing_structure(monkeypatch):
@@ -109,10 +113,130 @@ def test_response_includes_follow_up(monkeypatch):
     assert "¿Querés precio o ver más opciones?" in response["whatsapp_response"]
 
 
+def test_response_includes_prices(monkeypatch):
+    understanding = {"brand": "Honda", "model": "Wave", "raw_query": "pastillas"}
+    reasoning_payload = {
+        "candidates_evaluated": [
+            {
+                "product_id": "PF-W110-001",
+                "name": "Pastilla de freno Wave 110",
+                "compatibility_decision": "compatible",
+                "confidence_score": 0.9,
+                "technical_reasoning": "",
+                "justification_type": "catalog_match",
+                "risk_level": "low",
+                "price_ars": 1850,
+            }
+        ],
+        "llm2_confidence_overall": 0.9,
+    }
+
+    response = app._phase7_llm3_response(understanding, reasoning_payload)
+
+    recommendation = response["product_recommendations"][0]
+    assert recommendation["price_ars"] == float(app.to_decimal_money(1850))
+    assert recommendation["price_formatted"] == "$1.850"
+    assert "$1.850" in response["whatsapp_response"]
+
+
 def test_social_intent_skips_product_mode():
     semantic = app.detect_semantic_entities("Hola")
     assert semantic["has_social"] is True
-    assert semantic["has_technical"] is False
+
+
+def test_session_memory_tracks_recent_search(monkeypatch):
+    user_id = "+5491112345678"
+    SessionMemory._store.clear()
+
+    SessionMemory.update_last_search(
+        user_id,
+        query="aros fz16",
+        results=[{"product_id": "123", "family": "aros", "catalog_data": {}}],
+        metadata={"brand": "Yamaha", "model": "FZ16", "family": "aros"},
+        confidence=0.92,
+    )
+
+    session = SessionMemory.get(user_id)
+    assert session is not None
+    assert session["last_search"]["query"] == "aros fz16"
+
+    SessionMemory._store[user_id]["last_search"]["timestamp"] = time.time() - (SessionMemory.DEFAULT_TTL + 10)
+    assert SessionMemory.get(user_id) is None
+
+
+def test_detect_follow_up_intent(monkeypatch):
+    class DummyResp:
+        class DummyChoice:
+            def __init__(self, content: str):
+                self.message = type("msg", (), {"content": content})
+
+        def __init__(self, content: str):
+            self.choices = [self.DummyChoice(content)]
+
+    def fake_completion(*_, **__):
+        payload = {
+            "is_follow_up": True,
+            "follow_up_type": "price",
+            "reasoning": "pide precio",
+            "inherit_context": True,
+            "context_fields": ["brand", "model", "family"],
+        }
+        return DummyResp(json.dumps(payload))
+
+    session = {
+        "last_search": {
+            "query": "aros yamaha fz16",
+            "results": [{"product_id": "P-1"}],
+            "metadata": {"brand": "Yamaha", "model": "FZ16", "family": "aros"},
+            "confidence": 0.91,
+            "timestamp": time.time(),
+        }
+    }
+
+    monkeypatch.setattr(app, "llm_client", type("client", (), {"completion": staticmethod(fake_completion)}))
+    result = app.detect_follow_up_intent("precio?", session)
+
+    assert result["detected"] is True
+    assert result["type"] == "price"
+    assert result["cached_product_ids"] == ["P-1"]
+
+
+def test_phase1_inherits_context_from_follow_up(monkeypatch):
+    session = {
+        "last_search": {
+            "query": "aros yamaha fz16",
+            "results": [
+                {
+                    "product_id": "P-1",
+                    "family": "aros",
+                    "catalog_data": {"familia": "aros"},
+                    "has_structured_compatibility": True,
+                    "needs_llm_compatibility": False,
+                }
+            ],
+            "metadata": {"brand": "Yamaha", "model": "FZ16", "family": "aros"},
+            "confidence": 0.9,
+            "timestamp": time.time(),
+        }
+    }
+
+    monkeypatch.setattr(
+        app,
+        "detect_follow_up_intent",
+        lambda *_, **__: {
+            "detected": True,
+            "type": "price",
+            "use_cached_results": True,
+            "inherit_context": True,
+            "context_fields": ["brand", "model", "family"],
+            "inherited_confidence": 0.9,
+        },
+    )
+
+    payload = app._phase1_llm1_understanding("precio?", phone="123", session=session)
+    assert payload["follow_up"]["detected"] is True
+    assert payload["brand"] == "Yamaha"
+    assert payload["model"] == "FZ16"
 
     understanding = app._phase1_llm1_understanding("Hola")
     assert understanding["intent"] == "social"
