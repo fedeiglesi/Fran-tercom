@@ -1,7 +1,11 @@
 import logging
+import math
 import sys
 import types
+from pathlib import Path
 from typing import List
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pytest
@@ -117,6 +121,38 @@ def sample_catalog():
     ]
 
 
+@pytest.fixture
+def difficult_catalog(sample_catalog):
+    noisy = [
+        {
+            "code": "C4",
+            "name": "kit transmicion wav 110 reforzado",
+            "search_text": "kit transmicion wav 110 reforzado cadena pinon corona",
+            "category": "transmision",
+            "family_name": "transmision",
+            "brand": "did",
+            "model": "wave",
+            "moto_brand": "honda",
+            "moto_model": "wae",
+            "displacement": "110",
+        },
+        {
+            "code": "C5",
+            "name": "amortiguador tracero onda 110 generico",
+            "search_text": "amortiguador tracero onda 110 generico wav",
+            "category": "amortiguadores",
+            "family_name": "suspension",
+            "brand": "genérico",
+            "model": "wave",
+            "moto_brand": "honda",
+            "moto_model": "wav",
+            "displacement": "110",
+        },
+    ]
+
+    return sample_catalog + noisy
+
+
 def prepare_indexes(monkeypatch, catalog, include_bm25=True, include_faiss=True):
     bm25_index, corpus = (None, [])
     if include_bm25:
@@ -175,6 +211,21 @@ def test_rrf_individual(monkeypatch, sample_catalog, caplog):
 
 
 @pytest.mark.usefixtures("fake_embeddings")
+def test_rrf_handles_typos(monkeypatch, difficult_catalog):
+    prepare_indexes(monkeypatch, difficult_catalog, include_bm25=True, include_faiss=True)
+
+    monkeypatch.setattr(app, "BM25_THRESHOLD", 0.2)
+    monkeypatch.setattr(app, "FAISS_THRESHOLD", 0.4)
+
+    results = app.hybrid_search("amortiguador tracero honda wav 110", top_k=5)
+
+    assert results["final_candidates"]
+    codes = [p.get("code") for p in results["final_candidates"][:2]]
+    assert "C3" in codes or "C5" in codes
+    assert all("_score" in p for p in results["final_candidates"])
+
+
+@pytest.mark.usefixtures("fake_embeddings")
 def test_code_lookup(monkeypatch, sample_catalog, caplog):
     prepare_indexes(monkeypatch, sample_catalog, include_bm25=True, include_faiss=True)
     monkeypatch.setattr(app, "RELEVANCE_MIN_SCORE", 0)
@@ -203,6 +254,22 @@ def test_moto_filter_fallback(monkeypatch, sample_catalog, caplog):
     assert filtered.get("final_candidates", [])  # fallback to merged_results when moto filter removes all
     assert any("merged_results" in record.message for record in caplog.records)
     assert any("Moto filter empty" in record.message for record in caplog.records)
+
+
+def test_slice_products_respects_scores(monkeypatch):
+    monkeypatch.setattr(app, "MAX_PRODUCTS_FOR_LLM", 5)
+    monkeypatch.setattr(app, "PRODUCTS_PER_CHUNK", 3)
+
+    products = [
+        {"code": f"P{i}", "name": f"Prod {i}", "_score": float(i)}
+        for i in range(12)
+    ]
+
+    top, chunks = app._slice_products_for_llm(list(reversed(products)))
+
+    assert [p["code"] for p in top] == ["P11", "P10", "P9", "P8", "P7"]
+    assert len(chunks) == math.ceil(len(products) / 3)
+    assert chunks[0][0]["code"] == "P11"
 
 
 def test_cart_action_exact_code(monkeypatch, sample_catalog):

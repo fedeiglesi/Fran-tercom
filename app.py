@@ -136,6 +136,8 @@ RESPONSE_TIMEOUT_MS = 5000
 SEARCH_TOP_K = 15
 FAISS_THRESHOLD = 0.6
 BM25_THRESHOLD = 0.4
+RRF_BM25_WEIGHT = 1.0
+RRF_FAISS_WEIGHT = 1.2
 LAST_FILTER_CATALOG_DEBUG = {}
 LAST_RELEVANCE_DEBUG = {}
 
@@ -813,8 +815,8 @@ def strip_accents(s):
 
 def _tokenize_text(text):
     try:
-        normalized = strip_accents(text or "")
-        return re.findall(r"\w+", normalized)
+        normalized = normalize_search_query(text or "")
+        return normalized.split()
     except Exception as e:
         logger.warning(f"Error tokenizando texto: {e}")
         return (text or "").lower().split()
@@ -881,7 +883,13 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 
 
 def normalize_search_query(query):
-    return strip_accents(query)
+    if not query:
+        return ""
+
+    normalized = strip_accents(query)
+    normalized = re.sub(r"[^\w\s/.-]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 # ------------------------------------------------------------
 # NUEVO: RELEVANCE SCORING GENERAL
@@ -3095,14 +3103,20 @@ def hybrid_search(
     }
 
     bm25_results = []
+    bm25_cutoff = None
     if bm25_index:
         try:
             tokenized_query = _tokenize_text(query)
             scores = bm25_index.get_scores(tokenized_query)
             ranked_indices = np.argsort(scores)[::-1]
+            if scores.size:
+                max_score = float(np.max(scores))
+                bm25_cutoff = max_score * BM25_THRESHOLD if max_score > 0 else None
             k_bm25 = min(max(top_k * 2, top_k), len(ranked_indices))
             for rank, idx in enumerate(ranked_indices[:k_bm25], 1):
                 if 0 <= idx < len(catalog):
+                    if bm25_cutoff is not None and scores[idx] < bm25_cutoff:
+                        continue
                     bm25_results.append((catalog[idx], float(scores[idx]), rank))
             logger.info("[DEBUG][BM25] %s candidatos", len(bm25_results))
         except Exception as e:
@@ -3111,6 +3125,7 @@ def hybrid_search(
         logger.warning("BM25 no disponible, usando solo FAISS")
 
     faiss_results = []
+    faiss_cutoff = None
     if index:
         try:
             emb = generate_embeddings_with_cache([query])[0]
@@ -3122,8 +3137,13 @@ def hybrid_search(
             k_for_index = min(max(top_k * multiplier, top_k), len(catalog))
 
             D, I = index.search(q_vec, k_for_index)
+            if D.size:
+                max_dist = float(np.max(D))
+                faiss_cutoff = max_dist * FAISS_THRESHOLD if max_dist > 0 else None
             for rank, (dist, idx) in enumerate(zip(D[0], I[0]), 1):
                 if 0 <= idx < len(catalog):
+                    if faiss_cutoff is not None and dist < faiss_cutoff:
+                        continue
                     faiss_results.append((catalog[idx], float(dist), rank))
             logger.info("[DEBUG][FAISS] %s candidatos", len(faiss_results))
         except Exception as e:
@@ -3139,19 +3159,23 @@ def hybrid_search(
     fused_scores = defaultdict(float)
     product_lookup = {}
 
-    def add_rrf_scores(results):
+    def add_rrf_scores(results, weight):
         for product, _score, rank in results:
             key = product.get("code") or product.get("name") or id(product)
             if key not in product_lookup:
-                product_lookup[key] = product
-            fused_scores[key] += 1.0 / (k_rrf + rank)
+                product_lookup[key] = dict(product)
+            fused_scores[key] += (weight or 1.0) / (k_rrf + rank)
 
-    add_rrf_scores(bm25_results)
-    add_rrf_scores(faiss_results)
+    add_rrf_scores(bm25_results, RRF_BM25_WEIGHT)
+    add_rrf_scores(faiss_results, RRF_FAISS_WEIGHT)
 
     sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
-    fused = [(product_lookup[k], fused_scores[k]) for k in sorted_keys[:max_candidates]]
+    fused = []
+    for k in sorted_keys[:max_candidates]:
+        product_with_score = dict(product_lookup[k])
+        product_with_score["_score"] = fused_scores[k]
+        fused.append((product_with_score, fused_scores[k]))
 
     logger.info("[DEBUG][RRF] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
 
@@ -3270,6 +3294,32 @@ def run_allowed_products_search(normalized_query: str, phone: str | None = None,
     payload["final_candidates"] = filtered_products
     payload["relevance_debug"] = LAST_RELEVANCE_DEBUG
     return payload
+
+
+def _order_products_for_llm(products: list[dict] | None) -> list[dict]:
+    if not products:
+        return []
+
+    return sorted(
+        products,
+        key=lambda p: float(p.get("_score") or p.get("score") or 0.0),
+        reverse=True,
+    )
+
+
+def _slice_products_for_llm(products: list[dict] | None) -> tuple[list[dict], list[list[dict]]]:
+    ordered = _order_products_for_llm(products)
+    top_products = ordered[:MAX_PRODUCTS_FOR_LLM]
+
+    chunks: list[list[dict]] = []
+    if ordered:
+        chunk_source = ordered
+        chunks = [
+            chunk_source[i:i + PRODUCTS_PER_CHUNK]
+            for i in range(0, len(chunk_source), PRODUCTS_PER_CHUNK)
+        ]
+
+    return top_products, chunks
 
 # ------------------------------------------------------------------
 # LISTAS MASIVAS
@@ -6485,6 +6535,8 @@ def orquestar_fran(mensaje_usuario, phone):
             products = filtered_products
             execution_context["filters_applied"].append(f"relevance: {len(filtered_products)}/{original_len} passed")
 
+    products = _order_products_for_llm(products)
+
     quality_assessment = assess_context_quality(query_for_search, products)
     execution_context["quality_assessment"] = quality_assessment
     log_quality_metrics(
@@ -6528,11 +6580,13 @@ def orquestar_fran(mensaje_usuario, phone):
             for p in products[:150]
         ], query_for_search)
 
+    top_products, product_chunks = _slice_products_for_llm(products)
+
     execution_context["products_shown_to_llm"] = min(len(products), MAX_PRODUCTS_FOR_LLM)
 
     if len(products) > MAX_PRODUCTS_FOR_LLM:
         execution_context["will_send_chunks"] = True
-        num_chunks = (len(products) + PRODUCTS_PER_CHUNK - 1) // PRODUCTS_PER_CHUNK
+        num_chunks = len(product_chunks)
         execution_context["chunk_info"] = {
             "total_chunks": num_chunks,
             "products_per_chunk": PRODUCTS_PER_CHUNK,
@@ -6542,7 +6596,7 @@ def orquestar_fran(mensaje_usuario, phone):
     result = generate_smart_ai_reply_v2(
         phone,
         user_message,
-        products[:MAX_PRODUCTS_FOR_LLM],
+        top_products,
         execution_context,
         system_prompt=CITATION_ENFORCED_PROMPT
     )
@@ -6553,13 +6607,12 @@ def orquestar_fran(mensaje_usuario, phone):
     execution_context["intent_detected"] = real_intent
 
     if products:
-        allowed_products = products[:MAX_PRODUCTS_FOR_LLM]
+        allowed_products = top_products
         reply = validate_and_fix_response(reply, allowed_products, phone, execution_context)
 
     if execution_context["will_send_chunks"] and products:
-        chunks = [products[i:i + PRODUCTS_PER_CHUNK] for i in range(0, len(products), PRODUCTS_PER_CHUNK)]
-        for idx, chunk in enumerate(chunks, 1):
-            chunk_text = f"━━━ Bloque {idx}/{len(chunks)} ({len(chunk)} productos) ━━━\n"
+        for idx, chunk in enumerate(product_chunks, 1):
+            chunk_text = f"━━━ Bloque {idx}/{len(product_chunks)} ({len(chunk)} productos) ━━━\n"
             chunk_text += format_search_results(chunk)
             if idx > 1:
                 time.sleep(0.5)
