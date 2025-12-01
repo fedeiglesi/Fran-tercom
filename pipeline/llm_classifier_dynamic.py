@@ -51,29 +51,70 @@ def build_classifier_schema(df):
     enum_model = build_enum_from_catalog(df, "modelo_moto")
 
     schema = {
-      "type": "object",
-      "properties": {
-        "intent": {
-          "type": "string",
-          "enum": ["busca_producto", "social", "otros"]
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "description": "Intención principal detectada en el mensaje",
+                "enum": [
+                    "busca_producto",  # compatibilidad retro
+                    "product_search",
+                    "follow_up",
+                    "cart_action",
+                    "social",
+                    "otros",
+                ],
+            },
+            "action_type": {
+                "type": ["string", "null"],
+                "description": "Acción de carrito cuando aplica",
+                "enum": ["add", "remove", "set", "clear", "info"],
+            },
+            "quantity": {
+                "type": ["integer", "null"],
+                "description": "Cantidad solicitada si el usuario la menciona",
+            },
+            "product_reference": {
+                "type": ["string", "null"],
+                "description": "Referencia textual al producto (código, nombre, alias)",
+            },
+            "is_follow_up": {
+                "type": ["boolean", "null"],
+                "description": "Marca si el mensaje depende del contexto previo",
+            },
+            "multi_intent": {
+                "type": "array",
+                "description": "Lista opcional de intents detectados en el mismo mensaje",
+                "items": {
+                    "type": "object",
+                    "required": ["intent", "confidence"],
+                    "properties": {
+                        "intent": {"type": "string"},
+                        "confidence": {"type": "number"},
+                        "action_type": {"type": ["string", "null"]},
+                        "quantity": {"type": ["integer", "null"]},
+                        "product_reference": {"type": ["string", "null"]},
+                        "span": {"type": ["string", "null"]},
+                    },
+                },
+            },
+            "product_type": {
+                "type": ["string", "null"],
+            },
+            "brand": {
+                "type": ["string", "null"],
+            },
+            "model": {
+                "type": ["string", "null"],
+            },
+            "displacement_cc": {
+                "type": ["integer", "null"],
+            },
+            "confidence": {
+                "type": "number",
+            },
         },
-        "product_type": {
-          "type": ["string", "null"],
-        },
-        "brand": {
-          "type": ["string", "null"],
-        },
-        "model": {
-          "type": ["string", "null"],
-        },
-        "displacement_cc": {
-          "type": ["integer", "null"],
-        },
-        "confidence": {
-          "type": "number"
-        }
-      },
-      "required": ["intent", "confidence"]
+        "required": ["intent", "confidence"],
     }
 
     # Insertar enums dinámicos cuando son manejables
@@ -97,7 +138,11 @@ Sos un clasificador del dominio MOTOPARTES.
 No inventes modelos ni marcas.
 Si no estás seguro → usa null.
 Solo usa valores que aparezcan en el catálogo.
-Devolvé JSON válido.
+Detectá follow-ups y acciones de carrito aunque sean implícitas ("me das dos?", "sumame esas").
+Para follow-ups, marcá is_follow_up=true y mantené product_reference con la mención textual.
+Si ves cantidades, completa quantity con número entero.
+Para acciones de carrito usa action_type=add|remove|set|clear|info.
+Devolvé JSON válido usando el schema provisto por el sistema.
 Mensaje del usuario:
 {message}
 """

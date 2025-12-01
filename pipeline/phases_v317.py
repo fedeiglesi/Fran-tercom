@@ -231,9 +231,11 @@ PHASE7_SCHEMA = {
                 "required": ["product_id"],
                 "properties": {
                     "product_id": {"type": "string"},
+                    "product_code": {"type": ["string", "null"]},
                     "name": {"type": ["string", "null"]},
                     "price_ars": {"type": ["number", "null"]},
                     "price_usd": {"type": ["number", "null"]},
+                    "compatibility": {"type": ["string", "null"]},
                     "badge": {"type": "string"},
                 },
             },
@@ -589,29 +591,66 @@ def fase7_whatsapp_response(
     search_output: Dict[str, Any],
     reasoning_output: Dict[str, Any],
     fallback_output: Dict[str, Any],
+    classifier_output: Optional[Dict[str, Any]] = None,
 ):
     evaluated = reasoning_output.get("candidates_evaluated", [])
     confident = [c for c in evaluated if c.get("compatibility_decision") == "compatible" and c.get("confidence_score", 0) >= 0.6]
 
-    if confident:
+    search_lookup = {r.get("product_id"): r for r in search_output.get("results", [])}
+    follow_up_pid = _resolve_product_reference(classifier_output or {}, search_output) if classifier_output else None
+    requested_qty = _extract_requested_quantity(classifier_output or {}) if classifier_output else None
+
+    if classifier_output and classifier_output.get("intent") in {"cart_action", "follow_up"} and follow_up_pid and follow_up_pid in search_lookup:
+        badge = "🟢"
+        resp_type = "confident_match"
+        result = search_lookup[follow_up_pid]
+        price = _format_price(result.get("price_ars"), result.get("price_usd"))
+        compatibility = _compatibility_text(result)
+        qty = requested_qty or 1
+        message_parts = [
+            f"Perfecto, agregué {qty} unidades de {result.get('name','')} (Código {follow_up_pid}) al carrito.",
+            f"Precio: {price}",
+        ]
+        if compatibility:
+            message_parts.append(f"Compatibilidad: {compatibility}")
+        message = " ".join([part for part in message_parts if part])
+        products = [
+            {
+                "product_id": follow_up_pid,
+                "product_code": follow_up_pid,
+                "name": result.get("name"),
+                "price_ars": result.get("price_ars"),
+                "price_usd": result.get("price_usd"),
+                "compatibility": compatibility,
+                "badge": badge,
+            }
+        ]
+    elif confident:
         chosen = confident[:3]
         resp_type = "confident_match"
         badge = "🟢"
         formatted = []
+        products = []
         for c in chosen:
-            price = _format_price(c.get("price_ars"), c.get("price_usd"))
-            formatted.append(f"{badge} {c['product_id']} · {c.get('name','')} · {price} ({c['confidence_score']:.2f})")
+            lookup = search_lookup.get(c.get("product_id"), {})
+            price = _format_price(c.get("price_ars") or lookup.get("price_ars"), c.get("price_usd") or lookup.get("price_usd"))
+            compatibility = _compatibility_text(lookup)
+            formatted.append(
+                f"{badge} {c['product_id']} · {c.get('name','')} · {price} ({c['confidence_score']:.2f})"
+                + (f" · Compatibilidad: {compatibility}" if compatibility else "")
+            )
+            products.append(
+                {
+                    "product_id": c.get("product_id", ""),
+                    "product_code": c.get("product_id", ""),
+                    "name": c.get("name") or lookup.get("name"),
+                    "price_ars": c.get("price_ars") or lookup.get("price_ars"),
+                    "price_usd": c.get("price_usd") or lookup.get("price_usd"),
+                    "compatibility": compatibility,
+                    "badge": badge,
+                }
+            )
         message = "Encontré opciones compatibles:\n" + "\n".join(formatted)
-        products = [
-            {
-                "product_id": c.get("product_id", ""),
-                "name": c.get("name"),
-                "price_ars": c.get("price_ars"),
-                "price_usd": c.get("price_usd"),
-                "badge": badge,
-            }
-            for c in chosen
-        ]
     elif fallback_output.get("items"):
         resp_type = "partial_match"
         badge = "🟠"
@@ -620,13 +659,19 @@ def fase7_whatsapp_response(
         products = []
         for item in items[:3]:
             price = _format_price(item.get("price_ars"), item.get("price_usd"))
-            formatted.append(f"{badge} {item.get('product_id')} · {item.get('name','')} · {price}")
+            lookup = search_lookup.get(item.get("product_id"), {})
+            compatibility = _compatibility_text(lookup)
+            formatted.append(
+                f"{badge} {item.get('product_id')} · {item.get('name','')} · {price}" + (f" · Compatibilidad: {compatibility}" if compatibility else "")
+            )
             products.append(
                 {
                     "product_id": item.get("product_id", ""),
-                    "name": item.get("name"),
-                    "price_ars": item.get("price_ars"),
-                    "price_usd": item.get("price_usd"),
+                    "product_code": item.get("product_id", ""),
+                    "name": item.get("name") or lookup.get("name"),
+                    "price_ars": item.get("price_ars") or lookup.get("price_ars"),
+                    "price_usd": item.get("price_usd") or lookup.get("price_usd"),
+                    "compatibility": compatibility,
                     "badge": badge,
                 }
             )
@@ -677,4 +722,71 @@ def _structured_rerank(evaluated: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     payload = {"reranked": reranked}
     validate(instance=payload, schema=RERANK_SCHEMA)
     return reranked
+
+
+def _compatibility_text(result: Dict[str, Any]) -> Optional[str]:
+    data = result.get("catalog_data", {}) if result else {}
+    compat = data.get("compatibilidad_declarada")
+    if compat:
+        return compat
+
+    parts = [p for p in [data.get("marca_moto"), data.get("modelo_moto"), data.get("cilindrada")] if p]
+    if parts:
+        return " | ".join(str(p) for p in parts if p)
+    return None
+
+
+def _resolve_product_reference(classifier_output: Dict[str, Any], search_output: Dict[str, Any]) -> Optional[str]:
+    reference = classifier_output.get("product_reference") or ""
+    intents = classifier_output.get("multi_intent") or []
+    if not reference:
+        for intent in intents:
+            if intent.get("product_reference"):
+                reference = intent.get("product_reference") or ""
+                break
+    if not reference:
+        return None
+
+    ref_norm = _normalize_text(reference)
+    if not ref_norm:
+        return None
+
+    best_id = None
+    best_score = 0.0
+    for result in search_output.get("results", []):
+        pid = str(result.get("product_id", ""))
+        text = " ".join([pid, result.get("name", ""), result.get("catalog_data", {}).get("compatibilidad_declarada", "")])
+        cand_norm = _normalize_text(text)
+        tokens_ref = set(_tokenize(ref_norm))
+        tokens_cand = set(_tokenize(cand_norm))
+        if not tokens_cand:
+            continue
+        overlap = len(tokens_ref & tokens_cand) / max(1, len(tokens_ref))
+        direct_hit = 1.0 if ref_norm in cand_norm or ref_norm in pid.lower() else 0.0
+        score = direct_hit or overlap
+        if score > best_score:
+            best_score = score
+            best_id = pid
+
+    if best_score < 0.2:
+        return None
+    return best_id
+
+
+def _extract_requested_quantity(classifier_output: Dict[str, Any]) -> Optional[int]:
+    quantity = classifier_output.get("quantity")
+    if quantity is not None:
+        try:
+            return int(quantity)
+        except Exception:
+            return None
+
+    for intent in classifier_output.get("multi_intent") or []:
+        qty = intent.get("quantity")
+        if qty is not None:
+            try:
+                return int(qty)
+            except Exception:
+                continue
+    return None
 
