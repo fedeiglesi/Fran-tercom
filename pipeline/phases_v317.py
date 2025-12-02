@@ -370,9 +370,9 @@ class HybridSearchConfig:
     bm25_weight: float = 1.0
     faiss_weight: float = 1.0
     fuzzy_weight: float = 0.8
-    bm25_min_ratio: float = 0.15
-    faiss_min_score: float = 0.25
-    fuzzy_min_ratio: float = 50.0
+    bm25_min_ratio: float = 0.18
+    faiss_min_score: float = 0.28
+    fuzzy_min_ratio: float = 55.0
     fuzzy_max_ratio: float = 90.0
     reranker_max_candidates: int = 10
     reranker: Optional[Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
@@ -578,6 +578,7 @@ def fase2_hybrid_search(
 
 def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output: Dict[str, Any]):
     candidates = []
+    alternative_candidates = []
     user_brand = _normalize_text(classifier_output.get("brand") or "")
     user_model = _normalize_text(classifier_output.get("model") or "")
 
@@ -585,6 +586,8 @@ def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output:
         data = result.get("catalog_data", {})
         brand = _normalize_text(data.get("marca_moto") or "")
         model = _normalize_text(data.get("modelo_moto") or "")
+
+        brand_mismatch = bool(brand and user_brand and brand != user_brand)
 
         if brand and model and user_brand and user_model:
             if brand == user_brand and model == user_model:
@@ -597,15 +600,31 @@ def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output:
             status = "pending_reasoning"
             confidence = 0.35 if brand or model else 0.25
 
-        candidates.append(
-            {
-                "product_id": result["product_id"],
-                "status": status,
-                "confidence": float(confidence),
-            }
-        )
+        candidate = {
+            "product_id": result["product_id"],
+            "status": status,
+            "confidence": float(confidence),
+        }
 
-    payload = {"phase": "compatibility_filter", "candidates": candidates}
+        if status == "pending_reasoning" and not brand:
+            candidate["sugerencia_alternativa"] = True
+
+        candidates.append(candidate)
+
+        if brand_mismatch:
+            alternative_candidates.append(
+                {
+                    "product_id": result["product_id"],
+                    "status": "pending_reasoning",
+                    "confidence": 0.25,
+                    "sugerencia_alternativa": True,
+                }
+            )
+
+    payload = {
+        "phase": "compatibility_filter",
+        "candidates": candidates + alternative_candidates,
+    }
     validate(instance=payload, schema=PHASE3_SCHEMA)
     return payload
 
@@ -632,6 +651,7 @@ def fase4_llm2_reasoning(
     needs_requery = False
 
     for candidate in compatibility_output.get("candidates", []):
+        suggestion_flag = bool(candidate.get("sugerencia_alternativa"))
         if candidate.get("status") != "pending_reasoning":
             decision = "compatible" if candidate["status"] == "hard_compatible" else "incompatible"
             confidence = candidate.get("confidence", 0.5)
@@ -646,6 +666,7 @@ def fase4_llm2_reasoning(
                     "name": catalog_lookup.get(candidate["product_id"], {}).get("name"),
                     "price_ars": catalog_lookup.get(candidate["product_id"], {}).get("price_ars"),
                     "price_usd": catalog_lookup.get(candidate["product_id"], {}).get("price_usd"),
+                    "sugerencia_alternativa": suggestion_flag,
                 }
             )
             continue
@@ -656,13 +677,13 @@ def fase4_llm2_reasoning(
         model = _normalize_text(data.get("modelo_moto") or "")
         cil = data.get("cilindrada")
 
-        confidence = 0.4
+        confidence = 0.5
         decision = "marginal"
         if brand and user_brand and brand == user_brand:
             confidence = 0.65
             decision = "compatible"
         elif brand and user_brand and brand != user_brand:
-            confidence = 0.25
+            confidence = 0.45
             decision = "incompatible"
         elif model and user_model and model == user_model:
             confidence = 0.6
@@ -671,7 +692,7 @@ def fase4_llm2_reasoning(
             decision = "incompatible"
             confidence = 0.3
 
-        if decision != "incompatible" and confidence < 0.45:
+        if decision != "incompatible" and confidence < 0.35:
             needs_requery = True
 
         reasoning = (
@@ -690,6 +711,7 @@ def fase4_llm2_reasoning(
                 "name": catalog_item.get("name"),
                 "price_ars": catalog_item.get("price_ars"),
                 "price_usd": catalog_item.get("price_usd"),
+                "sugerencia_alternativa": suggestion_flag,
             }
         )
 
@@ -740,7 +762,7 @@ def fase5_requery(original_query: str, classifier_output: Dict[str, Any], attemp
 
 
 def fase6_fallback(search_output: Dict[str, Any], reasoning_output: Dict[str, Any]):
-    confident = [c for c in reasoning_output.get("candidates_evaluated", []) if c.get("confidence_score", 0) >= 0.6 and c.get("compatibility_decision") == "compatible"]
+    confident = [c for c in reasoning_output.get("candidates_evaluated", []) if c.get("confidence_score", 0) >= 0.5 and c.get("compatibility_decision") == "compatible"]
 
     if confident:
         items = [
@@ -779,7 +801,7 @@ def fase7_whatsapp_response(
     classifier_output: Optional[Dict[str, Any]] = None,
 ):
     evaluated = reasoning_output.get("candidates_evaluated", [])
-    confident = [c for c in evaluated if c.get("compatibility_decision") == "compatible" and c.get("confidence_score", 0) >= 0.6]
+    confident = [c for c in evaluated if c.get("compatibility_decision") == "compatible" and c.get("confidence_score", 0) >= 0.5]
 
     search_lookup = {r.get("product_id"): r for r in search_output.get("results", [])}
     follow_up_pid = _resolve_product_reference(classifier_output or {}, search_output) if classifier_output else None
