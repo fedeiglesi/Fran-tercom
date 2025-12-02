@@ -1,29 +1,25 @@
-# Web Framework
-flask==3.0.3
-gunicorn==21.2.0
+# API
+fastapi==0.111.1
+uvicorn==0.30.1
+gunicorn==22.0.0
 
-# Twilio
-twilio==9.0.4
+# Async database
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
 
-# OpenAI
-# Se requiere la nueva librería oficial (>=1.x) para usar la clase OpenAI
+# Cache / rate limiting
+redis==5.0.7
+
+# LLM y orquestación
 openai==1.52.0
-jsonschema==4.23.0
-httpx==0.27.0
+langgraph==0.1.19
+pydantic==2.8.2
 
-# Search
-rapidfuzz==3.10.0
-rank-bm25==0.2.2
+# Búsqueda híbrida
+qdrant-client==1.12.0
 
-# FAISS
-faiss-cpu==1.8.0
-numpy==1.26.4
-
-# HTTP
-requests==2.32.3
-
-# Utils
+# Utilidades
 python-dotenv==1.0.1
-
-cachetools==5.5.0
+requests==2.32.3
+numpy==1.26.4
 pytest==8.3.2
