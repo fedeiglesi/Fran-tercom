@@ -1,3 +1,10 @@
+## Fran 4.0 (Arquitectura asincrónica)
+- Migración a **FastAPI** con servidor uvicorn para soportar `async/await` y despliegues en Railway.
+- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) y memoria de sesión/rate limiting en **Redis**.
+- Motor RAG externalizado a **Qdrant** con búsqueda híbrida y filtrado de metadata.
+- Orquestador reescrito sobre **LangGraph** con bucle de razonamiento y herramientas desacopladas.
+- Código modular en `fran_v4/` separando base de datos, motor de búsqueda, LLM y grafo del agente.
+
 Constante	Valor	Descripción
 MAX_SEARCH_RESULTS	60	Máx productos de búsqueda híbrida
 MAX_PRODUCTS_FOR_LLM	15	Máx productos enviados al LLM
