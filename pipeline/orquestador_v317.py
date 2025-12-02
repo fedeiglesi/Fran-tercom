@@ -6,8 +6,27 @@ from pipeline.phases_v317 import (
     fase5_requery,
     fase6_fallback,
     fase7_whatsapp_response,
+    _normalize_text,
 )
 from pipeline.router_dynamic import router_fase0_dynamic
+
+
+def _compose_search_query(base_query: str, classifier: dict) -> str:
+    """Combina la consulta base con entidades detectadas para enriquecer la búsqueda."""
+
+    normalized_base = _normalize_text(base_query)
+    additions = []
+
+    for field in ("product_type", "brand", "model"):
+        value = classifier.get(field)
+        normalized_value = _normalize_text(value or "")
+        if normalized_value and normalized_value not in normalized_base:
+            additions.append(str(value))
+
+    if additions:
+        return " ".join([base_query] + additions).strip()
+
+    return base_query.strip()
 
 
 def orquestar_v317(message, df, catalog_centroid, schema, embedding_fn=None, max_requeries: int = 2):
@@ -43,8 +62,9 @@ def orquestar_v317(message, df, catalog_centroid, schema, embedding_fn=None, max
                 clasif["primary_query_from_multi_intent"] = best
 
     while True:
+        enriched_query = _compose_search_query(current_query, clasif)
         # --- FASE 2 ---
-        search_output = fase2_hybrid_search(current_query, df, embedding_fn=embedding_fn)
+        search_output = fase2_hybrid_search(enriched_query, df, embedding_fn=embedding_fn)
         trace.append(search_output)
 
         # --- FASE 3 ---
