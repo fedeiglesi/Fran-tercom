@@ -28,3 +28,13 @@ PENDING_ACTION_TTL	30min	TTL de pending actions
 ## Notas sobre los arreglos recientes
 - Se guarda un *snapshot* de las respuestas de búsquedas múltiples cuando se devuelven listas de productos. Así, si el usuario luego pide acciones en bloque (por ejemplo, "dame 10 de cada producto"), el sistema reutiliza esa lista sin tener que repetirla.
 - La lógica de guardado de estos *snapshots* se unificó en un helper (`_persist_search_snapshot`) para evitar duplicación y asegurar que todas las rutas que generan listas queden alineadas.
+
+## Diagnóstico rápido: `ConnectionRefusedError` con PostgreSQL
+Un `ConnectionRefusedError: [Errno 111] Connection refused` aparece **antes** de autenticar porque ningún servicio está escuchando en el host/puerto configurados. Antes de revisar credenciales o `pg_hba.conf`, valida lo siguiente:
+
+1. **Servicio en marcha**: verifica que PostgreSQL esté activo y escuchando en el puerto esperado (`psql -h <host> -U <usuario> -d <db>`).
+2. **Host y puerto correctos**: confirma que la URL de conexión sea alcanzable desde el contenedor donde corre la app.
+3. **Red Docker**: si usas contenedores, comprueba que app y base estén en la misma red (`docker network ls` + `docker network inspect <red>`).
+4. **Puertos expuestos**: valida que el puerto de PostgreSQL esté publicado y sin bloqueos de firewall.
+
+Solo después de confirmar la conectividad de red tiene sentido revisar errores de autenticación (p. ej., `FATAL: password authentication failed`).

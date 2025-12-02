@@ -298,7 +298,10 @@ def calculate_relevance_score(query: str, product: dict, deduplicate: bool = Tru
     # 1. Keyword overlap (40%)
     all_product_tokens = name_tokens | search_tokens
     if all_product_tokens:
-        overlap = len(query_tokens & all_product_tokens) / max(len(query_tokens), 1)
+        precision = len(query_tokens & all_product_tokens) / max(len(query_tokens), 1)
+        recall = len(query_tokens & all_product_tokens) / max(len(all_product_tokens), 1)
+        # Penalizamos queries parciales usando mezcla de precisión/recall
+        overlap = (0.7 * precision) + (0.3 * recall)
     else:
         overlap = 0.0
 

@@ -15,6 +15,16 @@ from openai import OpenAI
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "test-key"))
 
+
+class _StubResponses:
+    def create(self, *args, **kwargs):
+        raise RuntimeError("responses.create stubbed – monkeypatch en tests")
+
+
+# Asegura que exista client.responses para poder hacer monkeypatch en tests
+if not getattr(client, "responses", None):
+    client.responses = _StubResponses()
+
 def _iter_column(df, col: str) -> Iterable[str]:
     """Itera sobre una columna de forma dinámica sin asumir tipo de df."""
 
@@ -125,12 +135,15 @@ def build_classifier_schema(df):
 
     # Insertar enums dinámicos cuando son manejables
     if enum_product:
+        enum_product = enum_product + [None] if None not in enum_product else enum_product
         schema["properties"]["product_type"]["enum"] = enum_product
 
     if enum_brand:
+        enum_brand = enum_brand + [None] if None not in enum_brand else enum_brand
         schema["properties"]["brand"]["enum"] = enum_brand
 
     if enum_model:
+        enum_model = enum_model + [None] if None not in enum_model else enum_model
         schema["properties"]["model"]["enum"] = enum_model
 
     return schema
