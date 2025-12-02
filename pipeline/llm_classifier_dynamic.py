@@ -46,7 +46,11 @@ def build_enum_from_catalog(df, col):
     return values
 
 def build_classifier_schema(df):
-    enum_product = build_enum_from_catalog(df, "categoria")
+    enum_product = (
+        build_enum_from_catalog(df, "categoria")
+        or build_enum_from_catalog(df, "categoria_final")
+        or build_enum_from_catalog(df, "familia_nombre")
+    )
     enum_brand = build_enum_from_catalog(df, "marca_moto")
     enum_model = build_enum_from_catalog(df, "modelo_moto")
 
@@ -83,7 +87,7 @@ def build_classifier_schema(df):
                 "description": "Marca si el mensaje depende del contexto previo",
             },
             "multi_intent": {
-                "type": "array",
+                "type": ["array", "null"],
                 "description": "Lista opcional de intents detectados en el mismo mensaje",
                 "items": {
                     "type": "object",
@@ -179,16 +183,34 @@ Mensaje del usuario:
 
     should_stream = stream or len(message) > 1500
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "system", "content": prompt}],
-        response_format={"type": "json_schema", "json_schema": {"name": "classifier_schema", "schema": schema}},
-        temperature=0,
-        stream=should_stream,
-        max_tokens=500,
-    )
+    request_payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "system", "content": prompt}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "classifier_schema", "schema": schema}},
+        "temperature": 0,
+        "stream": should_stream,
+        "max_tokens": 500,
+    }
 
-    if should_stream:
+    def _run_llm():
+        responder = getattr(client, "responses", None)
+        if responder and hasattr(responder, "create"):
+            try:
+                return responder.create(**request_payload)
+            except Exception:
+                if not os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") == "test-key":
+                    return responder.create(**request_payload)
+
+        if not os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") == "test-key":
+            raise RuntimeError("OPENAI_API_KEY no configurada y no hay stub de responses disponible")
+
+        return client.chat.completions.create(**request_payload)
+
+    response = _run_llm()
+
+    content_text = _get_output_text(response)
+
+    if content_text is None and should_stream:
         chunks = []
         for chunk in response:
             delta = None
@@ -199,11 +221,9 @@ Mensaje del usuario:
                 chunks.append(delta)
 
         content_text = "".join(chunks) if chunks else None
-    else:
-        content_text = None
-        if response and getattr(response, "choices", None):
-            first_choice = response.choices[0]
-            content_text = getattr(first_choice.message, "content", None)
+    elif content_text is None and response and getattr(response, "choices", None):
+        first_choice = response.choices[0]
+        content_text = getattr(first_choice.message, "content", None)
 
     if content_text is None:
         raise ValueError("No output_text received from LLM response")
@@ -211,4 +231,8 @@ Mensaje del usuario:
     content = json.loads(content_text)
     # Validación JSON-first
     validate(instance=content, schema=schema)
+
+    if content.get("multi_intent") is None:
+        content["multi_intent"] = []
+
     return content

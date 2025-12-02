@@ -64,7 +64,12 @@ def orquestar_v317(message, df, catalog_centroid, schema, embedding_fn=None, max
     while True:
         enriched_query = _compose_search_query(current_query, clasif)
         # --- FASE 2 ---
-        search_output = fase2_hybrid_search(enriched_query, df, embedding_fn=embedding_fn)
+        search_output = fase2_hybrid_search(
+            enriched_query,
+            df,
+            embedding_fn=embedding_fn,
+            preferred_product_type=clasif.get("product_type"),
+        )
         trace.append(search_output)
 
         # --- FASE 3 ---
