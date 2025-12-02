@@ -1,4 +1,8 @@
+import logging
+
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -27,16 +31,40 @@ def build_catalog_centroid(catalog_texts):
     if not catalog_texts:
         return None
 
-    embeddings = router_model.encode(catalog_texts, convert_to_numpy=True)
+    normalized = []
+    for text in catalog_texts:
+        if not text:
+            continue
+        clean = " ".join(str(text).split())
+        if clean:
+            normalized.append(clean)
+
+    if not normalized:
+        return None
+
+    try:
+        embeddings = router_model.encode(normalized, convert_to_numpy=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[router] Fallo generando embeddings de centroid: %s", exc)
+        return None
+
     if embeddings is None or len(embeddings) == 0:
         return None
 
-    centroid = np.mean(embeddings, axis=0)
+    matrix = np.array(embeddings, dtype="float32")
+    if matrix.ndim != 2 or matrix.shape[1] == 0:
+        return None
+
+    centroid = np.mean(matrix, axis=0)
     norm = float(np.linalg.norm(centroid)) or 0.0
     if norm == 0.0 or np.isnan(norm):
         return None
 
-    return centroid / norm
+    validated = centroid / norm
+    if np.any(np.isnan(validated)):
+        return None
+
+    return validated
 
 def compute_similarity(text, centroid):
     if centroid is None:

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import unicodedata
@@ -8,6 +9,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import faiss
 import numpy as np
 from rapidfuzz import fuzz
+
+logger = logging.getLogger(__name__)
 
 try:
     from rank_bm25 import BM25Okapi
@@ -43,6 +46,38 @@ def _normalize_text(text: str) -> str:
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     text = re.sub(r"[^a-z0-9\s/]+", " ", text)
     return " ".join(text.split())
+
+
+def _normalize_query_noise(text: str) -> str:
+    """Reduce repeticiones y ruido acumulado en queries sin hardcodear vocabulario.
+
+    - Se normaliza para detectar repeticiones consecutivas y patrones redundantes.
+    - Se preserva el orden original pero se eliminan tokens duplicados adyacentes y
+      n-gramas repetidos que suelen aparecer tras múltiples requery.
+    """
+
+    normalized = _normalize_text(text)
+    tokens = normalized.split()
+    if not tokens:
+        return normalized
+
+    deduped: List[str] = []
+    seen_ngrams = set()
+    window = 3
+
+    for idx, token in enumerate(tokens):
+        if deduped and token == deduped[-1]:
+            continue
+
+        start = max(0, idx - window)
+        ngram = tuple(tokens[start : idx + 1])
+        if ngram in seen_ngrams:
+            continue
+
+        seen_ngrams.add(ngram)
+        deduped.append(token)
+
+    return " ".join(deduped)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -369,13 +404,26 @@ class HybridSearchConfig:
     rrf_k: float = 60.0
     bm25_weight: float = 1.0
     faiss_weight: float = 1.0
-    fuzzy_weight: float = 0.8
+    fuzzy_weight: float = 0.65
+    fuzzy_penalty: float = 0.08
+    consensus_boost: float = 0.3
+    partial_consensus_boost: float = 0.12
     bm25_min_ratio: float = 0.18
     faiss_min_score: float = 0.28
     fuzzy_min_ratio: float = 55.0
     fuzzy_max_ratio: float = 90.0
+    fuzzy_top_k: int = 75
     reranker_max_candidates: int = 10
     reranker: Optional[Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
+
+
+@dataclass
+class CompatibilityFilterConfig:
+    strong_match_threshold: float = 0.82
+    soft_match_threshold: float = 0.6
+    mismatch_floor: float = 0.25
+    inferred_bonus: float = 0.12
+    alternative_penalty: float = 0.15
 
 
 def _family_key(row: Dict[str, Any]) -> str:
@@ -455,13 +503,15 @@ def fase2_hybrid_search(
     reranker_fn = config.reranker or (lambda q, cands: _neural_rerank(q, cands, embedding_fn))
     component_k = max(config.component_k, config.top_k)
 
+    normalized_query = _normalize_query_noise(query)
+
     bm25_index, corpus_tokens = _build_bm25_index(catalog)
     faiss_index, _ = _build_faiss_index(catalog, embedding_fn) if catalog else (None, [])
     family_aliases = _resolve_family_aliases(catalog)
     family_norms = [_family_key(row) for row in catalog]
     preferred_families = _match_requested_families(preferred_product_type, family_aliases)
 
-    query_tokens = _tokenize(query)
+    query_tokens = _tokenize(normalized_query)
     bm25_scores = (
         bm25_index.get_scores(query_tokens).tolist()
         if bm25_index and query_tokens
@@ -471,7 +521,7 @@ def fase2_hybrid_search(
     faiss_scores: List[float] = []
     faiss_max = 0.0
     if faiss_index:
-        query_vec = embedding_fn([query])
+        query_vec = embedding_fn([normalized_query])
         if query_vec:
             vector = np.array(query_vec[0], dtype="float32").reshape(1, -1)
             faiss.normalize_L2(vector)
@@ -512,7 +562,8 @@ def fase2_hybrid_search(
             fuzzy_ratio = 0.0
         fuzzy_scores.append(fuzzy_ratio)
     fuzzy_sorted = sorted(enumerate(fuzzy_scores), key=lambda x: x[1], reverse=True)
-    fuzzy_top = [(i, score) for i, score in fuzzy_sorted[:component_k] if score >= fuzzy_threshold]
+    fuzzy_slice = min(component_k, config.fuzzy_top_k)
+    fuzzy_top = [(i, score) for i, score in fuzzy_sorted[:fuzzy_slice] if score >= fuzzy_threshold]
     fuzzy_candidates = {i for i, _ in fuzzy_top}
 
     candidate_pool = bm25_candidates | faiss_candidates | fuzzy_candidates
@@ -549,16 +600,32 @@ def fase2_hybrid_search(
         )
         fuzzy_norm = fuzzy_scores[idx] / 100.0
 
+        consensus = (idx in bm25_candidates and idx in faiss_candidates)
+        partial_consensus = (
+            (idx in bm25_candidates and idx in fuzzy_candidates)
+            or (idx in faiss_candidates and idx in fuzzy_candidates)
+        )
+
+        adaptive_bm25_w = config.bm25_weight * (1.15 if consensus else 1.0)
+        adaptive_faiss_w = config.faiss_weight * (1.1 if consensus else 1.0)
+        adaptive_fuzzy_w = config.fuzzy_weight * (0.9 if consensus else 1.0)
+
         rrf_score = (
-            (config.bm25_weight / (config.rrf_k + rank_bm25))
-            + (config.faiss_weight / (config.rrf_k + rank_faiss))
-            + (config.fuzzy_weight / (config.rrf_k + rank_fuzzy))
+            (adaptive_bm25_w / (config.rrf_k + rank_bm25))
+            + (adaptive_faiss_w / (config.rrf_k + rank_faiss))
+            + (adaptive_fuzzy_w / (config.rrf_k + rank_fuzzy))
         )
+
         calibrated = rrf_score + 0.25 * (
-            (config.bm25_weight * bm25_norm)
-            + (config.faiss_weight * faiss_norm)
-            + (config.fuzzy_weight * fuzzy_norm)
+            (adaptive_bm25_w * bm25_norm)
+            + (adaptive_faiss_w * faiss_norm)
+            + (adaptive_fuzzy_w * max(fuzzy_norm - config.fuzzy_penalty, 0.0))
         )
+
+        if consensus:
+            calibrated *= 1.0 + config.consensus_boost
+        elif partial_consensus:
+            calibrated *= 1.0 + config.partial_consensus_boost
 
         ranks.append(
             (
@@ -622,14 +689,59 @@ def fase2_hybrid_search(
         except Exception:
             results = pre_results
 
-    payload = {"phase": "search", "query": query, "results": results[: config.top_k]}
+    rrf_log = [
+        {"idx": idx, "score": combined}
+        for idx, combined, _ in ranks[: config.top_k]
+    ]
+
+    log_data = {
+        "phase": "fase2_hybrid",
+        "query_original": query,
+        "query_normalized": normalized_query,
+        "thresholds": {
+            "bm25_min_allowed": bm25_min_allowed,
+            "faiss_min_score": config.faiss_min_score,
+            "fuzzy_threshold": fuzzy_threshold,
+        },
+        "bm25_top": [{"idx": i, "score": s} for i, s in bm25_top],
+        "faiss_top": [{"idx": i, "score": s} for i, s in faiss_top],
+        "fuzzy_top": [{"idx": i, "score": s} for i, s in fuzzy_top],
+        "rrf_final": rrf_log,
+        "preferred_families": list(preferred_families),
+        "candidate_pool_size": len(candidate_pool),
+        "filter_decisions": [],
+        "metadata_inferida": {
+            "has_router_centroid": bool(preferred_product_type),
+            "families_detected": len(preferred_families),
+        },
+    }
+
+    try:
+        logger.info(json.dumps(log_data, ensure_ascii=False))
+    except Exception:
+        pass
+
+    payload = {
+        "phase": "search",
+        "query": query,
+        "normalized_query": normalized_query,
+        "results": results[: config.top_k],
+        "debug": log_data,
+    }
     validate(instance=payload, schema=PHASE2_SCHEMA)
     return payload
 
 
-def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output: Dict[str, Any]):
+def fase3_compatibility_filter(
+    search_output: Dict[str, Any],
+    classifier_output: Dict[str, Any],
+    config: Optional[CompatibilityFilterConfig] = None,
+):
+    config = config or CompatibilityFilterConfig()
+
     candidates = []
     alternative_candidates = []
+    decisions = []
     user_brand = _normalize_text(classifier_output.get("brand") or "")
     user_model = _normalize_text(classifier_output.get("model") or "")
 
@@ -638,18 +750,24 @@ def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output:
         brand = _normalize_text(data.get("marca_moto") or "")
         model = _normalize_text(data.get("modelo_moto") or "")
 
-        brand_mismatch = bool(brand and user_brand and brand != user_brand)
+        brand_score = fuzz.token_set_ratio(user_brand, brand) / 100.0 if user_brand and brand else 0.0
+        model_score = fuzz.token_set_ratio(user_model, model) / 100.0 if user_model and model else 0.0
+        combined_score = max(brand_score, model_score)
 
-        if brand and model and user_brand and user_model:
-            if brand == user_brand and model == user_model:
-                status = "hard_compatible"
-                confidence = 0.92
-            else:
-                status = "hard_incompatible"
-                confidence = 0.6
+        inferred_confidence = max(
+            config.mismatch_floor,
+            min(0.95, (brand_score + model_score) / 2.0 + (config.inferred_bonus if brand or model else 0.0)),
+        )
+
+        if combined_score >= config.strong_match_threshold:
+            status = "hard_compatible"
+            confidence = max(0.9, inferred_confidence)
+        elif combined_score >= config.soft_match_threshold:
+            status = "pending_reasoning"
+            confidence = inferred_confidence
         else:
             status = "pending_reasoning"
-            confidence = 0.35 if brand or model else 0.25
+            confidence = max(config.mismatch_floor, inferred_confidence - config.alternative_penalty)
 
         candidate = {
             "product_id": result["product_id"],
@@ -661,13 +779,23 @@ def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output:
             candidate["sugerencia_alternativa"] = True
 
         candidates.append(candidate)
+        decisions.append(
+            {
+                "product_id": result["product_id"],
+                "brand_score": brand_score,
+                "model_score": model_score,
+                "combined": combined_score,
+                "status": status,
+                "confidence": confidence,
+            }
+        )
 
-        if brand_mismatch:
+        if brand and user_brand and brand != user_brand and status != "hard_compatible":
             alternative_candidates.append(
                 {
                     "product_id": result["product_id"],
                     "status": "pending_reasoning",
-                    "confidence": 0.25,
+                    "confidence": max(config.mismatch_floor, confidence - config.alternative_penalty),
                     "sugerencia_alternativa": True,
                 }
             )
@@ -675,6 +803,8 @@ def fase3_compatibility_filter(search_output: Dict[str, Any], classifier_output:
     payload = {
         "phase": "compatibility_filter",
         "candidates": candidates + alternative_candidates,
+        "decisions": decisions,
+        "config_used": config.__dict__,
     }
     validate(instance=payload, schema=PHASE3_SCHEMA)
     return payload
@@ -786,27 +916,38 @@ def fase4_llm2_reasoning(
 
 def fase5_requery(original_query: str, classifier_output: Dict[str, Any], attempt: int, search_output: Dict[str, Any]):
     strategy_parts = []
-    new_query = _normalize_text(original_query)
+    new_query = _normalize_query_noise(original_query)
+    existing_tokens = set(new_query.split())
 
     if not classifier_output.get("brand"):
         brands = [r.get("catalog_data", {}).get("marca_moto") for r in search_output.get("results", [])]
         brands = [b for b in brands if b]
         if brands:
             candidate_brand = brands[0]
-            new_query = f"{new_query} {candidate_brand}"
-            strategy_parts.append("brand_from_catalog")
+            norm_brand = _normalize_query_noise(candidate_brand)
+            if norm_brand not in existing_tokens:
+                new_query = " ".join([new_query, norm_brand]).strip()
+                existing_tokens.update(norm_brand.split())
+                strategy_parts.append("brand_from_catalog")
 
     if not classifier_output.get("model"):
         models = [r.get("catalog_data", {}).get("modelo_moto") for r in search_output.get("results", [])]
         models = [m for m in models if m]
         if models:
-            new_query = f"{new_query} {models[0]}"
-            strategy_parts.append("model_from_catalog")
+            norm_model = _normalize_query_noise(models[0])
+            if norm_model not in existing_tokens:
+                new_query = " ".join([new_query, norm_model]).strip()
+                existing_tokens.update(norm_model.split())
+                strategy_parts.append("model_from_catalog")
 
     if not strategy_parts:
         strategy_parts.append("semantic_expansion")
         if search_output.get("results"):
-            new_query = f"{new_query} {search_output['results'][0].get('name', '')}"
+            expansion = _normalize_query_noise(search_output["results"][0].get("name", ""))
+            for token in expansion.split():
+                if token not in existing_tokens:
+                    new_query = " ".join([new_query, token]).strip()
+                    existing_tokens.add(token)
 
     payload = {
         "phase": "requery",
