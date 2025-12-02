@@ -89,6 +89,38 @@ from pipeline.llm_classifier_dynamic import build_classifier_schema
 from pipeline.orquestador_v317 import orquestar_v317
 from pipeline.router_dynamic import build_catalog_centroid
 
+# =========================================================
+# MÓDULOS COMPARTIDOS (Coherencia 3.16/3.17)
+# =========================================================
+from fran.search_utils import (
+    normalize_text as normalize_search_query_new,
+    normalize_query_noise,
+    tokenize_text,
+    rrf_fusion,
+    RRFConfig,
+    calculate_relevance_score as calculate_relevance_score_new,
+    extract_prices,
+)
+from fran.context_utils import (
+    parse_timestamp,
+    is_context_expired,
+    build_context_from_search_history,
+)
+from fran.embedding_utils import (
+    get_embedding_generator,
+    generate_embeddings as generate_embeddings_new,
+)
+from fran.pending_actions import (
+    get_pending_actions_queue,
+)
+
+# Flags de feature para rollback gradual
+USE_NEW_NORMALIZATION = os.environ.get("USE_NEW_NORMALIZATION", "true").lower() == "true"
+USE_NEW_RRF = os.environ.get("USE_NEW_RRF", "true").lower() == "true"
+USE_NEW_EMBEDDINGS = os.environ.get("USE_NEW_EMBEDDINGS", "true").lower() == "true"
+USE_NEW_CONTEXT = os.environ.get("USE_NEW_CONTEXT", "true").lower() == "true"
+USE_NEW_PENDING_ACTIONS = os.environ.get("USE_NEW_PENDING_ACTIONS", "true").lower() == "true"
+
 load_dotenv()
 app = Flask(__name__)
 
@@ -479,15 +511,23 @@ class SessionMemory:
                 try:
                     last_search = get_last_search(user_id)
                     if last_search:
-                        ts = last_search.get("metadata", {}).get("timestamp") or last_search.get("age_minutes")
-                        timestamp = None
-                        if isinstance(ts, (int, float)):
-                            timestamp = time.time() - float(ts) * 60
+                        # Usar nuevo módulo de parsing robusto si está habilitado
+                        if USE_NEW_CONTEXT:
+                            ts_raw = last_search.get("metadata", {}).get("timestamp") or last_search.get("age_minutes")
+                            timestamp = parse_timestamp(ts_raw)
+                            if timestamp is None:
+                                timestamp = time.time()
                         else:
-                            try:
-                                timestamp = datetime.fromisoformat(ts).timestamp() if ts else None
-                            except Exception:
-                                timestamp = None
+                            # Legacy parsing
+                            ts = last_search.get("metadata", {}).get("timestamp") or last_search.get("age_minutes")
+                            timestamp = None
+                            if isinstance(ts, (int, float)):
+                                timestamp = time.time() - float(ts) * 60
+                            else:
+                                try:
+                                    timestamp = datetime.fromisoformat(ts).timestamp() if ts else None
+                                except Exception:
+                                    timestamp = None
 
                         data = {
                             "last_search": {
@@ -975,9 +1015,20 @@ def is_duplicate_message(phone, message, window=DEDUP_WINDOW):
 
 
 def normalize_search_query(query):
+    """
+    Normaliza query de búsqueda.
+
+    Si USE_NEW_NORMALIZATION=true: usa fran.search_utils (con dedup opcional)
+    Si USE_NEW_NORMALIZATION=false: usa implementación legacy
+    """
     if not query:
         return ""
 
+    if USE_NEW_NORMALIZATION:
+        # v3.16 compatible: sin deduplicación
+        return normalize_search_query_new(query)
+
+    # Legacy implementation
     normalized = strip_accents(query)
     normalized = re.sub(r"[^\w\s/.-]", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -990,10 +1041,15 @@ def calculate_relevance_score(query: str, product: dict) -> float:
     """
     Calcula qué tan relevante es un producto para el query.
     Retorna score 0-100.
-    - 40% overlap de palabras clave
-    - 40% fuzzy match del nombre completo
-    - 20% match de categoría
+
+    Si USE_NEW_NORMALIZATION=true: usa fran.search_utils.calculate_relevance_score
+    Si USE_NEW_NORMALIZATION=false: usa implementación legacy
     """
+    if USE_NEW_NORMALIZATION:
+        # Nuevo módulo compartido
+        return calculate_relevance_score_new(query, product, deduplicate=False)
+
+    # Legacy implementation
     q_norm = normalize_search_query(query)
     q_words = set(q_norm.split())
 
@@ -1824,49 +1880,94 @@ def compute_cart_hash_from_items(items):
 
 
 def save_pending_action(phone, action_type, action_data, context="", ttl_minutes=30):
+    """
+    Guarda pending action.
+
+    Si USE_NEW_PENDING_ACTIONS=true: usa fran.pending_actions.PendingActionsQueue (sin race conditions)
+    Si USE_NEW_PENDING_ACTIONS=false: usa tabla legacy con UNIQUE constraint
+    """
     if not phone:
         return
+
     try:
         items = cart_get(phone)
         cart_hash = compute_cart_hash_from_items(items)
         action_data["cart_hash"] = cart_hash
-        expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                """INSERT INTO pending_actions (phone, action_type, action_data, context, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(phone) DO UPDATE SET
-                action_type=excluded.action_type,
-                action_data=excluded.action_data,
-                context=excluded.context,
-                created_at=excluded.created_at,
-                expires_at=excluded.expires_at""",
-                (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
+
+        if USE_NEW_PENDING_ACTIONS:
+            # Nuevo módulo: queue FIFO sin overwrites
+            queue = get_pending_actions_queue()
+            queue.add(
+                phone=phone,
+                action_type=action_type,
+                action_data=action_data,
+                context=context,
+                ttl_minutes=ttl_minutes,
             )
+            logger.info(f"[NEW] Pending action guardada en queue: {action_type}")
+        else:
+            # Legacy: tabla con ON CONFLICT (sobrescribe)
+            expires_at = (datetime.now() + timedelta(minutes=ttl_minutes)).isoformat()
+            with get_db_connection() as conn:
+                conn.execute(
+                    """INSERT INTO pending_actions (phone, action_type, action_data, context, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(phone) DO UPDATE SET
+                    action_type=excluded.action_type,
+                    action_data=excluded.action_data,
+                    context=excluded.context,
+                    created_at=excluded.created_at,
+                    expires_at=excluded.expires_at""",
+                    (phone, action_type, json.dumps(action_data), context, datetime.now().isoformat(), expires_at)
+                )
     except Exception as e:
         logger.error(f"Error guardando pending_action: {e}")
 
 
 def get_pending_action(phone):
+    """
+    Obtiene pending action.
+
+    Si USE_NEW_PENDING_ACTIONS=true: usa queue (retorna primera pending, FIFO)
+    Si USE_NEW_PENDING_ACTIONS=false: usa tabla legacy
+    """
     if not phone:
         return None
+
     try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT action_type, action_data, context, created_at FROM pending_actions "
-                "WHERE phone=? AND expires_at > ?",
-                (phone, datetime.now().isoformat())
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            return {
-                "action_type": row[0],
-                "action_data": json.loads(row[1]) if row[1] else {},
-                "context": row[2],
-                "created_at": row[3]
-            }
+        if USE_NEW_PENDING_ACTIONS:
+            # Nuevo módulo: obtener siguiente en queue
+            queue = get_pending_actions_queue()
+            action = queue.get_next(phone)
+            if action:
+                # Marcar como procesada automáticamente al obtenerla
+                queue.mark_processed(action["id"])
+                logger.info(f"[NEW] Pending action obtenida de queue: {action['action_type']}")
+                return {
+                    "action_type": action["action_type"],
+                    "action_data": action["action_data"],
+                    "context": action.get("context", ""),
+                    "created_at": action.get("created_at"),
+                }
+            return None
+        else:
+            # Legacy implementation
+            with get_db_connection() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT action_type, action_data, context, created_at FROM pending_actions "
+                    "WHERE phone=? AND expires_at > ?",
+                    (phone, datetime.now().isoformat())
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {
+                    "action_type": row[0],
+                    "action_data": json.loads(row[1]) if row[1] else {},
+                    "context": row[2],
+                    "created_at": row[3]
+                }
     except Exception as e:
         logger.error(f"Error leyendo pending_action: {e}")
         return None
@@ -2998,6 +3099,27 @@ def load_faiss_index():
 
 
 def generate_embeddings_with_cache(texts):
+    """
+    Genera embeddings con cache en disco.
+
+    Si USE_NEW_EMBEDDINGS=true: usa fran.embedding_utils con fallback robusto
+    Si USE_NEW_EMBEDDINGS=false: usa implementación legacy con cache pickle
+    """
+    if USE_NEW_EMBEDDINGS:
+        # Nuevo módulo compartido con fallback robusto
+        try:
+            generator = get_embedding_generator(
+                model_name=EMBEDDING_MODEL,
+                fallback_model="sentence-transformers",
+            )
+            embeddings = generator.generate(texts)
+            # Convertir numpy arrays a listas para compatibilidad
+            return [emb.tolist() if hasattr(emb, 'tolist') else emb for emb in embeddings]
+        except Exception as e:
+            logger.error(f"Error en nuevo generador de embeddings, usando fallback legacy: {e}")
+            # Fallthrough a implementación legacy
+
+    # Legacy implementation con cache pickle
     with _embeddings_cache_lock:
         cache = {}
         cache_meta = {"model": EMBEDDING_MODEL, "dim": None}
@@ -3331,29 +3453,78 @@ def hybrid_search(
         LAST_SEARCH_DEBUG["final_count"] = 0
         return {"final_candidates": []}
 
-    k_rrf = 60
-    fused_scores = defaultdict(float)
-    product_lookup = {}
+    # RRF Fusion: usa nuevo módulo compartido si está habilitado
+    if USE_NEW_RRF:
+        # Preparar datos para nuevo módulo
+        # Formato: {idx: (rank, score_normalized)}
+        bm25_ranks = {}
+        faiss_ranks = {}
+        idx_to_product = {}
 
-    def add_rrf_scores(results, weight):
-        for product, _score, rank in results:
+        # BM25
+        for product, score, rank in bm25_results:
             key = product.get("code") or product.get("name") or id(product)
-            if key not in product_lookup:
-                product_lookup[key] = dict(product)
-            fused_scores[key] += (weight or 1.0) / (k_rrf + rank)
+            idx_to_product[key] = dict(product)
+            # Normalizar score a [0, 1] si es necesario
+            norm_score = min(score / 100.0, 1.0) if score > 1.0 else score
+            bm25_ranks[key] = (rank, norm_score)
 
-    add_rrf_scores(bm25_results, RRF_BM25_WEIGHT)
-    add_rrf_scores(faiss_results, RRF_FAISS_WEIGHT)
+        # FAISS
+        for product, dist, rank in faiss_results:
+            key = product.get("code") or product.get("name") or id(product)
+            if key not in idx_to_product:
+                idx_to_product[key] = dict(product)
+            # FAISS retorna distancias, normalizar a [0, 1]
+            norm_score = min(dist / 10.0, 1.0) if dist < 10.0 else dist
+            faiss_ranks[key] = (rank, norm_score)
 
-    sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
-    max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
-    fused = []
-    for k in sorted_keys[:max_candidates]:
-        product_with_score = dict(product_lookup[k])
-        product_with_score["_score"] = fused_scores[k]
-        fused.append((product_with_score, fused_scores[k]))
+        # Configuración RRF v3.16 (sin consensus boost)
+        config = RRFConfig(
+            k_rrf=60,
+            bm25_weight=RRF_BM25_WEIGHT,
+            faiss_weight=RRF_FAISS_WEIGHT,
+            use_consensus=False,  # v3.16 mode
+            use_calibration=False,
+        )
 
-    logger.info("[DEBUG][RRF] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
+        # Ejecutar RRF fusion
+        rrf_results = rrf_fusion(bm25_ranks, faiss_ranks, config=config)
+
+        # Convertir a formato esperado
+        max_candidates = min(max(top_k * 2, top_k), len(rrf_results))
+        fused = []
+        for idx, combined_score, breakdown in rrf_results[:max_candidates]:
+            product_with_score = dict(idx_to_product[idx])
+            product_with_score["_score"] = combined_score
+            product_with_score["_rrf_breakdown"] = breakdown
+            fused.append((product_with_score, combined_score))
+
+        logger.info("[DEBUG][RRF-NEW] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
+    else:
+        # Legacy RRF implementation
+        k_rrf = 60
+        fused_scores = defaultdict(float)
+        product_lookup = {}
+
+        def add_rrf_scores(results, weight):
+            for product, _score, rank in results:
+                key = product.get("code") or product.get("name") or id(product)
+                if key not in product_lookup:
+                    product_lookup[key] = dict(product)
+                fused_scores[key] += (weight or 1.0) / (k_rrf + rank)
+
+        add_rrf_scores(bm25_results, RRF_BM25_WEIGHT)
+        add_rrf_scores(faiss_results, RRF_FAISS_WEIGHT)
+
+        sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
+        max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
+        fused = []
+        for k in sorted_keys[:max_candidates]:
+            product_with_score = dict(product_lookup[k])
+            product_with_score["_score"] = fused_scores[k]
+            fused.append((product_with_score, fused_scores[k]))
+
+        logger.info("[DEBUG][RRF] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
 
     products_only = [p for p, _ in fused]
 
