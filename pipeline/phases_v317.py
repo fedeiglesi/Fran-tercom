@@ -369,10 +369,10 @@ class HybridSearchConfig:
     rrf_k: float = 60.0
     bm25_weight: float = 1.0
     faiss_weight: float = 1.0
-    fuzzy_weight: float = 0.6
-    bm25_min_ratio: float = 0.25
-    faiss_min_score: float = 0.35
-    fuzzy_min_ratio: float = 65.0
+    fuzzy_weight: float = 0.8
+    bm25_min_ratio: float = 0.15
+    faiss_min_score: float = 0.25
+    fuzzy_min_ratio: float = 50.0
     fuzzy_max_ratio: float = 90.0
     reranker_max_candidates: int = 10
     reranker: Optional[Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
