@@ -6216,12 +6216,35 @@ def _phase5_requery(understanding: dict, attempt: int) -> tuple[str, str]:
     return strategy, new_query
 
 
-def _phase6_fallback(reason: str) -> dict:
+def _phase6_fallback(reason: str, search_payload: dict | None = None) -> dict:
+    fallback_recommendations = []
+    search_results = (search_payload or {}).get("results") or []
+
+    for result in search_results[:5]:
+        price_value = result.get("price_ars")
+        price_decimal = None
+        if price_value is not None:
+            try:
+                price_decimal = to_decimal_money(price_value)
+            except Exception:
+                price_decimal = None
+        price_formatted = format_price(price_decimal) if price_decimal is not None else None
+
+        fallback_recommendations.append(
+            {
+                "product_id": result.get("product_id"),
+                "product_name": result.get("name", ""),
+                "confidence_badge": "❓ Verificar con vendedor",
+                "price_ars": float(price_decimal) if price_decimal is not None else None,
+                "price_formatted": price_formatted,
+            }
+        )
+
     return {
         "phase": "fallback",
         "status": reason,
         "fallback_action": "return_top_N_with_disclaimer",
-        "results": [],
+        "results": fallback_recommendations,
         "fallback_message": (
             "Necesito más datos para asegurar compatibilidad. Si querés ver más productos o tenés dudas, avisame."
         ),
@@ -6257,9 +6280,20 @@ def _phase7_llm3_response(understanding: dict, reasoning_payload: dict, fallback
         )
 
     whatsapp_response = ""
+    fallback_recommendations = (fallback_payload or {}).get("results") or []
     if recommendations:
         lines = ["Te dejo opciones compatibles:"]
         for rec in recommendations[:5]:
+            price_text = rec.get("price_formatted") or "Precio a confirmar"
+            lines.append(f"- {rec['product_name']} ({rec['confidence_badge']}) | {price_text}")
+        whatsapp_response = "\n".join(lines)
+    elif fallback_recommendations:
+        message_type = "clarification_needed"
+        recommendations = fallback_recommendations
+        lines = [
+            "Te muestro opciones que encontré. Confirmame marca/modelo exactos para asegurar compatibilidad:",
+        ]
+        for rec in fallback_recommendations[:5]:
             price_text = rec.get("price_formatted") or "Precio a confirmar"
             lines.append(f"- {rec['product_name']} ({rec['confidence_badge']}) | {price_text}")
         whatsapp_response = "\n".join(lines)
@@ -6357,7 +6391,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
         elapsed_ms = (time.time() - start_time) * 1000
         if elapsed_ms > RESPONSE_TIMEOUT_MS:
             logger.warning("[v3.16] Timeout global, activando fallback")
-            fallback_payload = _phase6_fallback("timeout")
+            fallback_payload = _phase6_fallback("timeout", search_payload=None)
             break
 
         # --------------------------------------------
@@ -6416,7 +6450,7 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # FASE 6: Fallback si no hay confianza
     # --------------------------------------------
     if (not reasoning_payload or reasoning_payload.get("llm2_confidence_overall", 0) < CONFIDENCE_THRESHOLD) and not fallback_payload:
-        fallback_payload = _phase6_fallback("low_confidence_results")
+        fallback_payload = _phase6_fallback("low_confidence_results", search_payload)
         fallback_payload["fallback_message"] = (
             "Tengo algunas opciones pero necesito confirmar la moto. Contame cuál preferís o si querés que te muestre más productos."
         )
