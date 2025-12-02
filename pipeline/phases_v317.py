@@ -378,6 +378,40 @@ class HybridSearchConfig:
     reranker: Optional[Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
 
 
+def _family_key(row: Dict[str, Any]) -> str:
+    family = row.get("familia_nombre") or row.get("categoria_final") or row.get("familia")
+    return _normalize_text(str(family or ""))
+
+
+def _resolve_family_aliases(catalog: List[Dict[str, Any]]) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for row in catalog:
+        norm = _family_key(row)
+        if not norm:
+            continue
+        if norm not in aliases:
+            raw_value = row.get("familia_nombre") or row.get("categoria_final") or row.get("familia") or ""
+            aliases[norm] = str(raw_value)
+    return aliases
+
+
+def _match_requested_families(product_type: Optional[str], aliases: Dict[str, str]) -> set:
+    target = _normalize_text(product_type or "")
+    if not target:
+        return set()
+
+    matches = set()
+    for norm_value, raw_value in aliases.items():
+        score = fuzz.partial_ratio(target, norm_value)
+        if target in norm_value or norm_value in target:
+            score += 20
+        if raw_value:
+            score = max(score, fuzz.partial_ratio(target, _normalize_text(raw_value)))
+        if score >= 70:
+            matches.add(norm_value)
+    return matches
+
+
 def _build_faiss_index(catalog: List[Dict[str, Any]], embedding_fn: Callable[[List[str]], List[np.ndarray]]):
     texts = [
         " ".join(
@@ -413,6 +447,7 @@ def fase2_hybrid_search(
     embedding_fn: Optional[Callable[[List[str]], List[np.ndarray]]] = None,
     top_k: int = 15,
     config: Optional[HybridSearchConfig] = None,
+    preferred_product_type: Optional[str] = None,
 ):
     catalog = _prepare_catalog(df)
     embedding_fn = embedding_fn or _default_embedding_fn
@@ -422,6 +457,9 @@ def fase2_hybrid_search(
 
     bm25_index, corpus_tokens = _build_bm25_index(catalog)
     faiss_index, _ = _build_faiss_index(catalog, embedding_fn) if catalog else (None, [])
+    family_aliases = _resolve_family_aliases(catalog)
+    family_norms = [_family_key(row) for row in catalog]
+    preferred_families = _match_requested_families(preferred_product_type, family_aliases)
 
     query_tokens = _tokenize(query)
     bm25_scores = (
@@ -481,6 +519,12 @@ def fase2_hybrid_search(
     if not candidate_pool:
         candidate_pool = set(range(len(catalog)))
 
+    if preferred_families:
+        family_indices = {idx for idx, fam in enumerate(family_norms) if fam in preferred_families}
+        if family_indices:
+            filtered_pool = candidate_pool & family_indices
+            candidate_pool = filtered_pool or family_indices
+
     def _rank_lookup(sorted_list: List[Tuple[int, float]]) -> Dict[int, int]:
         return {idx: position + 1 for position, (idx, _) in enumerate(sorted_list)}
 
@@ -537,6 +581,8 @@ def fase2_hybrid_search(
         price_ars, price_usd = _extract_prices(row)
         catalog_data = {
             "categoria": row.get("categoria_final") or row.get("categoria") or None,
+            "familia": row.get("familia_nombre") or row.get("familia") or None,
+            "familia_norm": family_norms[idx] or None,
             "marca_moto": row.get("marca_moto") or None,
             "modelo_moto": row.get("modelo_moto") or None,
             "cilindrada": row.get("cilindrada") or None,
@@ -560,6 +606,11 @@ def fase2_hybrid_search(
         _candidate_from_rank(hybrid_rank, idx, combined, meta)
         for hybrid_rank, (idx, combined, meta) in enumerate(ranks[: config.top_k], start=1)
     ]
+
+    if preferred_families:
+        filtered = [c for c in pre_results if c.get("catalog_data", {}).get("familia_norm") in preferred_families]
+        if filtered:
+            pre_results = filtered
 
     results = pre_results
     if reranker_fn and pre_results:
@@ -714,6 +765,12 @@ def fase4_llm2_reasoning(
                 "sugerencia_alternativa": suggestion_flag,
             }
         )
+
+    classifier_conf = float(classifier_output.get("confidence") or 0.0)
+    if classifier_conf < 0.5:
+        needs_requery = True
+    elif not any(item.get("confidence_score", 0) >= 0.5 for item in evaluated):
+        needs_requery = True
 
     reranked = _structured_rerank(evaluated)
 
