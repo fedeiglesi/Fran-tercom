@@ -1,7 +1,6 @@
 """Definición del LangGraph para Fran 4.0."""
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
