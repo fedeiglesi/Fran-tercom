@@ -104,34 +104,57 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
     # Si no tenemos centroide (por ejemplo, si el catálogo todavía no cargó),
     # usamos un fallback basado en keywords técnicas para evitar clasificar todo
     # como social cuando el mensaje es corto.
+    # Fix #6: Mejorado con más keywords y lógica de fallback más robusta
     if catalog_centroid is None:
+        # Keywords técnicas expandidas
         technical_keywords = [
-            "filtro",
-            "bujia",
-            "pastilla",
-            "amortiguador",
-            "aceite",
-            "corona",
-            "piñon",
-            "cadena",
-            "cdi",
-            "pastillas",
-            "bateria",
-            "llanta",
-            "freno",
-            "embrague",
-            "carburador",
-            "llantas",
+            # Repuestos generales
+            "filtro", "bujia", "pastilla", "amortiguador", "aceite", "corona",
+            "piñon", "cadena", "cdi", "pastillas", "bateria", "llanta", "freno",
+            "embrague", "carburador", "llantas", "suspension", "manubrio",
+            "escape", "motor", "cilindro", "piston", "biela", "valvula",
+            # Sinónimos y variantes
+            "repuesto", "repuestos", "pieza", "piezas", "parte", "partes",
+            "recambio", "recambios", "accesorio", "accesorios",
+            # Acciones técnicas
+            "arreglar", "reparar", "cambiar", "instalar", "reemplazar",
+            "mantenimiento", "service", "revision",
+            # Contexto moto
+            "moto", "motocicleta", "ciclomotor", "scooter", "enduro",
+            "cuatriciclo", "cuatri",
+            # Stock y compra
+            "stock", "precio", "cuanto", "cuesta", "sale", "comprar",
+            "necesito", "quiero", "busco", "tengo", "vendo",
         ]
 
+        # Marcas expandidas
         technical_brands = [
-            "honda",
-            "yamaha",
-            "kawasaki",
-            "suzuki",
-            "bajaj",
+            "honda", "yamaha", "kawasaki", "suzuki", "bajaj", "zanella",
+            "motomel", "corven", "gilera", "keller", "beta", "mondial",
+            "benelli", "guerrero", "ktm", "husqvarna", "ducati", "bmw",
+            "harley", "triumph", "royal", "enfield", "vespa", "piaggio",
         ]
 
+        # Modelos comunes
+        technical_models = [
+            "cg150", "cg", "titan", "twister", "wave", "biz", "xr", "tornado",
+            "fz", "ybr", "crypton", "mt", "r15", "fazer", "tenere",
+            "zb", "rx", "patagonian", "duo", "zr", "sahel",
+            "rouser", "pulsar", "dominar", "ns", "discover",
+        ]
+
+        # Categorías técnicas
+        technical_categories = [
+            "bateria", "amortiguador", "aceite", "filtro", "cadena", "bujia",
+        ]
+
+        # Indicadores de intención técnica (sin ser keywords exactos)
+        technical_intent_patterns = [
+            "para mi", "para la", "para el", "de mi", "de la", "de el",
+            "cuanto", "precio", "stock", "tengo", "necesito", "quiero",
+        ]
+
+        # Prioridad 1: Keywords técnicas directas (alta confianza)
         if any(keyword in text for keyword in technical_keywords):
             return {
                 "route": "technical",
@@ -140,14 +163,43 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
                 "fallback": True,
             }
 
+        # Prioridad 2: Marcas (media-alta confianza)
         if any(brand in text for brand in technical_brands):
             return {
                 "route": "technical",
-                "score": 0.6,
+                "score": 0.85,
                 "reason": "fallback_brand",
                 "fallback": True,
             }
 
+        # Prioridad 3: Modelos (media confianza)
+        if any(model in text for model in technical_models):
+            return {
+                "route": "technical",
+                "score": 0.75,
+                "reason": "fallback_model",
+                "fallback": True,
+            }
+
+        # Prioridad 4: Categorías (media confianza)
+        if any(cat in text for cat in technical_categories):
+            return {
+                "route": "technical",
+                "score": 0.80,
+                "reason": "fallback_category",
+                "fallback": True,
+            }
+
+        # Prioridad 5: Patrones de intención + mensaje largo (baja-media confianza)
+        if len(text.split()) >= 5 and any(pattern in text for pattern in technical_intent_patterns):
+            return {
+                "route": "technical",
+                "score": 0.65,
+                "reason": "fallback_intent_pattern",
+                "fallback": True,
+            }
+
+        # Prioridad 6: Mensajes muy cortos con baja entropía → social
         if entropy < 0.2 and len(text.split()) <= 4:
             return {
                 "route": "social",
@@ -156,7 +208,17 @@ def router_fase0_dynamic(message, catalog_centroid, threshold=0.35):
                 "fallback": True,
             }
 
-        return {"route": "technical", "score": 0.75, "reason": "no_centroid", "fallback": True}
+        # Prioridad 7: Default a technical (cambio importante: antes era "no_centroid")
+        # Razón: Es mejor un false positive técnico que perder una venta
+        logger.warning(
+            f"[router] No centroid available, defaulting to technical for: {text[:50]}"
+        )
+        return {
+            "route": "technical",
+            "score": 0.60,
+            "reason": "no_centroid_default_technical",
+            "fallback": True,
+        }
 
     sim = compute_similarity(text, catalog_centroid)
 
