@@ -124,7 +124,7 @@ def build_agent_graph(
     graph.add_edge("requery", "act")
     graph.add_edge("respond", END)
 
-    return graph.compile(asyncio=True)
+    return graph.compile()
 
 
 async def run_agent(agent_graph: Any, payload: AgentRequest) -> AgentResponse:
