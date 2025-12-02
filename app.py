@@ -452,6 +452,22 @@ class SessionMemory:
     DEFAULT_TTL = 1800
 
     @classmethod
+    def _is_expired(cls, data: dict) -> bool:
+        ttl = data.get("context_ttl") or cls.DEFAULT_TTL
+        timestamps = [
+            data.get("last_search", {}).get("timestamp"),
+            data.get("last_products_shown", {}).get("timestamp"),
+            data.get("last_cart_action", {}).get("timestamp"),
+            data.get("last_follow_up", {}).get("timestamp"),
+        ]
+        timestamps = [t for t in timestamps if t]
+        if not timestamps:
+            return True
+
+        latest_ts = max(timestamps)
+        return (time.time() - latest_ts) > ttl
+
+    @classmethod
     def get(cls, user_id: str | None) -> dict | None:
         if not user_id:
             return None
@@ -481,6 +497,17 @@ class SessionMemory:
                                 "timestamp": timestamp or time.time(),
                                 "confidence": 0.5,
                             },
+                            "last_products_shown": {
+                                "products": last_search.get("products", []),
+                                "timestamp": timestamp or time.time(),
+                                "metadata": last_search.get("metadata", {}),
+                            },
+                            "last_brand_model": {
+                                "brand": (last_search.get("metadata") or {}).get("brand"),
+                                "model": (last_search.get("metadata") or {}).get("model"),
+                                "family": (last_search.get("metadata") or {}).get("family"),
+                                "timestamp": timestamp or time.time(),
+                            },
                             "conversation_turns": 0,
                             "context_ttl": cls.DEFAULT_TTL,
                         }
@@ -490,9 +517,7 @@ class SessionMemory:
             if not data:
                 return None
 
-            last_ts = data.get("last_search", {}).get("timestamp")
-            ttl = data.get("context_ttl") or cls.DEFAULT_TTL
-            if last_ts and (time.time() - last_ts) > ttl:
+            if cls._is_expired(data):
                 cls._store.pop(user_id, None)
                 return None
 
@@ -530,7 +555,73 @@ class SessionMemory:
                 payload["conversation_turns"] = existing.get("conversation_turns", 0) + 1
             if existing.get("last_cart_action"):
                 payload["last_cart_action"] = existing.get("last_cart_action")
+            if existing.get("last_products_shown"):
+                payload["last_products_shown"] = existing.get("last_products_shown")
+            payload["last_brand_model"] = {
+                "brand": metadata.get("brand"),
+                "model": metadata.get("model"),
+                "family": metadata.get("family"),
+                "timestamp": payload["last_search"]["timestamp"],
+            }
             cls._store[user_id] = payload
+
+    @classmethod
+    def update_last_products_shown(
+        cls,
+        user_id: str,
+        products: list,
+        metadata: dict | None = None,
+    ) -> None:
+        if not user_id:
+            return
+
+        snapshot = {
+            "products": products or [],
+            "metadata": metadata or {},
+            "timestamp": time.time(),
+        }
+
+        with cls._lock:
+            existing = cls._store.get(user_id) or {}
+            existing["last_products_shown"] = snapshot
+            if metadata:
+                existing["last_brand_model"] = {
+                    "brand": metadata.get("brand") or (metadata.get("moto") or {}).get("brand"),
+                    "model": metadata.get("model") or (metadata.get("moto") or {}).get("model"),
+                    "family": metadata.get("family"),
+                    "timestamp": snapshot["timestamp"],
+                }
+            existing["context_ttl"] = existing.get("context_ttl") or cls.DEFAULT_TTL
+            cls._store[user_id] = existing
+
+    @classmethod
+    def update_last_cart_action(cls, user_id: str, action: str, details: dict | None = None) -> None:
+        if not user_id:
+            return
+
+        with cls._lock:
+            existing = cls._store.get(user_id) or {}
+            existing["last_cart_action"] = {
+                "action": action,
+                "details": details or {},
+                "timestamp": time.time(),
+            }
+            existing["context_ttl"] = existing.get("context_ttl") or cls.DEFAULT_TTL
+            cls._store[user_id] = existing
+
+    @classmethod
+    def update_follow_up(cls, user_id: str, follow_up: dict) -> None:
+        if not user_id or not follow_up:
+            return
+
+        with cls._lock:
+            existing = cls._store.get(user_id) or {}
+            existing["last_follow_up"] = {
+                "data": follow_up,
+                "timestamp": time.time(),
+            }
+            existing["context_ttl"] = existing.get("context_ttl") or cls.DEFAULT_TTL
+            cls._store[user_id] = existing
 
 
 def _build_cached_search_payload(understanding: dict, last_search: dict) -> dict | None:
@@ -2361,8 +2452,8 @@ def get_last_search(phone):
             timestamp = datetime.fromisoformat(row[3])
             age_minutes = (datetime.now() - timestamp).total_seconds() / 60
 
-            # Si pasaron más de 10 minutos, no usar ese contexto
-            if age_minutes > 10:
+            # Mantener el contexto hasta 30 minutos para coherencia conversacional
+            if age_minutes > 30:
                 logger.info(f"Last search for {phone} is {age_minutes:.1f} min old, ignoring")
                 return None
 
@@ -3665,10 +3756,12 @@ def detect_implicit_cart_action(message, phone):
     - "todos x5"
     - "agregame todos"
     - "mandame los que me pasaste x3"
+    - "la de arriba", "la 2", "ese" usando la última grilla mostrada
     Usa la última búsqueda guardada.
     """
     msg = (message or "").lower()
-    last = get_last_search(phone)
+    session_ctx = SessionMemory.get(phone) or {}
+    last = session_ctx.get("last_products_shown") or session_ctx.get("last_search") or get_last_search(phone)
     if not last or not last.get("products"):
         return None
 
@@ -3713,13 +3806,50 @@ def detect_implicit_cart_action(message, phone):
         }
 
     # "esos", "los de arriba", "los anteriores" + número (opcional)
-    if re.search(r"(esos|esas|los que me pasaste|los de arriba|los anteriores)", msg):
+    if re.search(r"(esos|esas|los que me pasaste|los de arriba|los anteriores|ese|esa)", msg):
         m_qty = re.search(r"(\d+)", msg)
         qty = int(m_qty.group(1)) if m_qty else 1
+        position_match = re.search(r"\b(\d+)\b", msg)
+        if position_match:
+            idx = max(1, min(int(position_match.group(1)), len(products))) - 1
+            targeted = [products[idx]]
+        else:
+            targeted = products[: max(1, min(3, len(products)))]
         return {
             "action": "add_each_quantity",
             "quantity": qty,
-            "products": products
+            "products": targeted,
+        }
+
+    # "la 2", "la segunda"
+    pos_match = re.search(r"(el|la)\s+(\d+|primero|segunda?|tercero)", msg)
+    if pos_match:
+        token = pos_match.group(2)
+        index_map = {"primero": 1, "segunda": 2, "segundo": 2, "tercero": 3}
+        idx = int(token) if token.isdigit() else index_map.get(token, 1)
+        idx = max(1, min(idx, len(products))) - 1
+        qty = extract_number_from_text(message) or 1
+        return {
+            "action": "add_each_quantity",
+            "quantity": qty,
+            "products": [products[idx]],
+        }
+
+    # consultas sobre stock
+    if re.search(r"(hay\s+stock|stock\s+(disponible|hay))", msg):
+        return {
+            "action": "stock_check",
+            "quantity": 1,
+            "products": products[:3],
+        }
+
+    # intención de compra directa
+    if re.search(r"(lo\s+quiero|la\s+quiero|lo\s+compro|la\s+compro|cerramos|me\s+lo\s+llev)o", msg):
+        qty = extract_number_from_text(message) or 1
+        return {
+            "action": "purchase_intent",
+            "quantity": qty,
+            "products": products[: max(1, min(3, len(products)))],
         }
 
     return None
@@ -3823,8 +3953,9 @@ def handle_cart_action(phone, message):
         for code, qty, name, price in cart_items
     ]
 
-    last_search = get_last_search(phone) or {}
-    last_products = last_search.get("products") or []
+    last_session = SessionMemory.get(phone) or {}
+    last_search = last_session.get("last_search") or get_last_search(phone) or {}
+    last_products = last_session.get("last_products_shown", {}).get("products") or last_search.get("products") or []
 
     code = extract_code_from_text(message)
     explicit_qty = bool(EXPLICIT_QTY_PATTERN.search(msg_norm))
@@ -3836,6 +3967,11 @@ def handle_cart_action(phone, message):
     set_keywords = ("dejalo", "dejala", "dejame", "deja", "deja la", "deja lo", "deja en", "ponelo", "ponela", "ponele")
 
     action = "unknown"
+
+    def _finalize(msg: str, details: dict | None = None):
+        SessionMemory.update_last_cart_action(phone, action, details or {})
+        return msg
+
     if any(k in msg_norm for k in remove_keywords):
         action = "remove"
     elif explicit_qty and any(k in msg_norm for k in set_keywords):
@@ -3850,13 +3986,13 @@ def handle_cart_action(phone, message):
         action = "decrease"
 
     if action == "unknown":
-        return "Para tocar el carrito decime el código o nombre del producto y qué querés hacer."
+        return _finalize("Para tocar el carrito decime el código o nombre del producto y qué querés hacer.")
 
     if action == "add" and not last_products:
         if code:
             last_products = [{"code": code, "name": message}]
         else:
-            return "No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar."
+            return _finalize("No tengo la última búsqueda a mano. Pasame el código o repetí qué producto querés agregar.")
 
     target_cart = None
     if code:
@@ -3866,7 +4002,7 @@ def handle_cart_action(phone, message):
         target_cart = match_product_from_list(message, cart_snapshot, key="name")
 
     if action != "add" and not target_cart:
-        return "No ubico ese producto en tu carrito. ¿Me pasás el código exacto?"
+        return _finalize("No ubico ese producto en tu carrito. ¿Me pasás el código exacto?")
 
     if action == "add":
         candidate = None
@@ -3875,7 +4011,7 @@ def handle_cart_action(phone, message):
         if not candidate:
             candidate = match_product_from_list(message, last_products, key="name")
         if not candidate:
-            return "No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código."
+            return _finalize("No encontré ese producto en lo último que te pasé. Repetíme el nombre o el código.")
 
         number_in_message = extract_number_from_text(message)
         qty_to_add = number_in_message or 1
@@ -3896,12 +4032,16 @@ def handle_cart_action(phone, message):
         if existing_item:
             if number_in_message is not None or explicit_qty:
                 cart_update_qty(phone, existing_item["code"], qty_to_add)
-                return (
-                    f"Actualicé {existing_item['name']} a {qty_to_add}u en tu carrito."
+                return _finalize(
+                    f"Actualicé {existing_item['name']} a {qty_to_add}u en tu carrito.",
+                    {"code": existing_item["code"], "qty": qty_to_add},
                 )
             new_qty = existing_item["qty"] + qty_to_add
             cart_update_qty(phone, existing_item["code"], new_qty)
-            return f"Sumé {qty_to_add}u más de {existing_item['name']}. Total: {new_qty}u."
+            return _finalize(
+                f"Sumé {qty_to_add}u más de {existing_item['name']}. Total: {new_qty}u.",
+                {"code": existing_item["code"], "qty": new_qty},
+            )
 
         ok = cart_add(
             phone,
@@ -3912,39 +4052,42 @@ def handle_cart_action(phone, message):
             price_usd
         )
         if ok:
-            return f"Listo, agregué {qty_to_add}x {candidate.get('name', '').strip()} al carrito."
-        return "No pude agregar ese producto, pasame el código completo y lo cargo."
+            return _finalize(
+                f"Listo, agregué {qty_to_add}x {candidate.get('name', '').strip()} al carrito.",
+                {"code": candidate.get("code"), "qty": qty_to_add},
+            )
+        return _finalize("No pude agregar ese producto, pasame el código completo y lo cargo.", {"code": candidate.get("code")})
 
     current_qty = target_cart["qty"]
     if action == "remove":
         cart_update_qty(phone, target_cart["code"], 0)
-        return f"Listo, saqué {target_cart['name']} del carrito."
+        return _finalize(f"Listo, saqué {target_cart['name']} del carrito.", {"code": target_cart["code"], "qty": 0})
 
     if action == "set":
         qty_target = extract_number_from_text(message)
         if qty_target is None:
-            return "Decime cuántas unidades querés dejar."
+            return _finalize("Decime cuántas unidades querés dejar.")
         qty_target = max(0, qty_target)
         cart_update_qty(phone, target_cart["code"], qty_target)
         if qty_target == 0:
-            return f"Listo, saqué {target_cart['name']} del carrito."
-        return f"Dejé {target_cart['name']} en {qty_target}u."
+            return _finalize(f"Listo, saqué {target_cart['name']} del carrito.", {"code": target_cart["code"], "qty": 0})
+        return _finalize(f"Dejé {target_cart['name']} en {qty_target}u.", {"code": target_cart["code"], "qty": qty_target})
 
     if action == "increase":
         delta = extract_number_from_text(message) or 1
         new_qty = current_qty + max(1, delta)
         cart_update_qty(phone, target_cart["code"], new_qty)
-        return f"Subí {target_cart['name']} a {new_qty}u."
+        return _finalize(f"Subí {target_cart['name']} a {new_qty}u.", {"code": target_cart["code"], "qty": new_qty})
 
     if action == "decrease":
         delta = extract_number_from_text(message) or 1
         new_qty = max(0, current_qty - max(1, delta))
         cart_update_qty(phone, target_cart["code"], new_qty)
         if new_qty == 0:
-            return f"Listo, saqué {target_cart['name']} del carrito."
-        return f"Dejé {target_cart['name']} en {new_qty}u."
+            return _finalize(f"Listo, saqué {target_cart['name']} del carrito.", {"code": target_cart["code"], "qty": 0})
+        return _finalize(f"Dejé {target_cart['name']} en {new_qty}u.", {"code": target_cart["code"], "qty": new_qty})
 
-    return "No pude interpretar la acción sobre el carrito."
+    return _finalize("No pude interpretar la acción sobre el carrito.")
 
 # ------------------------------------------------------------------
 # PROMPTS LLM
@@ -5732,7 +5875,7 @@ def _derive_ambiguity(confidence: float) -> str:
     return "low"
 
 
-def detect_follow_up_intent(query: str, session: dict | None) -> dict | None:
+def detect_follow_up_intent(query: str, session: dict | None, user_id: str | None = None) -> dict | None:
     """LLM-driven follow-up detection based on the last search context."""
 
     if not session or not session.get("last_search"):
@@ -5776,7 +5919,7 @@ Responde SOLO en JSON (sin markdown):
 
         llm_result = json.loads(resp.choices[0].message.content)
         if llm_result.get("is_follow_up"):
-            return {
+            result = {
                 "detected": True,
                 "type": llm_result.get("follow_up_type"),
                 "reasoning": llm_result.get("reasoning"),
@@ -5788,6 +5931,9 @@ Responde SOLO en JSON (sin markdown):
                 "context_fields": llm_result.get("context_fields") or [],
                 "inherited_confidence": last_context.get("confidence") or 0.0,
             }
+            if user_id:
+                SessionMemory.update_follow_up(user_id, result)
+            return result
     except Exception as e:
         logger.warning(f"Follow-up detection LLM failed: {e}")
         return None
@@ -5952,7 +6098,7 @@ def _phase1_llm1_understanding(user_message: str, phone: str | None = None, sess
 
     follow_up_block = {"detected": False}
     if phone:
-        fu = detect_follow_up_intent(user_message, session_data or SessionMemory.get(phone))
+        fu = detect_follow_up_intent(user_message, session_data or SessionMemory.get(phone), phone)
         if fu:
             follow_up_block = fu
             if fu.get("inherit_context") and fu.get("context_fields"):
@@ -5982,6 +6128,89 @@ def _normalize_score_from_rank(rank: int, max_items: int) -> float:
     if max_items <= 1:
         return 1.0
     return max(0.0, 1.0 - (rank - 1) / max_items)
+
+
+
+def _detect_user_signals(text: str) -> list[str]:
+    signals = []
+    query = (text or "").lower()
+    if any(tok in query for tok in ["barat", "econom", "lo mas barato", "mas barato", "lo más barato"]):
+        signals.append("prefiere_precio_bajo")
+    if "original" in query or "oem" in query:
+        signals.append("prefiere_original")
+    if any(tok in query for tok in ["necesito hoy", "urgente", "apuro", "ya"]):
+        signals.append("prioridad_inmediata")
+    if any(tok in query for tok in ["mejor", "premium", "alta calidad"]):
+        signals.append("prefiere_calidad")
+    return signals
+
+
+def llm_rerank_candidates(understanding: dict, candidates: list[dict]) -> list[dict]:
+    """Rerankea top-10 candidatos con LLM y devuelve top-3 ordenados."""
+
+    top_candidates = candidates[:10]
+    if not top_candidates:
+        return []
+
+    user_signals = _detect_user_signals(understanding.get("raw_query", ""))
+    compact = [
+        {
+            "product_id": c.get("product_id"),
+            "name": c.get("name"),
+            "price_ars": c.get("price_ars"),
+            "hybrid_rank": c.get("hybrid_rank"),
+            "has_structured": c.get("has_structured_compatibility") or c.get("has_structured"),
+            "needs_llm": c.get("needs_llm_compatibility"),
+            "family": c.get("family"),
+        }
+        for c in top_candidates
+    ]
+
+    prompt = {
+        "instruction": (
+            "Ordená los productos priorizando: precio (si hay señal de barato),"
+            " compatibilidad estructurada, demanda típica (usa hybrid_rank bajo como más demandado),"
+            " relevancia semántica (hybrid_rank) y señales de usuario como 'quiero lo más barato' u 'original'."
+        ),
+        "user_signals": user_signals,
+        "candidates": compact,
+        "request": "Devolvé top-3 product_id en orden descendente de prioridad y una breve razón.",
+    }
+
+    try:
+        with openai_sem:
+            resp = llm_client.completion(
+                model=MODEL_REASONING,
+                messages=[{"role": "system", "content": json.dumps(prompt, ensure_ascii=False)}],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        data = json.loads(resp.choices[0].message.content)
+        ranking = data.get("ranking") or data.get("ordered") or data.get("result") or []
+        ordered_ids = []
+        for item in ranking:
+            if isinstance(item, dict) and item.get("product_id"):
+                ordered_ids.append(str(item.get("product_id")))
+            elif isinstance(item, (str, int)):
+                ordered_ids.append(str(item))
+
+        if ordered_ids:
+            lookup = {str(c.get("product_id")): c for c in top_candidates}
+            reranked = [lookup[pid] for pid in ordered_ids if pid in lookup][:3]
+            remaining = [c for c in top_candidates if str(c.get("product_id")) not in ordered_ids]
+            return reranked + remaining[: max(0, 3 - len(reranked))]
+    except Exception as exc:
+        logger.warning(f"LLM reranker fallo: {exc}")
+
+    prefers_price = "prefiere_precio_bajo" in user_signals
+    sorted_candidates = sorted(
+        top_candidates,
+        key=lambda c: (
+            0 if c.get("has_structured_compatibility") else 1,
+            c.get("price_ars") or 1e9 if prefers_price else c.get("hybrid_rank") or 99,
+        ),
+    )
+    return sorted_candidates[:3]
 
 
 def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
@@ -6049,6 +6278,15 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
         payload["results"] = []
         payload["total_results"] = 0
 
+    if payload.get("results"):
+        reranked = llm_rerank_candidates(understanding, payload.get("results", []))
+        if reranked:
+            top3_ids = {r.get("product_id") for r in reranked[:3] if r.get("product_id")}
+            remaining = [r for r in payload.get("results", []) if r.get("product_id") not in top3_ids]
+            payload["reranked_top3"] = reranked[:3]
+            payload["results"] = reranked[:3] + remaining
+            payload["total_results"] = len(payload["results"])
+
     SessionMemory.update_last_search(
         phone,
         query=text_query,
@@ -6062,6 +6300,54 @@ def _phase2_hybrid_search(understanding: dict, phone: str) -> dict:
     )
 
     return payload
+
+
+def llm_assisted_search_fallback(understanding: dict, phone: str) -> dict | None:
+    """Genera nuevas queries con LLM y reintenta fase 2 cuando no hay resultados."""
+
+    prompt = {
+        "goal": "Reescribe la búsqueda para catálogo de repuestos de motos en Argentina",
+        "mensaje_usuario": understanding.get("raw_query"),
+        "brand": understanding.get("brand"),
+        "model": understanding.get("model"),
+        "family": understanding.get("product_type"),
+        "instrucciones": "Devolvé 3 queries en orden de mayor a menor probabilidad de éxito",
+    }
+
+    try:
+        with openai_sem:
+            resp = llm_client.completion(
+                model=MODEL_REASONING,
+                messages=[{"role": "system", "content": json.dumps(prompt, ensure_ascii=False)}],
+                temperature=0.3,
+                response_format={"type": "json_object"},
+            )
+        payload = json.loads(resp.choices[0].message.content)
+        queries = payload.get("queries") or payload.get("propuestas") or []
+    except Exception as exc:
+        logger.warning(f"LLM-assisted fallback no disponible: {exc}")
+        queries = []
+
+    best_payload = None
+    best_query = None
+    for q in queries[:3]:
+        if not q:
+            continue
+        cloned = json.loads(json.dumps(understanding))
+        cloned["raw_query"] = q
+        candidate_payload = _phase2_hybrid_search(cloned, phone)
+        candidate_payload["source"] = "llm_assisted"
+        candidate_payload["fallback_query"] = q
+        if candidate_payload.get("results") and (
+            not best_payload or len(candidate_payload.get("results", [])) > len(best_payload.get("results", []))
+        ):
+            best_payload = candidate_payload
+            best_query = q
+
+    if best_payload:
+        best_payload["llm_generated_queries"] = queries[:3]
+        best_payload["fallback_query"] = best_query
+    return best_payload
 
 
 def _phase3_compatibility_filter(understanding: dict, search_payload: dict) -> dict:
@@ -6410,6 +6696,8 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     reasoning_payload = None
     fallback_payload = None
     requery_attempt = 0
+    search_payload = None
+    llm_fallback_used = False
 
     canonical_intent = _canonical_intent(understanding.get("intent_canonical") or understanding.get("intent"))
     understanding["intent_canonical"] = canonical_intent
@@ -6437,6 +6725,23 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
                 "created_at": datetime.now().isoformat(),
             }
             reply = apply_add_each_quantity_pending(phone, pending)
+            SessionMemory.update_last_cart_action(phone, "add_each_quantity", pending)
+        elif implicit_cart_action and implicit_cart_action.get("action") == "stock_check":
+            prods = implicit_cart_action.get("products") or []
+            names = ", ".join(p.get("name", "producto") for p in prods[:3])
+            reply = f"Consulto stock para: {names or 'los últimos productos'}. Te confirmo enseguida."
+            SessionMemory.update_last_cart_action(phone, "stock_check", {"products": prods})
+        elif implicit_cart_action and implicit_cart_action.get("action") == "purchase_intent":
+            pending = {
+                "action_data": {
+                    "qty": max(1, int(implicit_cart_action.get("quantity") or 1)),
+                    "products": implicit_cart_action.get("products") or [],
+                    "cart_hash": compute_cart_hash_from_items(cart_get(phone)),
+                },
+                "created_at": datetime.now().isoformat(),
+            }
+            reply = apply_add_each_quantity_pending(phone, pending)
+            SessionMemory.update_last_cart_action(phone, "purchase_intent", pending)
         else:
             reply = handle_cart_action(phone, user_message)
 
@@ -6469,6 +6774,11 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
             cached_search = _build_cached_search_payload(understanding, session_ctx.get("last_search"))
 
         search_payload = cached_search or _phase2_hybrid_search(understanding, phone)
+        if (not search_payload.get("results")) and not llm_fallback_used:
+            alt_search = llm_assisted_search_fallback(understanding, phone)
+            if alt_search:
+                search_payload = alt_search
+                llm_fallback_used = True
         logger.info(f"[v3.16][FASE2] {json.dumps(search_payload, ensure_ascii=False)}")
 
         # --------------------------------------------
@@ -6521,6 +6831,20 @@ def orquestar_fran_v316(mensaje_usuario: str, phone: str) -> str:
     # --------------------------------------------
     response_payload = _phase7_llm3_response(understanding, reasoning_payload or {}, fallback_payload)
     logger.info(f"[v3.16][FASE7] {json.dumps(response_payload, ensure_ascii=False)}")
+
+    if phone:
+        SessionMemory.update_last_products_shown(
+            phone,
+            response_payload.get("product_recommendations")
+            or (fallback_payload or {}).get("results")
+            or [],
+            {
+                "brand": understanding.get("brand"),
+                "model": understanding.get("model"),
+                "family": (search_payload or {}).get("target_family") or understanding.get("product_type"),
+                "query": understanding.get("raw_query"),
+            },
+        )
 
     reply = response_payload.get("whatsapp_response") or "Necesito un poco más de información para ayudarte mejor."
     save_message(phone, reply, "assistant")
