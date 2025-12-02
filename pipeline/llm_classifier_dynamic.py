@@ -164,6 +164,8 @@ Sos un clasificador del dominio MOTOPARTES.
 No inventes modelos ni marcas.
 Si no estás seguro → usa null.
 Solo usa valores que aparezcan en el catálogo.
+En repuestos de motos, algunas palabras tienen interpretación por defecto: cadena → cadena de transmisión, pastillas → pastillas de freno. No confundas "cadena" con limpiadores o desengrasantes ("limpia cadenas").
+Ejemplo: "cadenas para Yamaha FZ16" debe clasificarse como búsqueda de cadenas de transmisión compatibles con la moto mencionada.
 Detectá follow-ups y acciones de carrito aunque sean implícitas ("me das dos?", "sumame esas").
 Para follow-ups, marcá is_follow_up=true y mantené product_reference con la mención textual.
 Si ves cantidades, completa quantity con número entero.
@@ -177,29 +179,31 @@ Mensaje del usuario:
 
     should_stream = stream or len(message) > 1500
 
-    response = client.responses.create(
+    response = client.chat.completions.create(
         model="gpt-4o-mini",
-        input=prompt,
-        response_format={"type": "json_schema", "json_schema": schema},
+        messages=[{"role": "system", "content": prompt}],
+        response_format={"type": "json_schema", "json_schema": {"name": "classifier_schema", "schema": schema}},
         temperature=0,
         stream=should_stream,
-        max_output_tokens=500,
+        max_tokens=500,
     )
 
     if should_stream:
         chunks = []
-        last_event = None
-        for event in response:
-            last_event = event
-            delta = getattr(event, "output_text_delta", None)
+        for chunk in response:
+            delta = None
+            if chunk and getattr(chunk, "choices", None):
+                first_choice = chunk.choices[0]
+                delta = getattr(first_choice.delta, "content", None)
             if delta:
                 chunks.append(delta)
 
-        content_text = "".join(chunks) if chunks else _get_output_text(last_event)
-        if content_text is None:
-            content_text = _get_output_text(response)
+        content_text = "".join(chunks) if chunks else None
     else:
-        content_text = _get_output_text(response)
+        content_text = None
+        if response and getattr(response, "choices", None):
+            first_choice = response.choices[0]
+            content_text = getattr(first_choice.message, "content", None)
 
     if content_text is None:
         raise ValueError("No output_text received from LLM response")
