@@ -589,6 +589,7 @@ _v317_cache = {"catalog": None, "centroid": None, "schema": None}
 _v317_lock = Lock()
 
 _embeddings_cache_lock = Lock()
+_embeddings_cache_meta = {"model": EMBEDDING_MODEL, "dim": None}
 
 # Cache de fuzzy matching para post-validation
 _fuzzy_match_cache = LRUCache(maxsize=20000)
@@ -2834,8 +2835,9 @@ def needs_llm_compatibility(family: str | None) -> bool:
 def save_faiss_index(index, catalog):
     try:
         faiss.write_index(index, FAISS_INDEX_PATH)
+        meta = {"model": EMBEDDING_MODEL, "dim": getattr(index, "d", None)}
         with open(FAISS_MAPPING_PATH, "wb") as f:
-            pickle.dump(catalog, f)
+            pickle.dump({"catalog": catalog, "meta": meta}, f)
         logger.info(f"FAISS guardado en disco: {len(catalog)} productos")
     except Exception as e:
         logger.error(f"Error guardando FAISS: {e}")
@@ -2846,16 +2848,55 @@ def load_faiss_index():
         if os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_MAPPING_PATH):
             index = faiss.read_index(FAISS_INDEX_PATH)
             with open(FAISS_MAPPING_PATH, "rb") as f:
-                catalog = pickle.load(f)
+                mapping = pickle.load(f)
+
+            if isinstance(mapping, dict) and "catalog" in mapping:
+                catalog = mapping.get("catalog") or []
+                meta = mapping.get("meta") or {}
+            else:
+                catalog = mapping
+                meta = {}
 
             if index.ntotal != len(catalog):
                 logger.warning(
                     f"FAISS inconsistente (index.ntotal={index.ntotal}, catalog={len(catalog)}). "
                     "Se reconstruirá desde cero."
                 )
+                try:
+                    os.remove(FAISS_INDEX_PATH)
+                    os.remove(FAISS_MAPPING_PATH)
+                except Exception:
+                    pass
+                return None, None
+
+            expected_dim = meta.get("dim") or _embeddings_cache_meta.get("dim")
+            if meta.get("model") and meta.get("model") != EMBEDDING_MODEL:
+                logger.warning(
+                    "FAISS construido con modelo diferente (%s). Se invalidan índices persistidos.",
+                    meta.get("model"),
+                )
+                try:
+                    os.remove(FAISS_INDEX_PATH)
+                    os.remove(FAISS_MAPPING_PATH)
+                except Exception:
+                    pass
+                return None, None
+
+            if expected_dim and getattr(index, "d", expected_dim) != expected_dim:
+                logger.warning(
+                    "FAISS con dimensión %s incompatible con embeddings %s. Se reconstruye.",
+                    getattr(index, "d", None),
+                    expected_dim,
+                )
+                try:
+                    os.remove(FAISS_INDEX_PATH)
+                    os.remove(FAISS_MAPPING_PATH)
+                except Exception:
+                    pass
                 return None, None
 
             logger.info(f"FAISS cargado desde disco: {len(catalog)} productos")
+            _embeddings_cache_meta["dim"] = _embeddings_cache_meta.get("dim") or getattr(index, "d", None)
             return catalog, index
         else:
             logger.warning("FAISS no encontrado en disco, se construira de cero.")
@@ -2868,11 +2909,22 @@ def load_faiss_index():
 def generate_embeddings_with_cache(texts):
     with _embeddings_cache_lock:
         cache = {}
+        cache_meta = {"model": EMBEDDING_MODEL, "dim": None}
 
         if os.path.exists(EMBEDDINGS_CACHE_PATH):
             try:
                 with open(EMBEDDINGS_CACHE_PATH, "rb") as f:
                     cache = pickle.load(f)
+                    if isinstance(cache, dict):
+                        meta = cache.get("__meta__", {})
+                        if meta.get("model") and meta.get("model") != EMBEDDING_MODEL:
+                            logger.warning(
+                                "Cache de embeddings generado con otro modelo (%s). Se invalida.",
+                                meta.get("model"),
+                            )
+                            cache = {}
+                        else:
+                            cache_meta.update({k: v for k, v in meta.items() if k in {"model", "dim"}})
                     logger.info(f"Cache de embeddings cargado: {len(cache)} textos")
             except Exception as e:
                 logger.error(f"Cache corrupto, recreando desde cero: {e}")
@@ -2905,6 +2957,7 @@ def generate_embeddings_with_cache(texts):
 
                         for text, vec in zip(chunk, chunk_vectors):
                             cache[text] = vec
+                            cache_meta["dim"] = cache_meta.get("dim") or len(vec)
                             updated_cache = True
 
                         break
@@ -2921,6 +2974,7 @@ def generate_embeddings_with_cache(texts):
 
             if updated_cache:
                 try:
+                    cache["__meta__"] = cache_meta
                     with open(EMBEDDINGS_CACHE_PATH, "wb") as f:
                         pickle.dump(cache, f)
                     logger.info(f"Cache de embeddings guardado: {len(cache)} textos")
@@ -2929,12 +2983,17 @@ def generate_embeddings_with_cache(texts):
 
         final_vectors = []
         for text in texts:
-            if text in cache and cache[text]:
-                final_vectors.append(cache[text])
+            vec = cache.get(text)
+            if vec is not None and cache_meta.get("dim") and len(vec) != cache_meta["dim"]:
+                vec = None
+            if vec:
+                final_vectors.append(vec)
             else:
                 logger.error(f"Texto sin embedding: {text[:50]}")
-                final_vectors.append(np.random.normal(0, 0.01, 1536).astype("float32").tolist())
+                dim = cache_meta.get("dim") or 1536
+                final_vectors.append(np.random.normal(0, 0.01, dim).astype("float32").tolist())
 
+        _embeddings_cache_meta.update(cache_meta)
         return final_vectors
 
 
@@ -2955,6 +3014,8 @@ def _build_faiss_index_from_catalog(catalog):
         vecs = np.array(vectors).astype("float32")
         if vecs.ndim != 2 or vecs.shape[0] == 0 or vecs.shape[1] == 0:
             return None, 0
+
+        _embeddings_cache_meta["dim"] = _embeddings_cache_meta.get("dim") or vecs.shape[1]
 
         faiss.normalize_L2(vecs)
         index = faiss.IndexFlatIP(vecs.shape[1])
