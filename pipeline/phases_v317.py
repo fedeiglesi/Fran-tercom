@@ -10,7 +10,21 @@ import faiss
 import numpy as np
 from rapidfuzz import fuzz
 
+# Módulos compartidos (Coherencia 3.16/3.17)
+from fran.search_utils import (
+    normalize_text as normalize_text_shared,
+    normalize_query_noise,
+    rrf_fusion,
+    RRFConfig,
+)
+from fran.embedding_utils import get_embedding_generator
+
 logger = logging.getLogger(__name__)
+
+# Feature flags (heredados de app.py, o defaults)
+USE_NEW_NORMALIZATION_V317 = os.environ.get("USE_NEW_NORMALIZATION", "true").lower() == "true"
+USE_NEW_RRF_V317 = os.environ.get("USE_NEW_RRF", "true").lower() == "true"
+USE_NEW_EMBEDDINGS_V317 = os.environ.get("USE_NEW_EMBEDDINGS", "true").lower() == "true"
 
 try:
     from rank_bm25 import BM25Okapi
@@ -41,6 +55,17 @@ WHATSAPP_MESSAGE_LIMIT = int(os.environ.get("WHATSAPP_MESSAGE_LIMIT", "1600"))
 
 
 def _normalize_text(text: str) -> str:
+    """
+    Normaliza texto.
+
+    Si USE_NEW_NORMALIZATION_V317=true: usa fran.search_utils (con dedup opcional v3.17)
+    Si USE_NEW_NORMALIZATION_V317=false: usa implementación legacy
+    """
+    if USE_NEW_NORMALIZATION_V317:
+        # v3.17: con deduplicación activada
+        return normalize_query_noise(text, deduplicate=True)
+
+    # Legacy implementation
     text = (text or "").lower().strip()
     text = unicodedata.normalize("NFD", text)
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
