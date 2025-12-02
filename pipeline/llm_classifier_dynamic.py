@@ -72,7 +72,9 @@ def build_classifier_schema(df):
             "action_type": {
                 "type": ["string", "null"],
                 "description": "Acción de carrito cuando aplica",
-                "enum": ["add", "remove", "set", "clear", "info"],
+                # Permitimos null explícitamente para evitar fallos de validación cuando no hay
+                # intención de carrito y el modelo devuelve null (None en Python).
+                "enum": ["add", "remove", "set", "clear", "info", None],
             },
             "quantity": {
                 "type": ["integer", "null"],
