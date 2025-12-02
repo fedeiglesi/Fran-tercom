@@ -32,21 +32,42 @@ class PendingActionsQueue:
             db_path: Path a base de datos SQLite
         """
         self.db_path = db_path
+        self._memory_connection = None
+        self._is_memory = db_path == ":memory:"
+
+        if self._is_memory:
+            # Mantener una única conexión en memoria para que la tabla exista
+            # durante toda la vida útil de la instancia.
+            self._memory_connection = sqlite3.connect(
+                ":memory:",
+                timeout=10.0,
+            )
+            self._memory_connection.row_factory = sqlite3.Row
+
         self._ensure_table()
 
     @contextmanager
     def _get_connection(self):
         """Context manager para conexión DB."""
-        conn = sqlite3.connect(self.db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        if self._is_memory:
+            conn = self._memory_connection
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
 
     def _ensure_table(self):
         """Crea tabla de pending_actions_queue si no existe."""
