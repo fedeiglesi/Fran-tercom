@@ -1,0 +1,58 @@
+"""Script de setup para cargar el catálogo en Qdrant/PostgreSQL.
+
+Este módulo se ejecuta fuera del ciclo de vida de FastAPI para que la
+aplicación principal arranque rápido en Railway.
+"""
+from __future__ import annotations
+
+import asyncio
+import csv
+from pathlib import Path
+from typing import Iterable
+
+from fran_v4 import config
+from fran_v4.database import Database
+from fran_v4.search_engine import HybridSearchEngine
+
+
+async def _prepare_payloads(engine: HybridSearchEngine, rows: Iterable[dict]) -> list[dict]:
+    payloads = []
+    for row in rows:
+        text = f"{row.get('name', '')} {row.get('brand', '')} {row.get('family', '')}"
+        vector = await engine._embed(text)
+        payloads.append({
+            "id": row.get("code") or row.get("id"),
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "brand": row.get("brand"),
+            "family": row.get("family"),
+            "price_ars": row.get("price_ars"),
+            "vector": vector,
+        })
+    return payloads
+
+
+async def ingest_catalog(csv_path: str) -> None:
+    db = Database()
+    engine = HybridSearchEngine()
+    await db.init_models()
+
+    with Path(csv_path).open("r", encoding="utf-8") as handler:
+        reader = csv.DictReader(handler)
+        rows = list(reader)
+
+    payloads = await _prepare_payloads(engine, rows)
+    await engine.upsert_documents(payloads)
+    for row in rows:
+        await db.upsert_product(row)
+
+    await db.dispose()
+
+
+if __name__ == "__main__":
+    path = Path(config.CATALOG_URL) if hasattr(config, "CATALOG_URL") else None
+    if path and path.exists():
+        asyncio.run(ingest_catalog(str(path)))
+    else:
+        raise SystemExit("Debes pasar un CSV local con el catálogo para ingestar.")
+

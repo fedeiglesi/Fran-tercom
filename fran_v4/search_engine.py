@@ -1,68 +1,106 @@
-"""Hybrid search abstraction backed by Qdrant."""
+"""Motor de búsqueda híbrida (denso + texto) usando Qdrant."""
 from __future__ import annotations
 
 import asyncio
-import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from qdrant_client import QdrantClient
+from openai import AsyncOpenAI
+from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qmodels
+
+from fran_v4 import config
 
 
 class HybridSearchEngine:
-    """Encapsulates hybrid vector/search logic using Qdrant."""
+    """Encapsula la búsqueda híbrida con embeddings OpenAI y Qdrant."""
 
     def __init__(self, url: Optional[str] = None, collection: Optional[str] = None) -> None:
-        self.url = url or os.getenv("QDRANT_URL", "http://localhost:6333")
-        self.collection = collection or os.getenv("QDRANT_COLLECTION", "fran_catalog")
-        api_key = os.getenv("QDRANT_API_KEY")
-        self.client = QdrantClient(url=self.url, api_key=api_key)
+        self.collection = collection or config.QDRANT_COLLECTION
+        self.client = AsyncQdrantClient(url=url or config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
+        self.embedding_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        self.embedding_model = config.OPENAI_EMBEDDING_MODEL
+
+    async def _embed(self, text: str) -> List[float]:
+        response = await self.embedding_client.embeddings.create(model=self.embedding_model, input=text)
+        return response.data[0].embedding  # type: ignore[return-value]
 
     async def upsert_documents(self, payloads: List[Dict[str, Any]]) -> None:
         if not payloads:
             return
-        points = [
-            qmodels.PointStruct(
-                id=str(item.get("id")),
-                payload=item,
-                vector=item.get("vector"),
+        points = []
+        for item in payloads:
+            if "vector" not in item:
+                continue
+            vector_data = item.get("vector")
+            vectors = {"dense": vector_data} if isinstance(vector_data, list) else vector_data
+            points.append(
+                qmodels.PointStruct(
+                    id=str(item.get("id")),
+                    payload={k: v for k, v in item.items() if k != "vector"},
+                    vector=vectors,
+                )
             )
-            for item in payloads
-            if "vector" in item
-        ]
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.client.upsert(collection_name=self.collection, points=points),
+        await self.client.upsert(collection_name=self.collection, points=points)
+
+    async def _dense_search(
+        self, vector: List[float], limit: int, query_filter: Optional[qmodels.Filter]
+    ) -> List[qmodels.ScoredPoint]:
+        return await self.client.search(
+            collection_name=self.collection,
+            query_vector=qmodels.NamedVectorParams(name="dense", vector=vector),
+            limit=limit,
+            with_payload=True,
+            score_threshold=config.RELEVANCE_MIN_SCORE / 100,
+            query_filter=query_filter,
         )
 
+    async def _sparse_search(
+        self, query_text: str, limit: int, query_filter: Optional[qmodels.Filter]
+    ) -> List[qmodels.ScoredPoint]:
+        return await self.client.search(
+            collection_name=self.collection,
+            query=query_text,
+            using="text",
+            limit=limit,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+
+    @staticmethod
+    def _merge_results(
+        dense: List[qmodels.ScoredPoint], sparse: List[qmodels.ScoredPoint]
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        scores: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        for rank, item in enumerate(dense, start=1):
+            payload = item.payload or {}
+            scores[str(item.id)] = (1 / rank + float(item.score or 0), payload)
+        for rank, item in enumerate(sparse, start=1):
+            payload = item.payload or {}
+            current_score, _ = scores.get(str(item.id), (0.0, payload))
+            scores[str(item.id)] = (current_score + 1 / rank + float(item.score or 0), payload)
+        sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+        return [(item_id, score_payload[0], score_payload[1]) for item_id, score_payload in sorted_items]
+
     async def hybrid_search(
-        self, query_vector: List[float], query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None
+        self, query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         query_filter = None
         if filters:
-            must_clauses = [qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=value)) for key, value in filters.items()]
-            query_filter = qmodels.Filter(must=must_clauses)
+            must = [qmodels.FieldCondition(key=k, match=qmodels.MatchValue(value=v)) for k, v in filters.items()]
+            query_filter = qmodels.Filter(must=must)
 
-        search_request = qmodels.SearchRequest(
-            vector=query_vector,
-            limit=limit,
-            filter=query_filter,
-            with_payload=True,
-            score_threshold=0.2,
+        vector = await self._embed(query_text)
+        dense_results, sparse_results = await asyncio.gather(
+            self._dense_search(vector, limit, query_filter),
+            self._sparse_search(query_text, limit, query_filter),
         )
 
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: self.client.search_batch(
-                collection_name=self.collection,
-                requests=[search_request],
-                search_params=qmodels.SearchParams(hnsw_ef=128, exact=False),
-                query_vector=qmodels.NamedVectorParams(name="text", vector=query_vector),
-                with_payload=True,
-            ),
-        )
-        # search_batch returns a list of lists
-        matches = result[0] if result else []
-        return [match.payload for match in matches]
+        merged = self._merge_results(dense_results, sparse_results)
+        formatted: List[Dict[str, Any]] = []
+        for _, score, payload in merged[:limit]:
+            if score * 100 < config.RELEVANCE_MIN_SCORE:
+                continue
+            enriched = dict(payload)
+            enriched["score"] = float(score * 100)
+            formatted.append(enriched)
+        return formatted

@@ -1,21 +1,20 @@
-"""LLM service abstraction for Fran 4.0."""
+"""Abstracción del cliente LLM para Fran 4.0."""
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional
 
 from openai import AsyncOpenAI
 
+from fran_v4 import config
+
 
 class LLMService:
-    """Thin wrapper around the OpenAI async client."""
+    """Wrapper del cliente OpenAI en modo asíncrono."""
 
     def __init__(self, model: Optional[str] = None) -> None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is required for Fran 4.0")
+        api_key = config.OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=api_key)
-        self.model = model or os.getenv("MODEL_NAME", "gpt-4o-mini")
+        self.model = model or config.MODEL_NAME
 
     async def chat(self, messages: List[Dict[str, str]], **kwargs: Any) -> str:
         response = await self.client.chat.completions.create(
