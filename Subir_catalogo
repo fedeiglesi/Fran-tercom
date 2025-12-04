@@ -23,6 +23,26 @@ reader = csv.DictReader(csvfile)
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
+# Crear la tabla si no existe (necesaria para ON CONFLICT)
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS "Catalogo1125" (
+        codigo TEXT PRIMARY KEY,
+        descripcion TEXT,
+        precio_dolares NUMERIC(14, 2),
+        precio_pesos NUMERIC(14, 2),
+        familia TEXT,
+        familia_nombre TEXT,
+        proveedor_nombre TEXT,
+        marca_moto TEXT,
+        modelo_moto TEXT,
+        descripcion_normalizada TEXT,
+        sinonimos TEXT,
+        cilindrada TEXT,
+        categoria_final TEXT
+    );
+""")
+conn.commit()
+
 for row in reader:
     cur.execute("""
         INSERT INTO "Catalogo1125" (
