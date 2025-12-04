@@ -85,6 +85,7 @@ except ImportError:  # pragma: no cover - fallback liviano
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+from fran.catalog_postgres import load_catalog_from_postgres, is_postgres_enabled
 from pipeline.llm_classifier_dynamic import build_classifier_schema
 from pipeline.orquestador_v317 import orquestar_v317
 from pipeline.router_dynamic import build_catalog_centroid
@@ -2650,6 +2651,18 @@ def _extract_column(header_row, key_variants):
 
 
 def load_catalog_enriched():
+    # Intentar cargar desde PostgreSQL primero (si está habilitado)
+    if is_postgres_enabled():
+        try:
+            exchange = get_exchange_rate()
+            pg_catalog = load_catalog_from_postgres(exchange_rate=exchange)
+            if pg_catalog and len(pg_catalog) > 0:
+                logger.info(f"Catálogo cargado desde PostgreSQL: {len(pg_catalog)} productos")
+                return pg_catalog
+        except Exception as e:
+            logger.warning(f"Error cargando desde PostgreSQL, usando CSV: {e}")
+
+    # Fallback a CSV
     try:
         text = _load_raw_csv()
         if not text:
