@@ -33,6 +33,13 @@ MAX_ITEMS: Final[int] = int(os.getenv("MAX_ITEMS", "150"))
 RELEVANCE_MIN_SCORE: Final[float] = float(os.getenv("RELEVANCE_MIN_SCORE", "65.0"))
 RATE_LIMIT_PER_MINUTE: Final[int] = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 
+DB_INIT_MAX_RETRIES: Final[int | None] = (
+    int(os.getenv("DB_INIT_MAX_RETRIES", "10"))
+    if os.getenv("DB_INIT_MAX_RETRIES", "").strip() != "" else None
+)
+DB_INIT_BASE_DELAY: Final[float] = float(os.getenv("DB_INIT_BASE_DELAY", "1.0"))
+DB_INIT_MAX_DELAY: Final[float] = float(os.getenv("DB_INIT_MAX_DELAY", "10.0"))
+
 REQUEST_TIMEOUT: Final[int] = int(os.getenv("REQUEST_TIMEOUT", "15"))
 
 UVICORN_HOST: Final[str] = os.getenv("UVICORN_HOST", "0.0.0.0")

@@ -59,6 +59,11 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         await database.init_models()
+        if not database.available:
+            logger.warning(
+                "La base de datos no está disponible; se reintentará en segundo plano y las "
+                "operaciones persistentes se omitirán hasta reconectar."
+            )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
@@ -73,7 +78,7 @@ def create_app() -> FastAPI:
             "version": "4.0",
             "components": {
                 "fastapi_async": True,
-                "postgresql": True,
+                "postgresql": database.available,
                 "redis": True,
                 "qdrant": True,
                 "langgraph": True,
