@@ -2,16 +2,17 @@ import csv
 import os
 import urllib.parse
 import psycopg2
+from psycopg2.extras import execute_values
 import requests
 from io import StringIO
 
-def build_database_url(verbose=True):
-    """Return a Postgres connection string from env vars with clear guidance."""
 
+def build_database_url(verbose=True):
+    """Return a Postgres connection string from env vars."""
     database_url = os.getenv("DATABASE_URL")
     if database_url:
         if verbose:
-            print("🔌 Usando DATABASE_URL (formato completo de conexión)")
+            print("🔌 Usando DATABASE_URL")
         return database_url
 
     user = os.getenv("POSTGRES_USER")
@@ -22,92 +23,132 @@ def build_database_url(verbose=True):
 
     if all([user, password, host, dbname]):
         if verbose:
-            print(
-                "🔌 Usando credenciales POSTGRES_* (solo se muestra host/puerto/db):\n"
-                f"  HOST: {host}\n  PORT: {port}\n  DB:   {dbname}\n  USER: {user}"
-            )
-
-        # Escape password in case it contains special characters
+            print(f"🔌 Conectando a {host}:{port}/{dbname}")
         safe_password = urllib.parse.quote_plus(password)
         return f"postgresql://{user}:{safe_password}@{host}:{port}/{dbname}"
 
-    missing = [
-        var for var in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST", "POSTGRES_DB"]
-        if os.getenv(var) is None
-    ]
-    missing_text = ", ".join(missing)
-    raise Exception(
-        "Faltan datos de conexión. Define DATABASE_URL o todas estas variables: "
-        "POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_DB (opcional POSTGRES_PORT). "
-        f"Variables ausentes: {missing_text or 'ninguna, pero DATABASE_URL tampoco está definido.'}"
-    )
+    missing = [v for v in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST", "POSTGRES_DB"] if not os.getenv(v)]
+    raise Exception(f"Faltan variables de conexión: {', '.join(missing)}")
 
-# URL RAW DEL CSV EN GITHUB
-CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/refs/heads/Fran-3.17/catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
 
-# Descargar CSV desde GitHub
-response = requests.get(CSV_URL)
-response.raise_for_status()
+def parse_decimal(value):
+    """Convierte string a decimal o None si está vacío."""
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
-csvfile = StringIO(response.text)
-reader = csv.DictReader(csvfile)
 
-# Conexión a Postgres Railway o local
-conn = psycopg2.connect(build_database_url())
-cur = conn.cursor()
+def migrate_catalog():
+    CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/refs/heads/Fran-3.17/catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
+    
+    print("📥 Descargando catálogo desde GitHub...")
+    response = requests.get(CSV_URL, timeout=30)
+    response.raise_for_status()
+    
+    reader = csv.DictReader(StringIO(response.text))
+    
+    # Preparar datos con conversión de tipos
+    rows = []
+    for row in reader:
+        rows.append((
+            row.get("codigo", "").strip(),
+            row.get("descripcion", "").strip() or None,
+            parse_decimal(row.get("precio_dolares")),
+            parse_decimal(row.get("precio_pesos")),
+            row.get("familia", "").strip() or None,
+            row.get("familia_nombre", "").strip() or None,
+            row.get("proveedor_nombre", "").strip() or None,
+            row.get("marca_moto", "").strip() or None,
+            row.get("modelo_moto", "").strip() or None,
+            row.get("descripcion_normalizada", "").strip() or None,
+            row.get("sinonimos", "").strip() or None,
+            row.get("cilindrada", "").strip() or None,
+            row.get("categoria_final", "").strip() or None,
+        ))
+    
+    print(f"📊 {len(rows)} productos parseados")
+    
+    conn = psycopg2.connect(build_database_url())
+    
+    try:
+        with conn.cursor() as cur:
+            # Crear tabla
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS catalogo (
+                    codigo TEXT PRIMARY KEY,
+                    descripcion TEXT,
+                    precio_dolares NUMERIC(12,2),
+                    precio_pesos NUMERIC(12,2),
+                    familia TEXT,
+                    familia_nombre TEXT,
+                    proveedor_nombre TEXT,
+                    marca_moto TEXT,
+                    modelo_moto TEXT,
+                    descripcion_normalizada TEXT,
+                    sinonimos TEXT,
+                    cilindrada TEXT,
+                    categoria_final TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            
+            # Crear índices para búsqueda eficiente
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_catalogo_marca ON catalogo(marca_moto);
+                CREATE INDEX IF NOT EXISTS idx_catalogo_modelo ON catalogo(modelo_moto);
+                CREATE INDEX IF NOT EXISTS idx_catalogo_categoria ON catalogo(categoria_final);
+                CREATE INDEX IF NOT EXISTS idx_catalogo_familia ON catalogo(familia);
+                CREATE INDEX IF NOT EXISTS idx_catalogo_descripcion_gin ON catalogo 
+                    USING gin(to_tsvector('spanish', COALESCE(descripcion_normalizada, '')));
+            """)
+            
+            # Bulk upsert con execute_values (mucho más rápido)
+            execute_values(
+                cur,
+                """
+                INSERT INTO catalogo (
+                    codigo, descripcion, precio_dolares, precio_pesos,
+                    familia, familia_nombre, proveedor_nombre,
+                    marca_moto, modelo_moto, descripcion_normalizada,
+                    sinonimos, cilindrada, categoria_final
+                ) VALUES %s
+                ON CONFLICT (codigo) DO UPDATE SET
+                    descripcion = EXCLUDED.descripcion,
+                    precio_dolares = EXCLUDED.precio_dolares,
+                    precio_pesos = EXCLUDED.precio_pesos,
+                    familia = EXCLUDED.familia,
+                    familia_nombre = EXCLUDED.familia_nombre,
+                    proveedor_nombre = EXCLUDED.proveedor_nombre,
+                    marca_moto = EXCLUDED.marca_moto,
+                    modelo_moto = EXCLUDED.modelo_moto,
+                    descripcion_normalizada = EXCLUDED.descripcion_normalizada,
+                    sinonimos = EXCLUDED.sinonimos,
+                    cilindrada = EXCLUDED.cilindrada,
+                    categoria_final = EXCLUDED.categoria_final,
+                    updated_at = NOW();
+                """,
+                rows,
+                page_size=500
+            )
+            
+            # Verificar conteo
+            cur.execute("SELECT COUNT(*) FROM catalogo")
+            count = cur.fetchone()[0]
+            
+        conn.commit()
+        print(f"✅ Migración completada: {count} productos en la tabla 'catalogo'")
+        
+    except Exception as e:
+        conn.rollback()
+        print(f"❌ Error durante la migración: {e}")
+        raise
+    finally:
+        conn.close()
 
-# Crear tabla si no existe para permitir inserciones/actualizaciones
-cur.execute(
-    """
-    CREATE TABLE IF NOT EXISTS "Catalogo1125" (
-        codigo TEXT PRIMARY KEY,
-        descripcion TEXT,
-        precio_dolares NUMERIC,
-        precio_pesos NUMERIC,
-        familia TEXT,
-        familia_nombre TEXT,
-        proveedor_nombre TEXT,
-        marca_moto TEXT,
-        modelo_moto TEXT,
-        descripcion_normalizada TEXT,
-        sinonimos TEXT,
-        cilindrada TEXT,
-        categoria_final TEXT
-    );
-    """
-)
 
-for row in reader:
-    cur.execute("""
-        INSERT INTO "Catalogo1125" (
-            codigo, descripcion, precio_dolares, precio_pesos,
-            familia, familia_nombre, proveedor_nombre,
-            marca_moto, modelo_moto, descripcion_normalizada,
-            sinonimos, cilindrada, categoria_final
-        )
-        VALUES (
-            %(codigo)s, %(descripcion)s, %(precio_dolares)s, %(precio_pesos)s,
-            %(familia)s, %(familia_nombre)s, %(proveedor_nombre)s,
-            %(marca_moto)s, %(modelo_moto)s, %(descripcion_normalizada)s,
-            %(sinonimos)s, %(cilindrada)s, %(categoria_final)s
-        )
-        ON CONFLICT (codigo) DO UPDATE SET
-            descripcion = EXCLUDED.descripcion,
-            precio_dolares = EXCLUDED.precio_dolares,
-            precio_pesos = EXCLUDED.precio_pesos,
-            familia = EXCLUDED.familia,
-            familia_nombre = EXCLUDED.familia_nombre,
-            proveedor_nombre = EXCLUDED.proveedor_nombre,
-            marca_moto = EXCLUDED.marca_moto,
-            modelo_moto = EXCLUDED.modelo_moto,
-            descripcion_normalizada = EXCLUDED.descripcion_normalizada,
-            sinonimos = EXCLUDED.sinonimos,
-            cilindrada = EXCLUDED.cilindrada,
-            categoria_final = EXCLUDED.categoria_final;
-    """, row)
-
-conn.commit()
-cur.close()
-conn.close()
-
-print("✔ Catálogo Catalogo1125 actualizado correctamente desde GitHub")
+if __name__ == "__main__":
+    migrate_catalog()
