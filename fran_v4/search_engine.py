@@ -1,0 +1,106 @@
+"""Motor de búsqueda híbrida (denso + texto) usando Qdrant."""
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Dict, List, Optional, Tuple
+
+from openai import AsyncOpenAI
+from qdrant_client.async_qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models as qmodels
+
+from fran_v4 import config
+
+
+class HybridSearchEngine:
+    """Encapsula la búsqueda híbrida con embeddings OpenAI y Qdrant."""
+
+    def __init__(self, url: Optional[str] = None, collection: Optional[str] = None) -> None:
+        self.collection = collection or config.QDRANT_COLLECTION
+        self.client = AsyncQdrantClient(url=url or config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
+        self.embedding_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        self.embedding_model = config.OPENAI_EMBEDDING_MODEL
+
+    async def _embed(self, text: str) -> List[float]:
+        response = await self.embedding_client.embeddings.create(model=self.embedding_model, input=text)
+        return response.data[0].embedding  # type: ignore[return-value]
+
+    async def upsert_documents(self, payloads: List[Dict[str, Any]]) -> None:
+        if not payloads:
+            return
+        points = []
+        for item in payloads:
+            if "vector" not in item:
+                continue
+            vector_data = item.get("vector")
+            vectors = {"dense": vector_data} if isinstance(vector_data, list) else vector_data
+            points.append(
+                qmodels.PointStruct(
+                    id=str(item.get("id")),
+                    payload={k: v for k, v in item.items() if k != "vector"},
+                    vector=vectors,
+                )
+            )
+        await self.client.upsert(collection_name=self.collection, points=points)
+
+    async def _dense_search(
+        self, vector: List[float], limit: int, query_filter: Optional[qmodels.Filter]
+    ) -> List[qmodels.ScoredPoint]:
+        return await self.client.search(
+            collection_name=self.collection,
+            query_vector=qmodels.NamedVectorParams(name="dense", vector=vector),
+            limit=limit,
+            with_payload=True,
+            score_threshold=config.RELEVANCE_MIN_SCORE / 100,
+            query_filter=query_filter,
+        )
+
+    async def _sparse_search(
+        self, query_text: str, limit: int, query_filter: Optional[qmodels.Filter]
+    ) -> List[qmodels.ScoredPoint]:
+        return await self.client.search(
+            collection_name=self.collection,
+            query=query_text,
+            using="text",
+            limit=limit,
+            with_payload=True,
+            query_filter=query_filter,
+        )
+
+    @staticmethod
+    def _merge_results(
+        dense: List[qmodels.ScoredPoint], sparse: List[qmodels.ScoredPoint]
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        scores: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        for rank, item in enumerate(dense, start=1):
+            payload = item.payload or {}
+            scores[str(item.id)] = (1 / rank + float(item.score or 0), payload)
+        for rank, item in enumerate(sparse, start=1):
+            payload = item.payload or {}
+            current_score, _ = scores.get(str(item.id), (0.0, payload))
+            scores[str(item.id)] = (current_score + 1 / rank + float(item.score or 0), payload)
+        sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+        return [(item_id, score_payload[0], score_payload[1]) for item_id, score_payload in sorted_items]
+
+    async def hybrid_search(
+        self, query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        query_filter = None
+        if filters:
+            must = [qmodels.FieldCondition(key=k, match=qmodels.MatchValue(value=v)) for k, v in filters.items()]
+            query_filter = qmodels.Filter(must=must)
+
+        vector = await self._embed(query_text)
+        dense_results, sparse_results = await asyncio.gather(
+            self._dense_search(vector, limit, query_filter),
+            self._sparse_search(query_text, limit, query_filter),
+        )
+
+        merged = self._merge_results(dense_results, sparse_results)
+        formatted: List[Dict[str, Any]] = []
+        for _, score, payload in merged[:limit]:
+            if score * 100 < config.RELEVANCE_MIN_SCORE:
+                continue
+            enriched = dict(payload)
+            enriched["score"] = float(score * 100)
+            formatted.append(enriched)
+        return formatted

@@ -1,3 +1,10 @@
+## Fran 4.0 (Arquitectura asincrónica)
+- Migración a **FastAPI** con servidor uvicorn para soportar `async/await` y despliegues en Railway.
+- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) y memoria de sesión/rate limiting en **Redis**.
+- Motor RAG externalizado a **Qdrant** con búsqueda híbrida y filtrado de metadata.
+- Orquestador reescrito sobre **LangGraph** con bucle de razonamiento y herramientas desacopladas.
+- Código modular en `fran_v4/` separando base de datos, motor de búsqueda, LLM y grafo del agente.
+
 Constante	Valor	Descripción
 MAX_SEARCH_RESULTS	60	Máx productos de búsqueda híbrida
 MAX_PRODUCTS_FOR_LLM	15	Máx productos enviados al LLM
@@ -21,3 +28,42 @@ PENDING_ACTION_TTL	30min	TTL de pending actions
 ## Notas sobre los arreglos recientes
 - Se guarda un *snapshot* de las respuestas de búsquedas múltiples cuando se devuelven listas de productos. Así, si el usuario luego pide acciones en bloque (por ejemplo, "dame 10 de cada producto"), el sistema reutiliza esa lista sin tener que repetirla.
 - La lógica de guardado de estos *snapshots* se unificó en un helper (`_persist_search_snapshot`) para evitar duplicación y asegurar que todas las rutas que generan listas queden alineadas.
+
+## Diagnóstico rápido: `ConnectionRefusedError` con PostgreSQL
+Un `ConnectionRefusedError: [Errno 111] Connection refused` aparece **antes** de autenticar porque ningún servicio está escuchando en el host/puerto configurados. Antes de revisar credenciales o `pg_hba.conf`, valida lo siguiente:
+
+1. **Servicio en marcha**: verifica que PostgreSQL esté activo y escuchando en el puerto esperado (`psql -h <host> -U <usuario> -d <db>`).
+2. **Host y puerto correctos**: confirma que la URL de conexión sea alcanzable desde el contenedor donde corre la app.
+3. **Red Docker**: si usas contenedores, comprueba que app y base estén en la misma red (`docker network ls` + `docker network inspect <red>`).
+4. **Puertos expuestos**: valida que el puerto de PostgreSQL esté publicado y sin bloqueos de firewall.
+
+Solo después de confirmar la conectividad de red tiene sentido revisar errores de autenticación (p. ej., `FATAL: password authentication failed`).
+
+### Reintentos de arranque y reconexión
+- La inicialización de la base hace reintentos con backoff y, si agota el límite, sigue reintentando en segundo plano sin caer el proceso.
+- Variables de entorno ajustables:
+  - `DB_INIT_MAX_RETRIES` (por defecto `10`; deja vacío para reintentos infinitos en primer plano).
+  - `DB_INIT_BASE_DELAY` (segundos; por defecto `1.0`).
+  - `DB_INIT_MAX_DELAY` (límite superior del backoff; por defecto `10.0`).
+
+## Carga automática del catálogo en Railway
+El proceso de `release` en Railway ahora ejecuta el cargador dinámico que crea la tabla `catalogo3`
+a partir del CSV indicado. Configura la variable de entorno `CATALOGO_CSV_URL` con la URL raw del
+CSV (por ejemplo, la de GitHub) y, en cada deploy, Railway descargará ese CSV y recreará la tabla.
+
+Si quieres probar el cargador manualmente desde tu máquina o desde una consola en Railway, ejecuta:
+
+```bash
+python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing
+```
+
+El cargador también acepta rutas locales a archivos CSV si prefieres cargar uno desde disco.
+
+### Configuración rápida para `Subir_catalogo`
+
+El script `Subir_catalogo` acepta dos formas de credenciales para conectarse a Postgres:
+
+- **DATABASE_URL**: una URL completa (`postgresql://usuario:password@host:puerto/db`).
+- `POSTGRES_*`: variables individuales `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DB` y opcionalmente `POSTGRES_PORT` (5432 por defecto).
+
+En Railway normalmente dispones de `DATABASE_URL`. Si prefieres usar las variables separadas, el script mostrará qué host/puerto/DB está usando y te avisará si falta alguna. Si ninguna está definida, el mensaje de error te recordará qué variables debes completar.

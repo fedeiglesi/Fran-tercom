@@ -1,1 +1,2 @@
-web: gunicorn --workers=1 --threads=8 --timeout=120 --worker-class=gthread --bind=0.0.0.0:$PORT app:app
+web: gunicorn fran_v4.api:app --worker-class uvicorn.workers.UvicornWorker --bind=0.0.0.0:$PORT --workers=1 --timeout=120 --graceful-timeout=120 --preload
+release: python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing

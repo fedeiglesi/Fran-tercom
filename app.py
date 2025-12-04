@@ -3348,6 +3348,8 @@ def hybrid_search(
     fused_scores = defaultdict(float)
     product_lookup = {}
 
+    query_tokens = set(normalize_search_query(query).split())
+
     def add_rrf_scores(results, weight):
         for product, _score, rank in results:
             key = product.get("code") or product.get("name") or id(product)
@@ -3357,6 +3359,24 @@ def hybrid_search(
 
     add_rrf_scores(bm25_results, RRF_BM25_WEIGHT)
     add_rrf_scores(faiss_results, RRF_FAISS_WEIGHT)
+
+    if query_tokens:
+        for key, product in product_lookup.items():
+            cat_tokens = set(normalize_search_query(product.get("category", "")).split())
+            family_tokens = set(normalize_search_query(product.get("family_name", "")).split())
+            name_tokens = set(normalize_search_query(product.get("name", "")).split())
+
+            category_hits = len(query_tokens & (cat_tokens | family_tokens))
+            name_hits = len(query_tokens & name_tokens)
+
+            bonus = 0.0
+            if category_hits:
+                bonus += 0.5 * (category_hits / max(len(query_tokens), 1))
+            if name_hits:
+                bonus += 0.2 * (name_hits / max(len(query_tokens), 1))
+
+            if bonus:
+                fused_scores[key] += bonus
 
     sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
