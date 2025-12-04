@@ -1,13 +1,46 @@
 import csv
 import os
+import urllib.parse
 import psycopg2
 import requests
 from io import StringIO
 
-# Railway proporciona DATABASE_URL de forma segura
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL is None:
-    raise Exception("DATABASE_URL no está definida en Railway. Configúrala en variables.")
+def build_database_url(verbose=True):
+    """Return a Postgres connection string from env vars with clear guidance."""
+
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        if verbose:
+            print("🔌 Usando DATABASE_URL (formato completo de conexión)")
+        return database_url
+
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    host = os.getenv("POSTGRES_HOST")
+    dbname = os.getenv("POSTGRES_DB")
+    port = os.getenv("POSTGRES_PORT", "5432")
+
+    if all([user, password, host, dbname]):
+        if verbose:
+            print(
+                "🔌 Usando credenciales POSTGRES_* (solo se muestra host/puerto/db):\n"
+                f"  HOST: {host}\n  PORT: {port}\n  DB:   {dbname}\n  USER: {user}"
+            )
+
+        # Escape password in case it contains special characters
+        safe_password = urllib.parse.quote_plus(password)
+        return f"postgresql://{user}:{safe_password}@{host}:{port}/{dbname}"
+
+    missing = [
+        var for var in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST", "POSTGRES_DB"]
+        if os.getenv(var) is None
+    ]
+    missing_text = ", ".join(missing)
+    raise Exception(
+        "Faltan datos de conexión. Define DATABASE_URL o todas estas variables: "
+        "POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_DB (opcional POSTGRES_PORT). "
+        f"Variables ausentes: {missing_text or 'ninguna, pero DATABASE_URL tampoco está definido.'}"
+    )
 
 # URL RAW DEL CSV EN GITHUB
 CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/refs/heads/Fran-3.17/catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
@@ -19,9 +52,30 @@ response.raise_for_status()
 csvfile = StringIO(response.text)
 reader = csv.DictReader(csvfile)
 
-# Conexión a Postgres Railway
-conn = psycopg2.connect(DATABASE_URL)
+# Conexión a Postgres Railway o local
+conn = psycopg2.connect(build_database_url())
 cur = conn.cursor()
+
+# Crear tabla si no existe para permitir inserciones/actualizaciones
+cur.execute(
+    """
+    CREATE TABLE IF NOT EXISTS "Catalogo1125" (
+        codigo TEXT PRIMARY KEY,
+        descripcion TEXT,
+        precio_dolares NUMERIC,
+        precio_pesos NUMERIC,
+        familia TEXT,
+        familia_nombre TEXT,
+        proveedor_nombre TEXT,
+        marca_moto TEXT,
+        modelo_moto TEXT,
+        descripcion_normalizada TEXT,
+        sinonimos TEXT,
+        cilindrada TEXT,
+        categoria_final TEXT
+    );
+    """
+)
 
 for row in reader:
     cur.execute("""
