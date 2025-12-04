@@ -1,0 +1,53 @@
+import csv
+import os
+import psycopg2
+
+# Railway expone DATABASE_URL automáticamente
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL is None:
+    raise Exception("DATABASE_URL no está definida en Railway")
+
+# Conexión
+conn = psycopg2.connect(DATABASE_URL)
+cur = conn.cursor()
+
+CSV_PATH = "catalogo1125.csv"   # mismo archivo que siempre
+
+with open(CSV_PATH, "r", encoding="utf-8") as f:
+    reader = csv.DictReader(f)
+
+    for row in reader:
+        cur.execute("""
+            INSERT INTO catalogo1125 (
+                codigo, descripcion, precio_dolares, precio_pesos,
+                familia, familia_nombre, proveedor_nombre,
+                marca_moto, modelo_moto, descripcion_normalizada,
+                sinonimos, cilindrada, categoria_final
+            )
+            VALUES (
+                %(codigo)s, %(descripcion)s, %(precio_dolares)s, %(precio_pesos)s,
+                %(familia)s, %(familia_nombre)s, %(proveedor_nombre)s,
+                %(marca_moto)s, %(modelo_moto)s, %(descripcion_normalizada)s,
+                %(sinonimos)s, %(cilindrada)s, %(categoria_final)s
+            )
+            ON CONFLICT (codigo) DO UPDATE SET
+                descripcion = EXCLUDED.descripcion,
+                precio_dolares = EXCLUDED.precio_dolares,
+                precio_pesos = EXCLUDED.precio_pesos,
+                familia = EXCLUDED.familia,
+                familia_nombre = EXCLUDED.familia_nombre,
+                proveedor_nombre = EXCLUDED.proveedor_nombre,
+                marca_moto = EXCLUDED.marca_moto,
+                modelo_moto = EXCLUDED.modelo_moto,
+                descripcion_normalizada = EXCLUDED.descripcion_normalizada,
+                sinonimos = EXCLUDED.sinonimos,
+                cilindrada = EXCLUDED.cilindrada,
+                categoria_final = EXCLUDED.categoria_final;
+        """, row)
+
+conn.commit()
+cur.close()
+conn.close()
+
+print("✔ Catálogo actualizado en Railway (tabla catalogo1125)")
