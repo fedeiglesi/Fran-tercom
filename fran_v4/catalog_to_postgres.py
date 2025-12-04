@@ -120,6 +120,40 @@ async def _bulk_insert(engine: AsyncEngine, table: Table, rows: List[Mapping[str
             await session.commit()
 
 
+def _to_async_database_url(url: str) -> str:
+    """Normaliza la URL de base de datos para que use el dialecto asyncpg."""
+
+    # Railway suele exponer ``postgres://`` o ``postgresql://``.
+    # SQLAlchemy async requiere ``postgresql+asyncpg://`` para funcionar.
+    normalized = url.replace("postgres://", "postgresql://", 1)
+    if "+asyncpg" not in normalized.partition("://")[0]:
+        normalized = normalized.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return normalized
+
+
+async def _run_with_retries(coro_factory, *, label: str) -> None:
+    """Ejecuta una operación con reintentos y backoff."""
+
+    attempt = 0
+    max_retries = config.DB_INIT_MAX_RETRIES
+    delay = config.DB_INIT_BASE_DELAY
+    while True:
+        try:
+            await coro_factory()
+            return
+        except Exception as exc:  # pragma: no cover - logging solamente
+            attempt += 1
+            if max_retries is not None and attempt > max_retries:
+                raise
+
+            wait_time = min(delay, config.DB_INIT_MAX_DELAY)
+            print(
+                f"[{label}] fallo intento {attempt}: {exc}. Reintentando en {wait_time} s..."
+            )
+            await asyncio.sleep(wait_time)
+            delay *= 2
+
+
 async def ingest_catalog(
     csv_path: str, *, table_name: str = "catalogo3", drop_existing: bool = False
 ) -> None:
@@ -132,11 +166,14 @@ async def ingest_catalog(
                 raise ValueError("El CSV no tiene encabezados válidos")
             sanitized_rows = [_sanitize_row(row) for row in reader]
 
-    engine = create_async_engine(config.DATABASE_URL, echo=False, future=True)
+    database_url = _to_async_database_url(config.DATABASE_URL)
+    engine = create_async_engine(database_url, echo=False, future=True)
     table = _build_table(headers, table_name)
 
-    await _create_table(engine, table, drop_existing)
-    await _bulk_insert(engine, table, sanitized_rows)
+    await _run_with_retries(
+        lambda: _create_table(engine, table, drop_existing), label="creacion_tabla"
+    )
+    await _run_with_retries(lambda: _bulk_insert(engine, table, sanitized_rows), label="insercion_catalogo")
     await engine.dispose()
 
 
