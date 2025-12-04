@@ -1,12 +1,17 @@
-"""Carga el catálogo desde un CSV a PostgreSQL en una tabla nueva.
+"""Carga el catálogo desde un CSV o URL remota a PostgreSQL en una tabla nueva.
 
 El script crea una tabla llamada ``catalogo3`` (por defecto) tomando los
 encabezados del CSV como columnas. Los campos ``precio_pesos`` y
 ``precio_dolares`` se convierten a valores numéricos y quedan en ``NULL``
 cuando el CSV no trae valor. El resto de las columnas se cargan como texto.
 
-Uso:
+Uso local con archivo CSV:
     python -m fran_v4.catalog_to_postgres /ruta/al/catalogo.csv \
+        --table-name catalogo3 --drop-existing
+
+Uso directo con una URL (por ejemplo, GitHub raw):
+    python -m fran_v4.catalog_to_postgres \
+        "https://raw.githubusercontent.com/usuario/repo/ruta/catalogo.csv" \
         --table-name catalogo3 --drop-existing
 """
 from __future__ import annotations
@@ -14,9 +19,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, List, Mapping
+from typing import Iterable, Iterator, List, Mapping
+from contextlib import contextmanager
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from sqlalchemy import Column, MetaData, Numeric, String, Table, Text, insert, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -50,6 +59,34 @@ def _sanitize_row(row: Mapping[str, str]) -> Mapping[str, object]:
         else:
             normalized[key] = value.strip() if isinstance(value, str) else value
     return normalized
+
+
+def _is_url(path: str) -> bool:
+    parsed = urlparse(path)
+    return parsed.scheme in {"http", "https"}
+
+
+def _download_csv(url: str) -> Path:
+    """Descarga el CSV remoto a un archivo temporal y devuelve su ruta."""
+    with urlopen(url) as response, tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+        tmp.write(response.read())
+        return Path(tmp.name)
+
+
+@contextmanager
+def _resolve_csv_source(csv_path: str) -> Iterator[Path]:
+    """Devuelve una ruta local al CSV, descargándolo si es una URL."""
+    if _is_url(csv_path):
+        tmp_path = _download_csv(csv_path)
+        try:
+            yield tmp_path
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    else:
+        path = Path(csv_path)
+        if not path.exists():
+            raise FileNotFoundError(f"No se encontró el archivo CSV: {csv_path}")
+        yield path
 
 
 def _build_table(headers: Iterable[str], table_name: str) -> Table:
@@ -87,16 +124,13 @@ async def ingest_catalog(
     csv_path: str, *, table_name: str = "catalogo3", drop_existing: bool = False
 ) -> None:
     """Lee el CSV y lo vuelca en PostgreSQL dentro de ``table_name``."""
-    path = Path(csv_path)
-    if not path.exists():
-        raise FileNotFoundError(f"No se encontró el archivo CSV: {csv_path}")
-
-    with path.open("r", encoding="utf-8") as handler:
-        reader = csv.DictReader(handler)
-        headers = reader.fieldnames or []
-        if not headers:
-            raise ValueError("El CSV no tiene encabezados válidos")
-        sanitized_rows = [_sanitize_row(row) for row in reader]
+    with _resolve_csv_source(csv_path) as path:
+        with path.open("r", encoding="utf-8") as handler:
+            reader = csv.DictReader(handler)
+            headers = reader.fieldnames or []
+            if not headers:
+                raise ValueError("El CSV no tiene encabezados válidos")
+            sanitized_rows = [_sanitize_row(row) for row in reader]
 
     engine = create_async_engine(config.DATABASE_URL, echo=False, future=True)
     table = _build_table(headers, table_name)
