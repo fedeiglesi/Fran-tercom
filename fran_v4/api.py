@@ -60,7 +60,10 @@ def create_app() -> FastAPI:
     async def _startup() -> None:
         await database.init_models()
         if not database.available:
-            logger.warning("La base de datos no está disponible; las operaciones persistentes se omitirán.")
+            logger.warning(
+                "La base de datos no está disponible; se reintentará en segundo plano y las "
+                "operaciones persistentes se omitirán hasta reconectar."
+            )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:

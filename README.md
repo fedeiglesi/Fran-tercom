@@ -39,6 +39,13 @@ Un `ConnectionRefusedError: [Errno 111] Connection refused` aparece **antes** de
 
 Solo después de confirmar la conectividad de red tiene sentido revisar errores de autenticación (p. ej., `FATAL: password authentication failed`).
 
+### Reintentos de arranque y reconexión
+- La inicialización de la base hace reintentos con backoff y, si agota el límite, sigue reintentando en segundo plano sin caer el proceso.
+- Variables de entorno ajustables:
+  - `DB_INIT_MAX_RETRIES` (por defecto `10`; deja vacío para reintentos infinitos en primer plano).
+  - `DB_INIT_BASE_DELAY` (segundos; por defecto `1.0`).
+  - `DB_INIT_MAX_DELAY` (límite superior del backoff; por defecto `10.0`).
+
 ## Carga automática del catálogo en Railway
 El proceso de `release` en Railway ahora ejecuta el cargador dinámico que crea la tabla `catalogo3`
 a partir del CSV indicado. Configura la variable de entorno `CATALOGO_CSV_URL` con la URL raw del
