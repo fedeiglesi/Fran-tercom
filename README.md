@@ -58,3 +58,12 @@ python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3
 ```
 
 El cargador también acepta rutas locales a archivos CSV si prefieres cargar uno desde disco.
+
+### Configuración rápida para `Subir_catalogo`
+
+El script `Subir_catalogo` acepta dos formas de credenciales para conectarse a Postgres:
+
+- **DATABASE_URL**: una URL completa (`postgresql://usuario:password@host:puerto/db`).
+- `POSTGRES_*`: variables individuales `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DB` y opcionalmente `POSTGRES_PORT` (5432 por defecto).
+
+En Railway normalmente dispones de `DATABASE_URL`. Si prefieres usar las variables separadas, el script mostrará qué host/puerto/DB está usando y te avisará si falta alguna. Si ninguna está definida, el mensaje de error te recordará qué variables debes completar.
