@@ -38,3 +38,16 @@ Un `ConnectionRefusedError: [Errno 111] Connection refused` aparece **antes** de
 4. **Puertos expuestos**: valida que el puerto de PostgreSQL esté publicado y sin bloqueos de firewall.
 
 Solo después de confirmar la conectividad de red tiene sentido revisar errores de autenticación (p. ej., `FATAL: password authentication failed`).
+
+## Carga automática del catálogo en Railway
+El proceso de `release` en Railway ahora ejecuta el cargador dinámico que crea la tabla `catalogo3`
+a partir del CSV indicado. Configura la variable de entorno `CATALOGO_CSV_URL` con la URL raw del
+CSV (por ejemplo, la de GitHub) y, en cada deploy, Railway descargará ese CSV y recreará la tabla.
+
+Si quieres probar el cargador manualmente desde tu máquina o desde una consola en Railway, ejecuta:
+
+```bash
+python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing
+```
+
+El cargador también acepta rutas locales a archivos CSV si prefieres cargar uno desde disco.

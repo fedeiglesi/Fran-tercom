@@ -1,6 +1,8 @@
 """Capa de base de datos asíncrona para Fran 4.0 (PostgreSQL)."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import (
@@ -62,17 +64,44 @@ class Database:
     """Wrapper asíncrono de SQLAlchemy para conversación y carritos."""
 
     def __init__(self, url: Optional[str] = None) -> None:
+        self._logger = logging.getLogger(__name__)
         self.url = url or config.DATABASE_URL
         self.engine: AsyncEngine = create_async_engine(self.url, future=True, echo=False)
         self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
         )
+        self.available: bool = True
 
-    async def init_models(self) -> None:
-        async with self.engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+    async def init_models(self, retries: int = 3, base_delay: float = 1.0) -> None:
+        """Inicializa el esquema con reintentos para tolerar arranques lentos."""
+
+        attempt = 0
+        while True:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.run_sync(metadata.create_all)
+                return
+            except Exception as exc:  # pragma: no cover - defensive fallback for infra issues
+                attempt += 1
+                if attempt > retries:
+                    self.available = False
+                    self._logger.error("No se pudo inicializar la base de datos: %s", exc)
+                    await self.dispose()
+                    return
+
+                delay = base_delay * attempt
+                self._logger.warning(
+                    "Fallo al conectar con la base (intento %s/%s): %s; reintentando en %.1fs",
+                    attempt,
+                    retries,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
     async def log_event(self, session_id: str, role: str, content: str) -> None:
+        if not self.available:
+            return
         async with self.session_factory() as session:
             await session.execute(
                 conversation_events.insert().values(
@@ -84,6 +113,8 @@ class Database:
             await session.commit()
 
     async def get_history(self, session_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        if not self.available:
+            return []
         async with self.session_factory() as session:
             result = await session.execute(
                 conversation_events.select()
@@ -125,6 +156,8 @@ class Database:
         name: Optional[str] = None,
         price_ars: Optional[float] = None,
     ) -> None:
+        if not self.available:
+            return
         async with self.session_factory() as session:
             stmt = insert(carts).values(
                 session_id=session_id,
@@ -141,6 +174,8 @@ class Database:
             await session.commit()
 
     async def get_cart(self, session_id: str) -> List[Dict[str, Any]]:
+        if not self.available:
+            return []
         async with self.session_factory() as session:
             result = await session.execute(
                 carts.select().where(carts.c.session_id == session_id).order_by(carts.c.created_at.desc())
