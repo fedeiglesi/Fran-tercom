@@ -1,6 +1,7 @@
 """Capa de base de datos asíncrona para Fran 4.0 (PostgreSQL)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -71,14 +72,32 @@ class Database:
         )
         self.available: bool = True
 
-    async def init_models(self) -> None:
-        try:
-            async with self.engine.begin() as conn:
-                await conn.run_sync(metadata.create_all)
-        except Exception as exc:  # pragma: no cover - defensive fallback for infra issues
-            self.available = False
-            self._logger.error("No se pudo inicializar la base de datos: %s", exc)
-            await self.dispose()
+    async def init_models(self, retries: int = 3, base_delay: float = 1.0) -> None:
+        """Inicializa el esquema con reintentos para tolerar arranques lentos."""
+
+        attempt = 0
+        while True:
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.run_sync(metadata.create_all)
+                return
+            except Exception as exc:  # pragma: no cover - defensive fallback for infra issues
+                attempt += 1
+                if attempt > retries:
+                    self.available = False
+                    self._logger.error("No se pudo inicializar la base de datos: %s", exc)
+                    await self.dispose()
+                    return
+
+                delay = base_delay * attempt
+                self._logger.warning(
+                    "Fallo al conectar con la base (intento %s/%s): %s; reintentando en %.1fs",
+                    attempt,
+                    retries,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
     async def log_event(self, session_id: str, role: str, content: str) -> None:
         if not self.available:
