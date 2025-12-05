@@ -1,15 +1,13 @@
-"""Motor de búsqueda híbrida (denso + texto) usando Qdrant."""
+"""Motor de búsqueda híbrida (vectorial + texto) usando PostgreSQL/pgvector."""
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
-
 import logging
-import re
+import os
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import asyncpg
 from openai import AsyncOpenAI
-from qdrant_client.async_qdrant_client import AsyncQdrantClient
-from qdrant_client.http import models as qmodels
 
 from fran_v4 import config
 
@@ -17,149 +15,266 @@ from fran_v4 import config
 logger = logging.getLogger(__name__)
 
 
+EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
+RRF_K: float = float(os.getenv("RRF_K", "60"))
+
+
 class HybridSearchEngine:
-    """Encapsula la búsqueda híbrida con embeddings OpenAI y Qdrant."""
+    """Encapsula la búsqueda híbrida con embeddings OpenAI y PostgreSQL."""
 
-    def __init__(self, url: Optional[str] = None, collection: Optional[str] = None) -> None:
-        self.collection = collection or config.QDRANT_COLLECTION
-        self.client = AsyncQdrantClient(url=url or config.QDRANT_URL, api_key=config.QDRANT_API_KEY)
+    def __init__(self, database_url: Optional[str] = None) -> None:
+        self.database_url = self._normalize_db_url(database_url or config.DATABASE_URL)
         self.embedding_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-        self.embedding_model = config.OPENAI_EMBEDDING_MODEL
+        self.embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "[NOMBRE_DE_TU_MODELO]")
+        self._pool: Optional[asyncpg.Pool] = None
 
+    # ------------------------------------------------------------------
+    # Infra
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_db_url(url: str) -> str:
+        if url.startswith("postgresql+asyncpg://"):
+            return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        return url
+
+    async def _get_pool(self) -> asyncpg.Pool:
+        if self._pool is None:
+            self._pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
+        return self._pool
+
+    async def dispose(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    # ------------------------------------------------------------------
+    # Embeddings
+    # ------------------------------------------------------------------
     async def _embed(self, text: str) -> List[float]:
         response = await self.embedding_client.embeddings.create(model=self.embedding_model, input=text)
         return response.data[0].embedding  # type: ignore[return-value]
 
+    # ------------------------------------------------------------------
+    # Esquema y carga
+    # ------------------------------------------------------------------
+    async def ensure_schema(self) -> None:
+        """Crea la tabla e índices necesarios para búsqueda vectorial y full-text."""
+
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
+
+            await conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS products (
+                    codigo TEXT PRIMARY KEY,
+                    nombre TEXT NOT NULL,
+                    descripcion TEXT,
+                    marca TEXT,
+                    categoria TEXT,
+                    precio NUMERIC(12,2),
+                    stock INTEGER,
+                    embedding VECTOR({EMBEDDING_DIM}),
+                    search_tsv tsvector GENERATED ALWAYS AS (
+                        setweight(to_tsvector('spanish', coalesce(unaccent(nombre), '')), 'A') ||
+                        setweight(to_tsvector('spanish', coalesce(unaccent(descripcion), '')), 'B') ||
+                        setweight(to_tsvector('spanish', coalesce(unaccent(marca), '')), 'C') ||
+                        setweight(to_tsvector('spanish', coalesce(unaccent(categoria), '')), 'C')
+                    ) STORED
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS products_embedding_idx
+                ON products USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+                """
+            )
+            await conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS products_search_idx
+                ON products USING GIN (search_tsv)
+                """
+            )
+
     async def upsert_documents(self, payloads: List[Dict[str, Any]]) -> None:
         if not payloads:
             return
-        points = []
+
+        pool = await self._get_pool()
+        records = []
         for item in payloads:
-            if "vector" not in item:
+            embedding = item.get("vector")
+            if embedding is None:
                 continue
-            vector_data = item.get("vector")
-            vectors = {"dense": vector_data} if isinstance(vector_data, list) else vector_data
-            points.append(
-                qmodels.PointStruct(
-                    id=str(item.get("id")),
-                    payload={k: v for k, v in item.items() if k != "vector"},
-                    vector=vectors,
+
+            codigo = item.get("codigo") or item.get("code") or item.get("id")
+            if codigo is None:
+                continue
+
+            records.append(
+                (
+                    str(codigo),
+                    item.get("nombre") or item.get("name") or "",
+                    item.get("descripcion") or item.get("description"),
+                    item.get("marca") or item.get("brand"),
+                    item.get("categoria") or item.get("family"),
+                    item.get("precio") or item.get("price") or item.get("price_ars"),
+                    item.get("stock"),
+                    embedding,
                 )
             )
-        await self.client.upsert(collection_name=self.collection, points=points)
+
+        if not records:
+            return
+
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO products (codigo, nombre, descripcion, marca, categoria, precio, stock, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (codigo) DO UPDATE SET
+                    nombre = EXCLUDED.nombre,
+                    descripcion = EXCLUDED.descripcion,
+                    marca = EXCLUDED.marca,
+                    categoria = EXCLUDED.categoria,
+                    precio = EXCLUDED.precio,
+                    stock = EXCLUDED.stock,
+                    embedding = EXCLUDED.embedding
+                """,
+                records,
+            )
+
+    # ------------------------------------------------------------------
+    # Búsqueda
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_filters(filters: Optional[Dict[str, Any]]) -> Tuple[str, List[Any]]:
+        if not filters:
+            return "", []
+
+        clauses = []
+        values: List[Any] = []
+        for key, value in filters.items():
+            clauses.append(f"{key} = ${len(values) + 1}")
+            values.append(value)
+
+        where = " AND ".join(clauses)
+        return f" AND {where}" if where else "", values
 
     async def _dense_search(
-        self, vector: List[float], limit: int, query_filter: Optional[qmodels.Filter]
-    ) -> List[qmodels.ScoredPoint]:
-        query_vector = self._build_dense_vector(vector)
-        return await self.client.search(
-            collection_name=self.collection,
-            query_vector=query_vector,
-            limit=limit,
-            with_payload=True,
-            score_threshold=config.RELEVANCE_MIN_SCORE / 100,
-            query_filter=query_filter,
-        )
-
-    async def _sparse_search(
-        self, query_text: str, limit: int, query_filter: Optional[qmodels.Filter]
-    ) -> List[qmodels.ScoredPoint]:
-        try:
-            sparse_vector = self._create_sparse_vector(query_text)
-
-            if not sparse_vector["indices"] or not sparse_vector["values"]:
-                logger.warning("Empty sparse vector for query: %s", query_text)
-                return []
-
-            logger.debug(
-                "Sparse vector size: %d tokens", len(sparse_vector["indices"])
+        self, query_vector: Sequence[float], limit: int, filters: Optional[Dict[str, Any]]
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        filter_clause, values = self._build_filters(filters)
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock,
+                       (1.0 / ($3 + row_number() OVER (ORDER BY embedding <-> $1))) AS rrf,
+                       (embedding <-> $1) AS distance
+                FROM products
+                WHERE embedding IS NOT NULL {filter_clause}
+                ORDER BY embedding <-> $1
+                LIMIT $2
+                """,
+                query_vector,
+                limit,
+                RRF_K,
+                *values,
             )
 
-            results = await self.client.query_points(
-                collection_name=self.collection,
-                query=qmodels.SparseVector(
-                    indices=sparse_vector["indices"], values=sparse_vector["values"]
-                ),
-                limit=limit,
-                with_payload=True,
-                with_vectors=False,
-                query_filter=query_filter,
+        return [
+            (
+                row["codigo"],
+                float(row["rrf"]),
+                {
+                    "codigo": row["codigo"],
+                    "nombre": row["nombre"],
+                    "descripcion": row["descripcion"],
+                    "marca": row["marca"],
+                    "categoria": row["categoria"],
+                    "precio": float(row["precio"]) if row["precio"] is not None else None,
+                    "stock": row["stock"],
+                },
+            )
+            for row in rows
+        ]
+
+    async def _text_search(
+        self, query_text: str, limit: int, filters: Optional[Dict[str, Any]]
+    ) -> List[Tuple[str, float, Dict[str, Any]]]:
+        filter_clause, values = self._build_filters(filters)
+        pool = await self._get_pool()
+        ts_query = query_text.replace("'", " ")
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock,
+                       ts_rank_cd(search_tsv, plainto_tsquery('spanish', $1)) AS rank,
+                       (1.0 / ($3 + row_number() OVER (
+                            ORDER BY ts_rank_cd(search_tsv, plainto_tsquery('spanish', $1)) DESC
+                       ))) AS rrf
+                FROM products
+                WHERE search_tsv @@ plainto_tsquery('spanish', $1) {filter_clause}
+                ORDER BY rank DESC
+                LIMIT $2
+                """,
+                ts_query,
+                limit,
+                RRF_K,
+                *values,
             )
 
-            return results.points
-
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error("Error en sparse search: %s", exc, exc_info=True)
-            return []
-
-    def _create_sparse_vector(self, query_text: str) -> Dict[str, List[float]]:
-        """Crear vector disperso simple a partir de tokens del texto."""
-
-        try:
-            from qdrant_client.fastembed_sparse import FastEmbedSparse
-
-            encoder = FastEmbedSparse()
-            vector = encoder.encode(query_text)
-            return {"indices": vector.indices, "values": vector.values}
-        except Exception:
-            pass
-
-        tokens = re.findall(r"\b\w+\b", query_text.lower())
-        tokens = [t for t in tokens if len(t) > 2]
-        token_counts = Counter(tokens)
-        indices = [abs(hash(token)) % 65535 for token in token_counts]
-        values = [float(count) for count in token_counts.values()]
-        return {"indices": indices, "values": values}
+        return [
+            (
+                row["codigo"],
+                float(row["rrf"]),
+                {
+                    "codigo": row["codigo"],
+                    "nombre": row["nombre"],
+                    "descripcion": row["descripcion"],
+                    "marca": row["marca"],
+                    "categoria": row["categoria"],
+                    "precio": float(row["precio"]) if row["precio"] is not None else None,
+                    "stock": row["stock"],
+                },
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _merge_results(
-        dense: List[qmodels.ScoredPoint], sparse: List[qmodels.ScoredPoint]
+        dense: List[Tuple[str, float, Dict[str, Any]]], text: List[Tuple[str, float, Dict[str, Any]]]
     ) -> List[Tuple[str, float, Dict[str, Any]]]:
         scores: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-        for rank, item in enumerate(dense, start=1):
-            payload = item.payload or {}
-            scores[str(item.id)] = (1 / rank + float(item.score or 0), payload)
-        for rank, item in enumerate(sparse, start=1):
-            payload = item.payload or {}
-            current_score, _ = scores.get(str(item.id), (0.0, payload))
-            scores[str(item.id)] = (current_score + 1 / rank + float(item.score or 0), payload)
-        sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
-        return [(item_id, score_payload[0], score_payload[1]) for item_id, score_payload in sorted_items]
 
-    @staticmethod
-    def _build_dense_vector(vector: List[float]) -> Any:
-        """Compatibilidad entre versiones de qdrant-client."""
+        for doc_id, rrf, payload in dense:
+            scores[doc_id] = (scores.get(doc_id, (0.0, payload))[0] + rrf, payload)
 
-        named_vector_cls = getattr(qmodels, "NamedVector", None)
-        if named_vector_cls:
-            return named_vector_cls(name="dense", vector=vector)
+        for doc_id, rrf, payload in text:
+            scores[doc_id] = (scores.get(doc_id, (0.0, payload))[0] + rrf, payload)
 
-        named_vector_params_cls = getattr(qmodels, "NamedVectorParams", None)
-        if named_vector_params_cls:
-            return named_vector_params_cls(name="dense", vector=vector)
-
-        return vector
+        merged = sorted(scores.items(), key=lambda item: item[1][0], reverse=True)
+        return [(doc_id, score_payload[0], score_payload[1]) for doc_id, score_payload in merged]
 
     async def hybrid_search(
         self, query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        query_filter = None
-        if filters:
-            must = [qmodels.FieldCondition(key=k, match=qmodels.MatchValue(value=v)) for k, v in filters.items()]
-            query_filter = qmodels.Filter(must=must)
-
         vector = await self._embed(query_text)
-        dense_results, sparse_results = await asyncio.gather(
-            self._dense_search(vector, limit, query_filter),
-            self._sparse_search(query_text, limit, query_filter),
+        dense_results, text_results = await asyncio.gather(
+            self._dense_search(vector, limit * 2, filters),
+            self._text_search(query_text, limit * 2, filters),
         )
 
-        merged = self._merge_results(dense_results, sparse_results)
+        merged = self._merge_results(dense_results, text_results)
         formatted: List[Dict[str, Any]] = []
         for _, score, payload in merged[:limit]:
-            if score * 100 < config.RELEVANCE_MIN_SCORE:
-                continue
             enriched = dict(payload)
             enriched["score"] = float(score * 100)
             formatted.append(enriched)
         return formatted
+
