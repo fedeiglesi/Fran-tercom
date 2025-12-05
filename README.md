@@ -1,13 +1,18 @@
 ## Estado actual de Fran
-- La instancia **activa** sigue siendo Fran **3.x** sobre **Flask**, con catálogo CSV y FAISS/BM25 en memoria desde `app.py`.
-- La arquitectura **Fran 4.0** (FastAPI + PostgreSQL + Redis + Qdrant + LangGraph) está en desarrollo dentro de `fran_v4/` pero no es el entrypoint productivo.
-- El catálogo en PostgreSQL se mantiene como opción de despliegue futuro; hoy el flujo estándar carga el CSV normalizado (`catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv`).
+- **Fran 4.0** (FastAPI + PostgreSQL + Redis + Qdrant + LangGraph) es ahora el entrypoint por defecto. El servidor se
+  expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4:app --reload`.
+- La versión **3.x** en Flask (`app.py`) queda como legado para referencias históricas; no es la ruta recomendada de
+  despliegue.
+- El catálogo se carga desde PostgreSQL mediante el proceso `release` de Railway o ejecutando manualmente
+  `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing`.
 
-## Fran 4.0 (arquitectura asincrónica en desarrollo)
-- Migración a **FastAPI** con servidor uvicorn para soportar `async/await` y despliegues en Railway.
-- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) y memoria de sesión/rate limiting en **Redis**.
-- Motor RAG externalizado a **Qdrant** con búsqueda híbrida y filtrado de metadata.
-- Orquestador reescrito sobre **LangGraph** con bucle de razonamiento y herramientas desacopladas.
+## Fran 4.0 (arquitectura asincrónica lista para producción)
+- **FastAPI** con uvicorn/gunicorn como servidor asíncrono preparado para Railway y contenedores.
+- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) con fallback en memoria para resiliencia
+  temporal si la base está caída.
+- Motor RAG externalizado a **Qdrant** con búsqueda híbrida (texto + denso) y filtrado por metadata.
+- Orquestador sobre **LangGraph** con bucle de razonamiento, herramientas desacopladas y memoria de sesión
+  persistente.
 - Código modular en `fran_v4/` separando base de datos, motor de búsqueda, LLM y grafo del agente.
 
 Constante	Valor	Descripción
