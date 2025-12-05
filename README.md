@@ -1,4 +1,9 @@
-## Fran 4.0 (Arquitectura asincrónica)
+## Estado actual de Fran
+- La instancia **activa** sigue siendo Fran **3.x** sobre **Flask**, con catálogo CSV y FAISS/BM25 en memoria desde `app.py`.
+- La arquitectura **Fran 4.0** (FastAPI + PostgreSQL + Redis + Qdrant + LangGraph) está en desarrollo dentro de `fran_v4/` pero no es el entrypoint productivo.
+- El catálogo en PostgreSQL se mantiene como opción de despliegue futuro; hoy el flujo estándar carga el CSV normalizado (`catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv`).
+
+## Fran 4.0 (arquitectura asincrónica en desarrollo)
 - Migración a **FastAPI** con servidor uvicorn para soportar `async/await` y despliegues en Railway.
 - Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) y memoria de sesión/rate limiting en **Redis**.
 - Motor RAG externalizado a **Qdrant** con búsqueda híbrida y filtrado de metadata.
