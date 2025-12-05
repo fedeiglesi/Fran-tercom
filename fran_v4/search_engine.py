@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
+import logging
+import re
 from openai import AsyncOpenAI
 from qdrant_client.async_qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qmodels
 
 from fran_v4 import config
+
+
+logger = logging.getLogger(__name__)
 
 
 class HybridSearchEngine:
@@ -58,14 +64,52 @@ class HybridSearchEngine:
     async def _sparse_search(
         self, query_text: str, limit: int, query_filter: Optional[qmodels.Filter]
     ) -> List[qmodels.ScoredPoint]:
-        return await self.client.search(
-            collection_name=self.collection,
-            query=query_text,
-            using="text",
-            limit=limit,
-            with_payload=True,
-            query_filter=query_filter,
-        )
+        try:
+            sparse_vector = self._create_sparse_vector(query_text)
+
+            if not sparse_vector["indices"] or not sparse_vector["values"]:
+                logger.warning("Empty sparse vector for query: %s", query_text)
+                return []
+
+            logger.debug(
+                "Sparse vector size: %d tokens", len(sparse_vector["indices"])
+            )
+
+            results = await self.client.query_points(
+                collection_name=self.collection,
+                query=qmodels.SparseVector(
+                    indices=sparse_vector["indices"], values=sparse_vector["values"]
+                ),
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+                query_filter=query_filter,
+            )
+
+            return results.points
+
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Error en sparse search: %s", exc, exc_info=True)
+            return []
+
+    def _create_sparse_vector(self, query_text: str) -> Dict[str, List[float]]:
+        """Crear vector disperso simple a partir de tokens del texto."""
+
+        try:
+            from qdrant_client.fastembed_sparse import FastEmbedSparse
+
+            encoder = FastEmbedSparse()
+            vector = encoder.encode(query_text)
+            return {"indices": vector.indices, "values": vector.values}
+        except Exception:
+            pass
+
+        tokens = re.findall(r"\b\w+\b", query_text.lower())
+        tokens = [t for t in tokens if len(t) > 2]
+        token_counts = Counter(tokens)
+        indices = [abs(hash(token)) % 65535 for token in token_counts]
+        values = [float(count) for count in token_counts.values()]
+        return {"indices": indices, "values": values}
 
     @staticmethod
     def _merge_results(
