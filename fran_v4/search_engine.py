@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import asyncpg
 from openai import AsyncOpenAI
@@ -75,6 +75,7 @@ class HybridSearchEngine:
                     categoria TEXT,
                     precio NUMERIC(12,2),
                     stock INTEGER,
+                    metadata JSONB,
                     embedding VECTOR({EMBEDDING_DIM}),
                     search_tsv tsvector GENERATED ALWAYS AS (
                         setweight(to_tsvector('spanish', coalesce(unaccent(nombre), '')), 'A') ||
@@ -100,6 +101,11 @@ class HybridSearchEngine:
                 """
             )
 
+    async def count_products(self) -> int:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            return int(await conn.fetchval("SELECT COUNT(*) FROM products"))
+
     async def upsert_documents(self, payloads: List[Dict[str, Any]]) -> None:
         if not payloads:
             return
@@ -124,6 +130,7 @@ class HybridSearchEngine:
                     item.get("categoria") or item.get("family"),
                     item.get("precio") or item.get("price") or item.get("price_ars"),
                     item.get("stock"),
+                    item.get("metadata"),
                     embedding,
                 )
             )
@@ -134,8 +141,8 @@ class HybridSearchEngine:
         async with pool.acquire() as conn:
             await conn.executemany(
                 """
-                INSERT INTO products (codigo, nombre, descripcion, marca, categoria, precio, stock, embedding)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO products (codigo, nombre, descripcion, marca, categoria, precio, stock, metadata, embedding)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (codigo) DO UPDATE SET
                     nombre = EXCLUDED.nombre,
                     descripcion = EXCLUDED.descripcion,
@@ -143,10 +150,56 @@ class HybridSearchEngine:
                     categoria = EXCLUDED.categoria,
                     precio = EXCLUDED.precio,
                     stock = EXCLUDED.stock,
+                    metadata = EXCLUDED.metadata,
                     embedding = EXCLUDED.embedding
                 """,
                 records,
             )
+
+    async def prepare_catalog_payloads(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        payloads: List[Dict[str, Any]] = []
+        for row in rows:
+            nombre = row.get("nombre") or row.get("descripcion") or ""
+            descripcion = row.get("descripcion") or row.get("descripcion_normalizada")
+            categoria = row.get("categoria") or row.get("familia") or row.get("familia_nombre")
+            marca = row.get("marca") or row.get("marca_moto") or row.get("proveedor_nombre")
+            precio = (
+                row.get("precio")
+                or row.get("precio_pesos")
+                or row.get("precio_ars")
+                or row.get("precio_dolares")
+            )
+
+            synonyms = row.get("sinonimos") or ""
+            base_text = " ".join(
+                filter(
+                    None,
+                    [
+                        nombre,
+                        descripcion,
+                        marca,
+                        categoria,
+                        synonyms,
+                    ],
+                )
+            )
+
+            vector = await self._embed(base_text)
+            payloads.append(
+                {
+                    "codigo": row.get("codigo") or row.get("code") or row.get("id"),
+                    "nombre": nombre,
+                    "descripcion": descripcion or nombre,
+                    "marca": marca,
+                    "categoria": categoria,
+                    "precio": precio,
+                    "stock": row.get("stock"),
+                    "vector": vector,
+                    "metadata": {"sinonimos": synonyms} if synonyms else None,
+                }
+            )
+
+        return payloads
 
     # ------------------------------------------------------------------
     # Búsqueda
@@ -173,7 +226,7 @@ class HybridSearchEngine:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock,
+                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock, metadata,
                        (1.0 / ($3 + row_number() OVER (ORDER BY embedding <-> $1))) AS rrf,
                        (embedding <-> $1) AS distance
                 FROM products
@@ -199,6 +252,7 @@ class HybridSearchEngine:
                     "categoria": row["categoria"],
                     "precio": float(row["precio"]) if row["precio"] is not None else None,
                     "stock": row["stock"],
+                    "metadata": row["metadata"],
                 },
             )
             for row in rows
@@ -213,7 +267,7 @@ class HybridSearchEngine:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock,
+                SELECT codigo, nombre, descripcion, marca, categoria, precio, stock, metadata,
                        ts_rank_cd(search_tsv, plainto_tsquery('spanish', $1)) AS rank,
                        (1.0 / ($3 + row_number() OVER (
                             ORDER BY ts_rank_cd(search_tsv, plainto_tsquery('spanish', $1)) DESC
@@ -241,6 +295,7 @@ class HybridSearchEngine:
                     "categoria": row["categoria"],
                     "precio": float(row["precio"]) if row["precio"] is not None else None,
                     "stock": row["stock"],
+                    "metadata": row["metadata"],
                 },
             )
             for row in rows

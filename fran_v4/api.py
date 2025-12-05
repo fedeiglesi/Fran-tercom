@@ -16,6 +16,7 @@ from fran_v4.agent import AgentRequest, AgentResponse, build_agent_graph, run_ag
 from fran_v4.database import Database, rate_limits
 from fran_v4.memory import SessionMemory
 from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.startup import initialize_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,11 @@ def create_app() -> FastAPI:
                 "La base de datos no está disponible; se reintentará en segundo plano y las "
                 "operaciones persistentes se omitirán hasta reconectar."
             )
+
+        try:
+            await initialize_catalog(search_engine=search_engine, database=database)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Inicialización de catálogo fallida: %s", exc)
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
