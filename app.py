@@ -85,6 +85,13 @@ except ImportError:  # pragma: no cover - fallback liviano
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+from fran.database import (
+    init_database,
+    get_db_connection as db_get_connection,
+    get_connection as db_get_raw_connection,
+    adapt_query,
+    DB_TYPE,
+)
 from pipeline.llm_classifier_dynamic import build_classifier_schema
 from pipeline.orquestador_v317 import orquestar_v317
 from pipeline.router_dynamic import build_catalog_centroid
@@ -1995,55 +2002,16 @@ def apply_add_each_quantity_pending(phone, pending):
         return "Tuve un problema al confirmar la lista, repetíme el pedido por favor."
 
 # ------------------------------------------------------------------
-# DATABASE
+# DATABASE (usa fran.database para soporte SQLite/PostgreSQL)
 # ------------------------------------------------------------------
-@contextmanager
-def get_db_connection():
-    conn = None
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo crear dir DB: {e}")
-
-    for attempt in range(3):
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-            conn.row_factory = sqlite3.Row
-            yield conn
-            conn.commit()
-            return
-        except sqlite3.OperationalError as e:
-            if conn:
-                conn.close()
-                conn = None
-            if "locked" in str(e) and attempt < 2:
-                time.sleep(0.25 * (attempt + 1))
-                continue
-            logger.error(f"DB error: {e}")
-            raise
-        except Exception as e:
-            if conn:
-                conn.close()
-            logger.error(f"DB error: {e}")
-            raise
-        finally:
-            if conn:
-                conn.close()
+# Las funciones de conexión ahora usan el módulo fran.database
+# que detecta automáticamente DATABASE_URL para PostgreSQL
+get_db_connection = db_get_connection
 
 
 def get_db():
-    try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        logger.warning(f"No se pudo preparar el directorio de DB: {e}")
-
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Obtiene conexión directa a la base de datos."""
+    return db_get_raw_connection()
 
 
 def save_moto_context(phone, brand, model):
@@ -2090,136 +2058,8 @@ def get_moto_context(phone):
 
 
 def init_db():
-    with get_db_connection() as conn:
-        c = conn.cursor()
-        try:
-            c.execute("PRAGMA journal_mode=WAL;")
-        except Exception as e:
-            logger.warning(f"No se pudo activar WAL: {e}")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                phone TEXT, message TEXT, role TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_conv_phone_timestamp ON conversations(phone, timestamp DESC)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS carts (
-                phone TEXT, code TEXT, quantity INTEGER, name TEXT,
-                price_ars TEXT, price_usd TEXT, created_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_cart_phone ON carts(phone)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS user_state (
-                phone TEXT PRIMARY KEY, last_code TEXT, last_name TEXT,
-                last_price_ars TEXT, updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS search_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, products_json TEXT, query TEXT, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_search_phone_timestamp ON search_history(phone, timestamp DESC)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS last_search (
-                phone TEXT PRIMARY KEY, products_json TEXT, query TEXT, timestamp TEXT, metadata TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY, phone TEXT, customer_name TEXT,
-                customer_address TEXT, items_json TEXT, total_ars TEXT,
-                status TEXT, created_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS bulk_jobs (
-                job_id TEXT PRIMARY KEY, phone TEXT, raw_list TEXT,
-                total_items INTEGER, processed_items INTEGER, found_items INTEGER,
-                results_json TEXT, status TEXT, created_at TEXT, completed_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS interactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, message TEXT, intent_detected TEXT,
-                products_count INTEGER, timestamp TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_phone_timestamp ON interactions(phone, timestamp DESC)")
-        c.execute("CREATE INDEX IF NOT EXISTS idx_interactions_intent ON interactions(intent_detected)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS performance_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT, intent TEXT, duration_ms INTEGER,
-                results_count INTEGER, timestamp TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS quality_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT,
-                query TEXT,
-                avg_score REAL,
-                max_score REAL,
-                relevant_count INTEGER,
-                created_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS pending_actions (
-                phone TEXT PRIMARY KEY,
-                action_type TEXT,
-                action_data TEXT,
-                context TEXT,
-                created_at TEXT,
-                expires_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_pending_actions_expires ON pending_actions(expires_at)")
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_phase (
-                phone TEXT PRIMARY KEY,
-                phase TEXT,
-                updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS moto_context (
-                phone TEXT PRIMARY KEY,
-                brand TEXT,
-                model TEXT,
-                updated_at TEXT
-            )
-        """)
-
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS template_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phone TEXT,
-                template_name TEXT,
-                input_json TEXT,
-                output_json TEXT,
-                duration_ms INTEGER,
-                created_at TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_template_logs_phone_created ON template_logs(phone, created_at DESC)")
+    """Inicializa la base de datos usando el módulo fran.database."""
+    init_database()
 
 # ------------------------------------------------------------------
 # ANALYTICS
