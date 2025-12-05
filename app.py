@@ -868,7 +868,7 @@ def should_use_v315(phone: str) -> bool:
     return version == "3.15"
 
 
-def get_orchestrator_version(phone: str) -> str:
+def get_orchestrator_version(phone: str | None = None) -> str:
     """
     Determina qué versión del orquestador usar: "3.14", "3.15", "3.16" o "3.17"
 
@@ -897,6 +897,10 @@ def get_orchestrator_version(phone: str) -> str:
     # Beta phones get v3.17
     beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
     if beta_phones and phone in beta_phones:
+        return "3.17"
+
+    # Sin teléfono proporcionado, se usa la versión más moderna por defecto
+    if not phone:
         return "3.17"
 
     # Hash-based A/B/C split (40% v3.17, 30% v3.16, 15% v3.15, 15% v3.14)

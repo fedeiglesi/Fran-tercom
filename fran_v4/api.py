@@ -1,19 +1,19 @@
 """FastAPI app para Fran 4.0 (Arquitectura SOTA)."""
 from __future__ import annotations
 
-import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
-from redis.exceptions import ConnectionError, TimeoutError
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from fran_v4 import config
 from fran_v4.agent import AgentRequest, AgentResponse, build_agent_graph, run_agent
-from fran_v4.database import Database
+from fran_v4.database import Database, rate_limits
 from fran_v4.memory import SessionMemory
 from fran_v4.search_engine import HybridSearchEngine
 
@@ -30,43 +30,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    redis_client = Redis.from_url(
-        config.REDIS_URL,
-        decode_responses=True,
-        socket_connect_timeout=2,
-        socket_timeout=2,
-    )
-    redis_available: bool | None = None
-    memory = SessionMemory(config.REDIS_URL)
     database = Database()
+    memory = SessionMemory(session_factory=database.session_factory)
     search_engine = HybridSearchEngine()
     agent_graph = build_agent_graph(search_engine=search_engine, database=database, memory=memory)
-
-    async def _mark_redis_state(state: bool, message: str) -> None:
-        nonlocal redis_available
-        if redis_available != state:
-            redis_available = state
-            log_method = logger.info if state else logger.warning
-            log_method(message)
-        else:
-            redis_available = state
-
-    async def is_redis_available(force_check: bool = False) -> bool:
-        """Perform a lightweight health check to Redis with caching."""
-
-        if redis_available is not None and not force_check:
-            return redis_available
-
-        try:
-            await asyncio.wait_for(redis_client.ping(), timeout=1.0)
-            await _mark_redis_state(True, "Redis connection restored; rate limiting enabled.")
-        except (ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
-            await _mark_redis_state(False, f"Redis unavailable ({exc}); skipping rate limiting.")
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Unexpected error checking Redis availability: %s", exc)
-            await _mark_redis_state(False, "Redis unavailable due to unexpected error; skipping rate limiting.")
-
-        return bool(redis_available)
 
     async def rate_limiter(request: Request) -> None:
         session_id: str | None = None
@@ -83,21 +50,45 @@ def create_app() -> FastAPI:
         if not session_id:
             raise HTTPException(status_code=400, detail="Missing session_id for rate limit")
 
-        if not await is_redis_available():
+        if not database.available:
+            logger.warning("Base de datos no disponible; se omite rate limiting.")
             return
 
-        key = f"rate:{session_id}"
+        client_ip = request.client.host or "unknown"
+        cutoff = datetime.utcnow() - timedelta(minutes=1)
+
         try:
-            count = await asyncio.wait_for(redis_client.incr(key), timeout=2.0)
-            if count == 1:
-                await asyncio.wait_for(redis_client.expire(key, 60), timeout=2.0)
-            if count > config.RATE_LIMIT_PER_MINUTE:
-                raise HTTPException(status_code=429, detail="Rate limit exceeded for session")
-        except (ConnectionError, TimeoutError, asyncio.TimeoutError) as exc:
-            await _mark_redis_state(False, f"Redis error during rate limiting ({exc}); allowing request.")
+            async with database.session_factory() as session:
+                await session.execute(
+                    delete(rate_limits).where(rate_limits.c.created_at < cutoff)
+                )
+
+                result = await session.execute(
+                    select(func.count())
+                    .select_from(rate_limits)
+                    .where(
+                        rate_limits.c.ip_address == client_ip,
+                        rate_limits.c.created_at >= cutoff,
+                    )
+                )
+                count = result.scalar() or 0
+
+                if count >= config.RATE_LIMIT_PER_MINUTE:
+                    raise HTTPException(status_code=429, detail="Rate limit exceeded for session")
+
+                await session.execute(
+                    rate_limits.insert().values(ip_address=client_ip, created_at=datetime.utcnow())
+                )
+                await session.commit()
+        except HTTPException:
+            raise
+        except SQLAlchemyError as exc:  # pragma: no cover - infra fallback
+            logger.warning(
+                "Error al aplicar rate limiting en PostgreSQL (%s); se permite la solicitud.",
+                exc,
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Unexpected error in rate limiter: %s", exc)
-            await _mark_redis_state(False, "Redis unavailable due to unexpected error; allowing request.")
+            logger.error("Unexpected error in PostgreSQL rate limiter: %s", exc)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -110,21 +101,17 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        if redis_client:
-            await redis_client.aclose()
         await memory.close()
         await database.dispose()
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
-        redis_status = await is_redis_available(force_check=True)
         return {
             "status": "ok",
             "version": "4.0",
             "components": {
                 "fastapi_async": True,
                 "postgresql": database.available,
-                "redis": redis_status,
                 "qdrant": True,
                 "langgraph": True,
             },
