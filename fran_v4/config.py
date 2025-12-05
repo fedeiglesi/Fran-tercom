@@ -33,7 +33,6 @@ DATABASE_URL: Final[str] = _fix_database_url(
     )
 )
 
-REDIS_URL: Final[str] = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
 QDRANT_URL: Final[str] = os.getenv("QDRANT_URL", "http://localhost:6333")

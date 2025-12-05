@@ -45,9 +45,10 @@ class HybridSearchEngine:
     async def _dense_search(
         self, vector: List[float], limit: int, query_filter: Optional[qmodels.Filter]
     ) -> List[qmodels.ScoredPoint]:
+        query_vector = self._build_dense_vector(vector)
         return await self.client.search(
             collection_name=self.collection,
-            query_vector=qmodels.NamedVectorParams(name="dense", vector=vector),
+            query_vector=query_vector,
             limit=limit,
             with_payload=True,
             score_threshold=config.RELEVANCE_MIN_SCORE / 100,
@@ -80,6 +81,20 @@ class HybridSearchEngine:
             scores[str(item.id)] = (current_score + 1 / rank + float(item.score or 0), payload)
         sorted_items = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
         return [(item_id, score_payload[0], score_payload[1]) for item_id, score_payload in sorted_items]
+
+    @staticmethod
+    def _build_dense_vector(vector: List[float]) -> Any:
+        """Compatibilidad entre versiones de qdrant-client."""
+
+        named_vector_cls = getattr(qmodels, "NamedVector", None)
+        if named_vector_cls:
+            return named_vector_cls(name="dense", vector=vector)
+
+        named_vector_params_cls = getattr(qmodels, "NamedVectorParams", None)
+        if named_vector_params_cls:
+            return named_vector_params_cls(name="dense", vector=vector)
+
+        return vector
 
     async def hybrid_search(
         self, query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None

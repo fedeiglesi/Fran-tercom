@@ -60,6 +60,54 @@ carts = Table(
     UniqueConstraint("session_id", "code", name="uq_cart_session_code"),
 )
 
+rate_limits = Table(
+    "rate_limits",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("ip_address", String(45), nullable=False, index=True),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+)
+
+session_messages = Table(
+    "session_messages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", String(255), nullable=False, index=True),
+    Column("role", String(50), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False, index=True),
+)
+
+session_pending_actions = Table(
+    "session_pending_actions",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", String(255), nullable=False, unique=True, index=True),
+    Column("action", Text, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
+session_search_snapshots = Table(
+    "session_search_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", String(255), nullable=False, unique=True, index=True),
+    Column("snapshot", Text, nullable=True),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    ),
+)
+
 
 class Database:
     """Wrapper asíncrono de SQLAlchemy para conversación y carritos."""
