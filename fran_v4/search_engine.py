@@ -15,7 +15,35 @@ from fran_v4 import config
 logger = logging.getLogger(__name__)
 
 
-EMBEDDING_DIM: int = int(os.getenv("EMBEDDING_DIM", "1024"))
+DEFAULT_EMBEDDING_DIMENSIONS = {
+    "text-embedding-3-large": 3072,
+    "text-embedding-3-small": 1536,
+    "text-embedding-ada-002": 1536,
+    "paraphrase-multilingual-MiniLM": 384,
+}
+
+
+def _resolve_embedding_model() -> str:
+    return os.getenv("OPENAI_EMBEDDING_MODEL", config.OPENAI_EMBEDDING_MODEL)
+
+
+def _resolve_embedding_dim(model: str) -> int:
+    env_dim = os.getenv("EMBEDDING_DIM")
+    if env_dim:
+        return int(env_dim)
+
+    dim = DEFAULT_EMBEDDING_DIMENSIONS.get(model)
+    if dim:
+        return dim
+
+    logger.warning(
+        "Dimensión de embedding desconocida para el modelo %s; usando 1024 por defecto", model
+    )
+    return 1024
+
+
+EMBEDDING_MODEL = _resolve_embedding_model()
+EMBEDDING_DIM: int = _resolve_embedding_dim(EMBEDDING_MODEL)
 RRF_K: float = float(os.getenv("RRF_K", "60"))
 
 
@@ -25,8 +53,11 @@ class HybridSearchEngine:
     def __init__(self, database_url: Optional[str] = None) -> None:
         self.database_url = self._normalize_db_url(database_url or config.DATABASE_URL)
         self.embedding_client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-        self.embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "[NOMBRE_DE_TU_MODELO]")
+        self.embedding_model = EMBEDDING_MODEL
         self._pool: Optional[asyncpg.Pool] = None
+        logger.info(
+            "Usando modelo de embeddings %s con dimensión %s", self.embedding_model, EMBEDDING_DIM
+        )
 
     # ------------------------------------------------------------------
     # Infra

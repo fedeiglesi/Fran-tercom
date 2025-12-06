@@ -35,6 +35,10 @@ PENDING_ACTION_TTL	30min	TTL de pending actions
 - El modelo de embeddings se estandarizó con la variable `OPENAI_EMBEDDING_MODEL` (por defecto `text-embedding-3-large`) para el pipeline híbrido y la generación de caché.
 - El orquestador `orquestar_v317` ahora está integrado en `app.py` y participa del enrutamiento principal (40% del tráfico por hash y 100% si se setea `USE_FRAN_317=true`).
 
+### Variables de entorno de embeddings
+- `OPENAI_EMBEDDING_MODEL`: modelo de embeddings a usar. Se infiere automáticamente la dimensión para `text-embedding-3-large` (3072), `text-embedding-3-small`/`text-embedding-ada-002` (1536) y `paraphrase-multilingual-MiniLM` (384).
+- `EMBEDDING_DIM`: opcional para forzar la dimensión cuando el modelo no está en la lista anterior; debe coincidir con la definición `embedding VECTOR(<dim>)` en PostgreSQL.
+
 ## Notas sobre los arreglos recientes
 - Se guarda un *snapshot* de las respuestas de búsquedas múltiples cuando se devuelven listas de productos. Así, si el usuario luego pide acciones en bloque (por ejemplo, "dame 10 de cada producto"), el sistema reutiliza esa lista sin tener que repetirla.
 - La lógica de guardado de estos *snapshots* se unificó en un helper (`_persist_search_snapshot`) para evitar duplicación y asegurar que todas las rutas que generan listas queden alineadas.

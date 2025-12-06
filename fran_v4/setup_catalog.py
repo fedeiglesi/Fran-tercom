@@ -6,13 +6,18 @@ aplicación principal arranque rápido en Railway.
 from __future__ import annotations
 
 import asyncio
-import csv
+import logging
 from pathlib import Path
 from typing import Iterable
+
+import pandas as pd
 
 from fran_v4 import config
 from fran_v4.database import Database
 from fran_v4.search_engine import HybridSearchEngine
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _prepare_payloads(engine: HybridSearchEngine, rows: Iterable[dict]) -> list[dict]:
@@ -37,12 +42,14 @@ async def ingest_catalog(csv_path: str) -> None:
     engine = HybridSearchEngine()
     await db.init_models()
 
-    with Path(csv_path).open("r", encoding="utf-8") as handler:
-        reader = csv.DictReader(handler)
-        rows = list(reader)
+    df = pd.read_csv(csv_path)
+    logger.info(f"📦 Cargando {len(df)} productos desde CSV...")
+    rows = df.to_dict(orient="records")
 
     payloads = await _prepare_payloads(engine, rows)
+    logger.info("✅ Embeddings generados exitosamente")
     await engine.upsert_documents(payloads)
+    logger.info(f"📊 Productos en DB: {await engine.count_products()}")
     for row in rows:
         await db.upsert_product(row)
 
