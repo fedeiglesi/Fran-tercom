@@ -24,11 +24,12 @@ DEFAULT_EMBEDDING_DIMENSIONS = {
 
 
 def _resolve_embedding_model() -> str:
-    return os.getenv("OPENAI_EMBEDDING_MODEL", config.OPENAI_EMBEDDING_MODEL)
+    env_model = os.getenv("OPENAI_EMBEDDING_MODEL", "").strip()
+    return env_model or config.OPENAI_EMBEDDING_MODEL
 
 
 def _resolve_embedding_dim(model: str) -> int:
-    env_dim = os.getenv("EMBEDDING_DIM")
+    env_dim = os.getenv("EMBEDDING_DIM", "").strip()
     if env_dim:
         return int(env_dim)
 
