@@ -12,7 +12,9 @@ from typing import Final
 
 OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
 MODEL_NAME: Final[str] = os.getenv("MODEL_NAME", "gpt-4o-mini")
-OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv(
+    "OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"
+).strip() or "text-embedding-3-large"
 
 
 def _fix_database_url(url: str) -> str:
