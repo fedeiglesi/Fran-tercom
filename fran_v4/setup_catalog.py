@@ -1,4 +1,4 @@
-"""Script de setup para cargar el catálogo en Qdrant/PostgreSQL.
+"""Script de setup para cargar el catálogo en PostgreSQL/pgvector.
 
 Este módulo se ejecuta fuera del ciclo de vida de FastAPI para que la
 aplicación principal arranque rápido en Railway.

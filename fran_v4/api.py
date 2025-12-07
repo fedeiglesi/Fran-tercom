@@ -118,7 +118,6 @@ def create_app() -> FastAPI:
             "components": {
                 "fastapi_async": True,
                 "postgresql": database.available,
-                "qdrant": True,
                 "langgraph": True,
             },
         }

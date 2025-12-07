@@ -1,5 +1,5 @@
 ## Estado actual de Fran
-- **Fran 4.0** (FastAPI + PostgreSQL + Redis + Qdrant + LangGraph) es ahora el entrypoint por defecto. El servidor se
+- **Fran 4.0** (FastAPI + PostgreSQL/pgvector + Redis + LangGraph) es ahora el entrypoint por defecto. El servidor se
   expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4:app --reload`.
 - La versión **3.x** en Flask (`app.py`) queda como legado para referencias históricas; no es la ruta recomendada de
   despliegue.
@@ -8,9 +8,8 @@
 
 ## Fran 4.0 (arquitectura asincrónica lista para producción)
 - **FastAPI** con uvicorn/gunicorn como servidor asíncrono preparado para Railway y contenedores.
-- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) con fallback en memoria para resiliencia
-  temporal si la base está caída.
-- Motor RAG externalizado a **Qdrant** con búsqueda híbrida (texto + denso) y filtrado por metadata.
+- Persistencia transaccional y motor de búsqueda vectorial/full-text en **PostgreSQL con pgvector** (SQLAlchemy async)
+  con fallback en memoria para resiliencia temporal si la base está caída.
 - Orquestador sobre **LangGraph** con bucle de razonamiento, herramientas desacopladas y memoria de sesión
   persistente.
 - Código modular en `fran_v4/` separando base de datos, motor de búsqueda, LLM y grafo del agente.
