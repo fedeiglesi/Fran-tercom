@@ -16,9 +16,6 @@ httpx>=0.27.2,<0.28
 langgraph==0.1.19
 pydantic==2.8.2
 
-# Búsqueda híbrida
-qdrant-client==1.12.0
-
 # PostgreSQL (opcional - para catálogo en Railway)
 psycopg2-binary==2.9.9
 

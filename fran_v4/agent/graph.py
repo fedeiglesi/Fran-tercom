@@ -17,7 +17,9 @@ from fran_v4.search_engine import HybridSearchEngine
 class AgentRequest(BaseModel):
     message: str = Field(..., description="Texto del cliente")
     session_id: str = Field(..., description="Identificador de sesión")
-    filters: Optional[Dict[str, Any]] = Field(default=None, description="Filtros para Qdrant")
+    filters: Optional[Dict[str, Any]] = Field(
+        default=None, description="Filtros para la búsqueda en PostgreSQL"
+    )
 
 
 class AgentResponse(BaseModel):
