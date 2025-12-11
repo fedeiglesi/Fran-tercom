@@ -1,10 +1,44 @@
+## 🚀 Inicio Rápido - Railway Deploy
+
+**¿Problemas con Railway + PostgreSQL + pgvector?** → Lee [`RAILWAY_SETUP_GUIA_COMPLETA.md`](RAILWAY_SETUP_GUIA_COMPLETA.md)
+
+### Setup en 5 pasos:
+
+1. **PostgreSQL con pgvector**:
+   - Usa [Supabase](https://supabase.com) (gratis, pgvector incluido) **O**
+   - Usa [Railway template con pgvector](https://railway.app/template/pgvector)
+
+2. **Variables de entorno en Railway**:
+   ```bash
+   DATABASE_URL=postgresql://...  # Auto-generado si vinculas la DB
+   OPENAI_API_KEY=sk-proj-...
+   CATALOGO_CSV_URL=https://raw.githubusercontent.com/.../catalogo.csv
+   ```
+
+3. **Diagnóstico automático**:
+   ```bash
+   railway run python diagnostico_railway.py
+   ```
+
+4. **Cargar catálogo**:
+   ```bash
+   railway run python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name products --drop-existing
+   ```
+
+5. **Verificar**:
+   ```bash
+   curl https://tu-app.up.railway.app/health
+   ```
+
+---
+
 ## Estado actual de Fran
-- **Fran 4.0** (FastAPI + PostgreSQL/pgvector + Redis + LangGraph) es ahora el entrypoint por defecto. El servidor se
-  expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4:app --reload`.
+- **Fran 4.0** (FastAPI + PostgreSQL/pgvector + LangGraph) es ahora el entrypoint por defecto. El servidor se
+  expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4.api:app --reload`.
 - La versión **3.x** en Flask (`app.py`) queda como legado para referencias históricas; no es la ruta recomendada de
   despliegue.
 - El catálogo se carga desde PostgreSQL mediante el proceso `release` de Railway o ejecutando manualmente
-  `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing`.
+  `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name products --drop-existing`.
 
 ## Fran 4.0 (arquitectura asincrónica lista para producción)
 - **FastAPI** con uvicorn/gunicorn como servidor asíncrono preparado para Railway y contenedores.
