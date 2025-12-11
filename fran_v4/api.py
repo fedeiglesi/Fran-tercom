@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Dict
 
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Fran 4.0", version="4.0.0")
+    app.state.is_ready = False
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -30,6 +33,14 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def readiness_middleware(request: Request, call_next):
+        if request.url.path == "/health":
+            return await call_next(request)
+        if not app.state.is_ready:
+            return JSONResponse(status_code=503, content={"detail": "Service Unavailable: Initializing"})
+        return await call_next(request)
 
     database = Database()
     memory = SessionMemory(session_factory=database.session_factory)
@@ -93,17 +104,22 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        await database.init_models()
-        if not database.available:
-            logger.warning(
-                "La base de datos no está disponible; se reintentará en segundo plano y las "
-                "operaciones persistentes se omitirán hasta reconectar."
-            )
+        async def initialize_app() -> None:
+            await database.init_models()
+            if not database.available:
+                logger.warning(
+                    "La base de datos no está disponible; se reintentará en segundo plano y las "
+                    "operaciones persistentes se omitirán hasta reconectar."
+                )
 
-        try:
-            await initialize_catalog(search_engine=search_engine, database=database)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Inicialización de catálogo fallida: %s", exc)
+            try:
+                await initialize_catalog(search_engine=search_engine, database=database)
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                logger.warning("Inicialización de catálogo fallida: %s", exc)
+
+            app.state.is_ready = True
+
+        asyncio.create_task(initialize_app())
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
