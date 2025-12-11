@@ -35,7 +35,8 @@ from queue import Queue, Empty
 from pathlib import Path
 
 import requests
-from flask import Flask, request, Response, jsonify
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 from twilio.twiml.messaging_response import MessagingResponse
 from openai import OpenAI, RateLimitError
 from rapidfuzz import process, fuzz
@@ -93,7 +94,7 @@ from pipeline.orquestador_v317 import orquestar_v317
 from pipeline.router_dynamic import build_catalog_centroid
 
 load_dotenv()
-app = Flask(__name__)
+app = FastAPI()
 
 REQUESTS_HEADERS = {
     "User-Agent": "Safari/605.1.15",
@@ -7191,35 +7192,36 @@ def send_long_message(phone, text, chunk_size=1600):
 # ------------------------------------------------------------------
 # WEBHOOK WHATSAPP
 # ------------------------------------------------------------------
-@app.route("/whatsapp", methods=["POST"])
-def whatsapp_webhook():
+@app.post("/whatsapp")
+async def whatsapp_webhook(request: Request):
     try:
         logger.info("=" * 50)
         logger.info("WEBHOOK RECIBIDO")
-        logger.info(f"From: {request.form.get('From', 'N/A')}")
-        logger.info(f"Body: {request.form.get('Body', 'N/A')}")
-        logger.info(f"MessageSid: {request.form.get('MessageSid', 'N/A')}")
+        form_data = await request.form()
+        logger.info(f"From: {form_data.get('From', 'N/A')}")
+        logger.info(f"Body: {form_data.get('Body', 'N/A')}")
+        logger.info(f"MessageSid: {form_data.get('MessageSid', 'N/A')}")
         logger.info("=" * 50)
 
-        from_number = request.form.get("From", "")
-        message_body = sanitize_input(request.form.get("Body", "").strip(), max_length=1500)
+        from_number = form_data.get("From", "")
+        message_body = sanitize_input(form_data.get("Body", "").strip(), max_length=1500)
 
         if not from_number or not message_body:
             logger.warning("Mensaje sin From o Body")
-            return Response("<Response></Response>", mimetype="text/xml")
+            return Response(content="<Response></Response>", media_type="text/xml")
 
         logger.info(f"Mensaje sanitizado: {message_body}")
 
         if is_duplicate_message(from_number, message_body):
             logger.info(f"Mensaje duplicado ignorado de {from_number}")
-            return Response("<Response></Response>", mimetype="text/xml")
+            return Response(content="<Response></Response>", media_type="text/xml")
 
         logger.info(f"Procesando mensaje de {from_number}: {message_body}")
 
         if not rate_limit_check(from_number):
             resp = MessagingResponse()
             resp.message("Demasiados mensajes, esperá un minuto.")
-            return Response(str(resp), mimetype="text/xml")
+            return Response(content=str(resp), media_type="text/xml")
 
         is_bulk, count = is_bulk_list_request(message_body)
         if is_bulk and count > INSTANT_THRESHOLD:
@@ -7227,10 +7229,10 @@ def whatsapp_webhook():
             if not job_id:
                 resp = MessagingResponse()
                 resp.message("Tuve un problema procesando la lista, probá de nuevo")
-                return Response(str(resp), mimetype="text/xml")
+                return Response(content=str(resp), media_type="text/xml")
             resp = MessagingResponse()
             resp.message(f"Perfecto, es una lista larga ({count} items). La proceso y te aviso con el total.")
-            return Response(str(resp), mimetype="text/xml")
+            return Response(content=str(resp), media_type="text/xml")
 
         # A/B/C routing entre versiones 3.14, 3.15 y 3.16
         version = get_orchestrator_version(from_number)
@@ -7252,28 +7254,28 @@ def whatsapp_webhook():
             logger.info("Mensaje corto, usando TwiML")
             resp = MessagingResponse()
             resp.message(reply)
-            return Response(str(resp), mimetype="text/xml")
+            return Response(content=str(resp), media_type="text/xml")
         else:
             logger.info("Mensaje largo, enviando por Twilio REST")
             send_long_message(from_number, reply)
-            return Response("<Response></Response>", mimetype="text/xml")
+            return Response(content="<Response></Response>", media_type="text/xml")
 
     except Exception as e:
         logger.exception(f"Error crítico en webhook: {e}")
         try:
             resp = MessagingResponse()
             resp.message("Uy, tuve un problema técnico. Probá de nuevo en un ratito.")
-            return Response(str(resp), mimetype="text/xml")
+            return Response(content=str(resp), media_type="text/xml")
         except:
-            return Response("<Response></Response>", mimetype="text/xml")
+            return Response(content="<Response></Response>", media_type="text/xml")
 
 # ------------------------------------------------------------------
 # HEALTH / API
 # ------------------------------------------------------------------
-@app.route("/health", methods=["GET"])
+@app.get("/health")
 def health():
     catalog, index, bm25_index, _ = get_catalog_and_index()
-    return jsonify({
+    return JSONResponse({
         "status": "ok",
         "version": "3.17",
         "catalog_size": len(catalog) if catalog else 0,
