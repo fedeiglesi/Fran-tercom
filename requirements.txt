@@ -1,27 +1,7 @@
-# API
 fastapi==0.111.1
 uvicorn==0.30.1
-gunicorn==22.0.0
-
-# Async database
-sqlalchemy[asyncio]==2.0.30
-asyncpg==0.29.0
-pgvector==0.2.5
-
-# LLM y orquestación
+twilio==9.2.3
 openai==1.52.0
-# httpx 0.28 removed the `proxies` parameter used internally by openai.AsyncClient
-# Pin to 0.27.x to keep compatibility in Railway.
-httpx>=0.27.2,<0.28
-langgraph==0.1.19
 pydantic==2.8.2
-
-# PostgreSQL (opcional - para catálogo en Railway)
-psycopg2-binary==2.9.9
-
-# Utils
 python-dotenv==1.0.1
-requests==2.32.3
-numpy==1.26.4
-pytest==8.3.2
-pandas==2.2.2
+psycopg2-binary==2.9.9
