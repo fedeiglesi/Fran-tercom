@@ -59,21 +59,36 @@ def _fix_database_url(url: str) -> str:
     parsed = urlparse(url)
     params = parse_qs(parsed.query, keep_blank_values=True)
 
-    # Forzar SSL en conexiones no locales para seguridad y compatibilidad
-    # con proveedores cloud como Railway. asyncpg espera un booleano en
-    # este parámetro; antes usábamos "require" y eso impedía la conexión.
-    if parsed.hostname not in ("localhost", "127.0.0.1"):
-        params["ssl"] = "true"
+    allowed_sslmodes = {
+        "disable",
+        "allow",
+        "prefer",
+        "require",
+        "verify-ca",
+        "verify-full",
+    }
 
-    # Convertir sslmode a ssl para asyncpg. Railway necesita TLS pero asyncpg
-    # no acepta "require" como valor. Se mapea a "true" para que cree el
-    # contexto SSL automáticamente.
+    # Mapear el parámetro legacy "ssl" a sslmode para que asyncpg no se queje
+    # de valores inválidos como "true". Si el valor es truthy, forzamos
+    # sslmode=require; si es falsy, lo desactivamos.
+    if "ssl" in params:
+        raw_ssl = params.pop("ssl")
+        ssl_value = raw_ssl[0].lower() if raw_ssl else ""
+        params["sslmode"] = "require" if ssl_value not in ("", "false", "0") else "disable"
+
+    # Validar sslmode si viene del proveedor y corregirlo en caso necesario.
     if "sslmode" in params:
         sslmode_values = params.get("sslmode")
-        if sslmode_values and sslmode_values[0] == "require":
-            params["ssl"] = "true"
-        # Eliminar el parámetro original que no es soportado por asyncpg
-        del params["sslmode"]
+        sslmode = sslmode_values[0] if sslmode_values else ""
+        if sslmode not in allowed_sslmodes:
+            logger.warning(
+                "Valor sslmode inválido '%s'; usando 'require' para compatibilidad con asyncpg",
+                sslmode,
+            )
+            params["sslmode"] = "require"
+    elif parsed.hostname not in ("localhost", "127.0.0.1"):
+        # Para entornos cloud aseguramos TLS explícitamente.
+        params["sslmode"] = "require"
 
     # Reconstruir la query string
     new_query = urlencode(params, doseq=True)
