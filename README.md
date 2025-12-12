@@ -1,8 +1,7 @@
 ## Estado actual de Fran
 - **Fran 4.0** (FastAPI + PostgreSQL/pgvector + Redis + LangGraph) es ahora el entrypoint por defecto. El servidor se
-  expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4:app --reload`.
-- La versión **3.x** en Flask (`app.py`) queda como legado para referencias históricas; no es la ruta recomendada de
-  despliegue.
+  expone desde `fran_v4.api:app` y puede correrse localmente con `python run_server.py` o `uvicorn fran_v4.api:app --reload`.
+- El código de la versión **3.x** en Flask (`app.py`) ha sido movido a la carpeta `_legacy` para referencias históricas.
 - El catálogo se carga desde PostgreSQL mediante el proceso `release` de Railway o ejecutando manualmente
   `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing`.
 
