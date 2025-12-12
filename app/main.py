@@ -14,6 +14,11 @@ from fran_v4.startup import initialize_catalog
 
 from .twilio_router import create_twilio_router
 
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
