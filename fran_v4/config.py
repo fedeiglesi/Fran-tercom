@@ -26,6 +26,7 @@ def _fix_database_url(url: str) -> str:
     Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
     necesita el driver explícito postgresql+asyncpg://. También convierte
     el parámetro sslmode (usado por psycopg2) a ssl (usado por asyncpg).
+    Añade ssl=require si la base de datos no es local.
     """
     logger.info("Fixing database URL: %s", url)
     if url.startswith("postgresql://") and "+asyncpg" not in url:
@@ -34,6 +35,11 @@ def _fix_database_url(url: str) -> str:
     # Parsear la URL para manejar parámetros
     parsed = urlparse(url)
     params = parse_qs(parsed.query, keep_blank_values=True)
+
+    # Forzar SSL en conexiones no locales para seguridad y compatibilidad
+    # con proveedores cloud como Railway.
+    if parsed.hostname not in ("localhost", "127.0.0.1"):
+        params["ssl"] = "require"
 
     # Convertir sslmode a ssl para asyncpg. Railway necesita 'require'.
     if "sslmode" in params:
