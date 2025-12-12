@@ -115,12 +115,7 @@ def _fix_database_url(url: str) -> str:
     return new_url
 
 
-DATABASE_URL: Final[str] = _fix_database_url(
-    os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/fran",
-    )
-)
+DATABASE_URL: Final[str] = _fix_database_url(os.environ["DATABASE_URL"])
 
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
