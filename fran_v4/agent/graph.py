@@ -98,16 +98,27 @@ def build_agent_graph(
 
     async def respond(state: AgentState) -> AgentState:
         history = await session_memory.get_history(state["session_id"], limit=6)
+
+        tool = state.get("tool", "")
+        if tool == "update_cart":
+            system_prompt = "Confirma la acción del carrito y muestra el estado actual de forma clara."
+        elif tool == "get_pricing":
+            system_prompt = "Presenta el resumen del carrito con el total de precios."
+        else:
+            system_prompt = "Eres Fran 4.0, agente de ventas. Responde basado en el contexto."
+
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": "Eres Fran 4.0, agente de ventas asíncrono basado en grafos."},
+            {"role": "system", "content": system_prompt},
             {"role": "system", "content": state.get("plan", "")},
         ]
         for item in history:
             messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
         messages.append({"role": "user", "content": state["message"]})
+
         if state.get("context"):
             context_text = "\n".join([str(chunk) for chunk in state.get("context", [])])
             messages.append({"role": "system", "content": f"Contexto recuperado:\n{context_text}"})
+
         reply = await llm_service.chat(messages, temperature=0.35)
         await session_memory.append_message(state["session_id"], "assistant", reply)
         await db.log_event(state["session_id"], "assistant", reply)
@@ -119,8 +130,28 @@ def build_agent_graph(
     graph.add_node("requery", requery)
     graph.add_node("respond", respond)
 
+    async def parse_message(state: AgentState) -> AgentState:
+        if state.get("tool") != "update_cart":
+            return state
+
+        prompt = [
+            {"role": "system", "content": "Extrae la entidad de la consulta del usuario. Devuelve un JSON con 'action', 'item' y 'quantity'."},
+            {"role": "user", "content": state["message"]},
+        ]
+        parsed_item = await llm_service.chat(prompt, temperature=0.1, max_tokens=128)
+        await db.log_event(state["session_id"], "system", f"Mensaje parseado: {parsed_item}")
+        return {**state, "parsed_item": parsed_item}
+
+    graph = StateGraph(AgentState)
+    graph.add_node("understand", understand)
+    graph.add_node("parse_message", parse_message)
+    graph.add_node("act", act)
+    graph.add_node("requery", requery)
+    graph.add_node("respond", respond)
+
     graph.set_entry_point("understand")
-    graph.add_edge("understand", "act")
+    graph.add_edge("understand", "parse_message")
+    graph.add_edge("parse_message", "act")
     graph.add_conditional_edges("act", evaluate, {"respond": "respond", "requery": "requery"})
     graph.add_edge("requery", "act")
     graph.add_edge("respond", END)
@@ -138,11 +169,13 @@ async def run_agent(agent_graph: Any, payload: AgentRequest) -> AgentResponse:
         "reply": "",
         "best_score": 0.0,
         "attempts": 0,
-        "tool": tools.choose_tool(payload.message),
+        "tool": "",
         "parsed_item": {},
     }
     result_state: AgentState = await agent_graph.ainvoke(initial_state)
     return AgentResponse(
-        session_id=payload.session_id, reply=result_state.get("reply", ""), context=result_state.get("context", [])
+        session_id=payload.session_id,
+        reply=result_state.get("reply", ""),
+        context=result_state.get("context", []),
     )
 
