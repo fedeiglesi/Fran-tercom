@@ -62,6 +62,15 @@ def build_agent_graph(
     session_memory = memory or SessionMemory()
 
     async def understand(state: AgentState) -> AgentState:
+        """
+        Analiza el mensaje del usuario y define el plan y herramienta a ejecutar.
+
+        Args:
+            state: Estado actual del agente con el mensaje del usuario.
+
+        Returns:
+            Estado actualizado con el plan generado y la herramienta seleccionada.
+        """
         await session_memory.append_message(state["session_id"], "user", state["message"])
         plan = _build_plan_prompt(state["message"])
         tool = tools.choose_tool(state["message"])
@@ -84,6 +93,13 @@ def build_agent_graph(
     async def evaluate(state: AgentState) -> str:
         if state.get("tool") != "search_products":
             return "respond"
+
+        # Si es un saludo o consulta general, no hacer requery
+        message_lower = state.get("message", "").lower()
+        greetings = ["hola", "buenas", "buenos días", "buenas tardes", "hey", "ayuda", "gracias"]
+        if any(greeting in message_lower for greeting in greetings):
+            return "respond"
+
         if state.get("best_score", 0.0) >= config.RELEVANCE_MIN_SCORE or state.get("attempts", 0) >= 1:
             return "respond"
         return "requery"
