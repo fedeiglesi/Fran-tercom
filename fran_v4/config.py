@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from typing import Final
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 
 OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
@@ -21,11 +22,41 @@ def _fix_database_url(url: str) -> str:
     """Convierte postgresql:// a postgresql+asyncpg:// para SQLAlchemy async.
 
     Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
-    necesita el driver explícito postgresql+asyncpg://.
+    necesita el driver explícito postgresql+asyncpg://. También convierte
+    el parámetro sslmode (usado por psycopg2) a ssl (usado por asyncpg).
     """
     if url.startswith("postgresql://") and "+asyncpg" not in url:
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    return url
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+    # Parsear la URL para manejar parámetros
+    parsed = urlparse(url)
+
+    # Si no hay parámetros de query, retornar la URL tal cual
+    if not parsed.query:
+        return url
+
+    # Parsear los parámetros de query
+    params = parse_qs(parsed.query, keep_blank_values=True)
+
+    # Si existe sslmode, eliminarlo ya que asyncpg no lo soporta
+    # asyncpg manejará SSL automáticamente cuando sea necesario
+    if "sslmode" in params:
+        del params["sslmode"]
+
+    # Reconstruir la query string sin sslmode
+    new_query = urlencode(params, doseq=True) if params else ""
+
+    # Reconstruir la URL
+    new_url = urlunparse((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        parsed.params,
+        new_query,
+        parsed.fragment
+    ))
+
+    return new_url
 
 
 DATABASE_URL: Final[str] = _fix_database_url(
