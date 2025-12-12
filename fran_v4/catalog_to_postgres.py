@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import os
 import tempfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -76,6 +77,14 @@ def _download_csv(url: str) -> Path:
 @contextmanager
 def _resolve_csv_source(csv_path: str) -> Iterator[Path]:
     """Devuelve una ruta local al CSV, descargándolo si es una URL."""
+    expanded_path = os.path.expandvars(csv_path)
+    if expanded_path.startswith("$"):
+        raise FileNotFoundError(
+            "No se encontró la ruta al CSV porque la variable de entorno no está definida"
+        )
+
+    csv_path = expanded_path
+
     if _is_url(csv_path):
         tmp_path = _download_csv(csv_path)
         try:
@@ -179,7 +188,12 @@ async def ingest_catalog(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Carga el catálogo CSV en PostgreSQL.")
-    parser.add_argument("csv_path", help="Ruta al CSV del catálogo")
+    parser.add_argument(
+        "csv_path",
+        nargs="?",
+        default=config.CATALOG_URL,
+        help="Ruta al CSV del catálogo (por defecto usa la variable de entorno CATALOG_URL)",
+    )
     parser.add_argument(
         "--table-name",
         default="catalogo3",
@@ -195,6 +209,10 @@ def _parse_args() -> argparse.Namespace:
 
 def _main() -> None:
     args = _parse_args()
+    if not args.csv_path:
+        raise SystemExit(
+            "Debes proporcionar la ruta del CSV o definir la variable de entorno CATALOG_URL"
+        )
     asyncio.run(
         ingest_catalog(args.csv_path, table_name=args.table_name, drop_existing=args.drop_existing)
     )
