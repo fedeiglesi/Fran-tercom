@@ -14,6 +14,29 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 logger = logging.getLogger(__name__)
 
 
+def _mask_credentials(url: str) -> str:
+    """Evita filtrar contraseñas en logs."""
+    parsed = urlparse(url)
+    if parsed.password is None:
+        return url
+    redacted_netloc = parsed.netloc.replace(parsed.password, "***")
+    return urlunparse(
+        (
+            parsed.scheme,
+            redacted_netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def mask_database_url(url: str) -> str:
+    """Wrapper público para enmascarar credenciales al loguear URLs."""
+    return _mask_credentials(url)
+
+
 OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
 MODEL_NAME: Final[str] = os.getenv("MODEL_NAME", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv(
@@ -28,7 +51,7 @@ def _fix_database_url(url: str) -> str:
     el parámetro sslmode (usado por psycopg2) a ssl (usado por asyncpg).
     Añade ssl=require si la base de datos no es local.
     """
-    logger.info("Fixing database URL: %s", url)
+    logger.info("Fixing database URL: %s", _mask_credentials(url))
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
@@ -37,14 +60,18 @@ def _fix_database_url(url: str) -> str:
     params = parse_qs(parsed.query, keep_blank_values=True)
 
     # Forzar SSL en conexiones no locales para seguridad y compatibilidad
-    # con proveedores cloud como Railway.
+    # con proveedores cloud como Railway. asyncpg espera un booleano en
+    # este parámetro; antes usábamos "require" y eso impedía la conexión.
     if parsed.hostname not in ("localhost", "127.0.0.1"):
-        params["ssl"] = "require"
+        params["ssl"] = "true"
 
-    # Convertir sslmode a ssl para asyncpg. Railway necesita 'require'.
+    # Convertir sslmode a ssl para asyncpg. Railway necesita TLS pero asyncpg
+    # no acepta "require" como valor. Se mapea a "true" para que cree el
+    # contexto SSL automáticamente.
     if "sslmode" in params:
-        if params.get("sslmode") == ["require"]:
-            params["ssl"] = "require"
+        sslmode_values = params.get("sslmode")
+        if sslmode_values and sslmode_values[0] == "require":
+            params["ssl"] = "true"
         # Eliminar el parámetro original que no es soportado por asyncpg
         del params["sslmode"]
 
@@ -62,7 +89,7 @@ def _fix_database_url(url: str) -> str:
             parsed.fragment,
         )
     )
-    logger.info("Fixed database URL for asyncpg: %s", new_url)
+    logger.info("Fixed database URL for asyncpg: %s", _mask_credentials(new_url))
     return new_url
 
 

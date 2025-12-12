@@ -28,6 +28,10 @@ class SessionMemory:
         if session_factory is not None:
             self.session_factory = session_factory
         else:
+            self._logger.info(
+                "Creando SessionMemory con base de datos: %s",
+                config.mask_database_url(config.DATABASE_URL),
+            )
             self._engine = create_async_engine(config.DATABASE_URL, future=True, echo=False)
             self.session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
         self._fallback_store: Dict[str, Dict[str, Any]] = {}
