@@ -8,6 +8,14 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 CSV_URL = "https://raw.githubusercontent.com/fedeiglesi/Fran-tercom/Fran-4.0/catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
 TABLE_NAME = "catalogo"
 
+def to_numeric(value):
+    if value is None:
+        return None
+    value = value.strip()
+    if value == "":
+        return None
+    return float(value)
+
 print("Descargando CSV...")
 response = requests.get(CSV_URL)
 response.raise_for_status()
@@ -20,7 +28,7 @@ cur = conn.cursor()
 print("Creando tabla...")
 cur.execute(f"""
 CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-    codigo TEXT,
+    codigo TEXT PRIMARY KEY,
     descripcion TEXT,
     precio_dolares NUMERIC,
     precio_pesos NUMERIC,
@@ -55,13 +63,18 @@ VALUES (
     %(marca_moto)s, %(modelo_moto)s,
     %(descripcion_normalizada)s, %(sinonimos)s,
     %(cilindrada)s, %(categoria_final)s
-);
+)
+ON CONFLICT (codigo) DO NOTHING;
 """
 
 for row in reader:
     for k in row:
         if row[k] == "":
             row[k] = None
+
+    row["precio_dolares"] = to_numeric(row["precio_dolares"])
+    row["precio_pesos"] = to_numeric(row["precio_pesos"])
+
     cur.execute(insert_query, row)
 
 conn.commit()
