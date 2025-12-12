@@ -68,27 +68,34 @@ def _fix_database_url(url: str) -> str:
         "verify-full",
     }
 
-    # Mapear el parámetro legacy "ssl" a sslmode para que asyncpg no se queje
-    # de valores inválidos como "true". Si el valor es truthy, forzamos
-    # sslmode=require; si es falsy, lo desactivamos.
-    if "ssl" in params:
-        raw_ssl = params.pop("ssl")
-        ssl_value = raw_ssl[0].lower() if raw_ssl else ""
-        params["sslmode"] = "require" if ssl_value not in ("", "false", "0") else "disable"
-
-    # Validar sslmode si viene del proveedor y corregirlo en caso necesario.
+    # Normalizar parámetro de SSL para asyncpg, que usa "ssl" en lugar
+    # del "sslmode" de psycopg2.
+    ssl_value = None
     if "sslmode" in params:
-        sslmode_values = params.get("sslmode")
-        sslmode = sslmode_values[0] if sslmode_values else ""
-        if sslmode not in allowed_sslmodes:
+        ssl_value = params.pop("sslmode")[0]
+    elif "ssl" in params:
+        # Aceptar "ssl" como booleano ("true") o como un sslmode válido.
+        raw_ssl = params.pop("ssl")[0]
+        if raw_ssl.lower() in ("true", "1", "on"):
+            ssl_value = "require"
+        elif raw_ssl.lower() in ("false", "0", "off", "disable"):
+            ssl_value = "disable"
+        else:
+            ssl_value = raw_ssl  # Asumir que es un sslmode válido
+
+    if ssl_value:
+        if ssl_value in allowed_sslmodes:
+            if ssl_value != "disable":
+                params["ssl"] = ssl_value
+        else:
             logger.warning(
-                "Valor sslmode inválido '%s'; usando 'require' para compatibilidad con asyncpg",
-                sslmode,
+                "Valor ssl/sslmode inválido '%s'; usando 'require' para compatibilidad",
+                ssl_value,
             )
-            params["sslmode"] = "require"
+            params["ssl"] = "require"
     elif parsed.hostname not in ("localhost", "127.0.0.1"):
-        # Para entornos cloud aseguramos TLS explícitamente.
-        params["sslmode"] = "require"
+        # Para entornos cloud, asegurar TLS explícitamente si no se ha definido.
+        params["ssl"] = "require"
 
     # Reconstruir la query string
     new_query = urlencode(params, doseq=True)
