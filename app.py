@@ -1,7 +1,8 @@
 # =========================================================
-# Fran 3.16 – Bot Mayorista Inteligente (Arquitectura Híbrida)
+# Fran 3.17 – Bot Mayorista Inteligente (Arquitectura Híbrida en Flask)
 # =========================================================
-# Combina lo mejor de Fran 3.14 y 3.15 en una arquitectura unificada:
+# Combina lo mejor de Fran 3.14 y 3.15 en una arquitectura unificada y se ejecuta
+# como entrypoint Flask (Fran 4.0 vive en `fran_v4/` pero no es productivo aún):
 #
 # ARQUITECTURA HÍBRIDA:
 # - Templates estructurados (3.15) para Understanding y Response
@@ -85,6 +86,8 @@ except ImportError:  # pragma: no cover - fallback liviano
 
 from fran.clients import HttpClient, LLMClient
 from fran.observability import CircuitBreaker, METRICS_REGISTRY, track_step
+from fran.catalog_postgres import load_catalog_from_postgres, is_postgres_enabled
+from fran.search_utils import RRFConfig, normalize_query_noise, rrf_fusion, tokenize_text
 from pipeline.llm_classifier_dynamic import build_classifier_schema
 from pipeline.orquestador_v317 import orquestar_v317
 from pipeline.router_dynamic import build_catalog_centroid
@@ -110,7 +113,7 @@ print(f"[Fran] Catálogo cargado desde: {CATALOG_URL}")
 # ------------------------------------------------------------
 # LOGGER
 # ------------------------------------------------------------
-logger = logging.getLogger("fran313")
+logger = logging.getLogger("fran317")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -121,6 +124,7 @@ logger.info("✅ Imports completos")
 
 FRAN_DEBUG = (os.environ.get("FRAN_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
 LAST_SEARCH_DEBUG = {}
+NORMALIZATION_DEDUP = (os.environ.get("FRAN_DEDUP_NORMALIZATION") or "true").strip().lower() in {"1", "true", "yes", "on"}
 
 # ------------------------------------------------------------
 # CONFIGURACIÓN FRAN 3.16 (Pipeline JSON-first)
@@ -140,6 +144,23 @@ RRF_BM25_WEIGHT = 1.0
 RRF_FAISS_WEIGHT = 1.2
 LAST_FILTER_CATALOG_DEBUG = {}
 LAST_RELEVANCE_DEBUG = {}
+
+# Configuraciones RRF alineadas con fran.search_utils (v3.16 vs v3.17)
+RRF_CONFIG_V316 = RRFConfig(
+    k_rrf=60,
+    bm25_weight=RRF_BM25_WEIGHT,
+    faiss_weight=RRF_FAISS_WEIGHT,
+    use_consensus=False,
+    use_calibration=False,
+)
+
+RRF_CONFIG_V317 = RRFConfig(
+    k_rrf=60,
+    bm25_weight=RRF_BM25_WEIGHT,
+    faiss_weight=RRF_FAISS_WEIGHT,
+    use_consensus=True,
+    use_calibration=True,
+)
 
 # ------------------------------------------------------------
 # CONFIG
@@ -847,7 +868,7 @@ def should_use_v315(phone: str) -> bool:
     return version == "3.15"
 
 
-def get_orchestrator_version(phone: str) -> str:
+def get_orchestrator_version(phone: str | None = None) -> str:
     """
     Determina qué versión del orquestador usar: "3.14", "3.15", "3.16" o "3.17"
 
@@ -876,6 +897,10 @@ def get_orchestrator_version(phone: str) -> str:
     # Beta phones get v3.17
     beta_phones = [p.strip() for p in os.environ.get("BETA_PHONES", "").split(",") if p.strip()]
     if beta_phones and phone in beta_phones:
+        return "3.17"
+
+    # Sin teléfono proporcionado, se usa la versión más moderna por defecto
+    if not phone:
         return "3.17"
 
     # Hash-based A/B/C split (40% v3.17, 30% v3.16, 15% v3.15, 15% v3.14)
@@ -907,8 +932,7 @@ def strip_accents(s):
 
 def _tokenize_text(text):
     try:
-        normalized = normalize_search_query(text or "")
-        return normalized.split()
+        return tokenize_text(text or "", deduplicate=NORMALIZATION_DEDUP)
     except Exception as e:
         logger.warning(f"Error tokenizando texto: {e}")
         return (text or "").lower().split()
@@ -978,10 +1002,7 @@ def normalize_search_query(query):
     if not query:
         return ""
 
-    normalized = strip_accents(query)
-    normalized = re.sub(r"[^\w\s/.-]", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
+    return normalize_query_noise(query, deduplicate=NORMALIZATION_DEDUP)
 
 # ------------------------------------------------------------
 # NUEVO: RELEVANCE SCORING GENERAL
@@ -2650,6 +2671,18 @@ def _extract_column(header_row, key_variants):
 
 
 def load_catalog_enriched():
+    # Intentar cargar desde PostgreSQL primero (si está habilitado)
+    if is_postgres_enabled():
+        try:
+            exchange = get_exchange_rate()
+            pg_catalog = load_catalog_from_postgres(exchange_rate=exchange)
+            if pg_catalog and len(pg_catalog) > 0:
+                logger.info(f"Catálogo cargado desde PostgreSQL: {len(pg_catalog)} productos")
+                return pg_catalog
+        except Exception as e:
+            logger.warning(f"Error cargando desde PostgreSQL, usando CSV: {e}")
+
+    # Fallback a CSV
     try:
         text = _load_raw_csv()
         if not text:
@@ -3331,21 +3364,28 @@ def hybrid_search(
         LAST_SEARCH_DEBUG["final_count"] = 0
         return {"final_candidates": []}
 
-    k_rrf = 60
-    fused_scores = defaultdict(float)
     product_lookup = {}
+    bm25_ranks = {}
+    faiss_ranks = {}
+
+    def _register_candidate(product, score, rank, target):
+        key = product.get("code") or product.get("name") or id(product)
+        if key not in product_lookup:
+            product_lookup[key] = dict(product)
+        target[key] = (rank, score)
+
+    for product, score, rank in bm25_results:
+        _register_candidate(product, float(score), rank, bm25_ranks)
+
+    for product, dist, rank in faiss_results:
+        similarity = 1.0 / (1.0 + float(dist)) if dist is not None else 0.0
+        _register_candidate(product, similarity, rank, faiss_ranks)
 
     query_tokens = set(normalize_search_query(query).split())
+    rrf_config = RRF_CONFIG_V317 if get_orchestrator_version(phone) == "3.17" else RRF_CONFIG_V316
+    rrf_results = rrf_fusion(bm25_ranks, faiss_ranks, config=rrf_config)
 
-    def add_rrf_scores(results, weight):
-        for product, _score, rank in results:
-            key = product.get("code") or product.get("name") or id(product)
-            if key not in product_lookup:
-                product_lookup[key] = dict(product)
-            fused_scores[key] += (weight or 1.0) / (k_rrf + rank)
-
-    add_rrf_scores(bm25_results, RRF_BM25_WEIGHT)
-    add_rrf_scores(faiss_results, RRF_FAISS_WEIGHT)
+    fused_scores = {key: score for key, score, _ in rrf_results}
 
     if query_tokens:
         for key, product in product_lookup.items():
@@ -3363,15 +3403,15 @@ def hybrid_search(
                 bonus += 0.2 * (name_hits / max(len(query_tokens), 1))
 
             if bonus:
-                fused_scores[key] += bonus
+                fused_scores[key] = fused_scores.get(key, 0.0) + bonus
 
-    sorted_keys = sorted(fused_scores, key=lambda k: fused_scores[k], reverse=True)
+    sorted_keys = sorted(fused_scores, key=fused_scores.get, reverse=True)
     max_candidates = min(max(top_k * 2, top_k), len(sorted_keys))
     fused = []
-    for k in sorted_keys[:max_candidates]:
-        product_with_score = dict(product_lookup[k])
-        product_with_score["_score"] = fused_scores[k]
-        fused.append((product_with_score, fused_scores[k]))
+    for key in sorted_keys[:max_candidates]:
+        product_with_score = dict(product_lookup.get(key, {}))
+        product_with_score["_score"] = fused_scores[key]
+        fused.append((product_with_score, fused_scores[key]))
 
     logger.info("[DEBUG][RRF] bm25=%s faiss=%s fused=%s", len(bm25_results), len(faiss_results), len(fused))
 

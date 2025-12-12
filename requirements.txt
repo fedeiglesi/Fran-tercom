@@ -7,9 +7,6 @@ gunicorn==22.0.0
 sqlalchemy[asyncio]==2.0.30
 asyncpg==0.29.0
 
-# Cache / rate limiting
-redis==5.0.7
-
 # LLM y orquestación
 openai==1.52.0
 # httpx 0.28 removed the `proxies` parameter used internally by openai.AsyncClient
@@ -21,7 +18,10 @@ pydantic==2.8.2
 # Búsqueda híbrida
 qdrant-client==1.12.0
 
-# Utilidades
+# PostgreSQL (opcional - para catálogo en Railway)
+psycopg2-binary==2.9.9
+
+# Utils
 python-dotenv==1.0.1
 requests==2.32.3
 numpy==1.26.4

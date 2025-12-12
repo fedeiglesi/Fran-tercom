@@ -14,12 +14,25 @@ OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
 MODEL_NAME: Final[str] = os.getenv("MODEL_NAME", "gpt-4o-mini")
 OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
 
-DATABASE_URL: Final[str] = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/fran",
+
+def _fix_database_url(url: str) -> str:
+    """Convierte postgresql:// a postgresql+asyncpg:// para SQLAlchemy async.
+
+    Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
+    necesita el driver explícito postgresql+asyncpg://.
+    """
+    if url.startswith("postgresql://") and "+asyncpg" not in url:
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
+DATABASE_URL: Final[str] = _fix_database_url(
+    os.getenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/fran",
+    )
 )
 
-REDIS_URL: Final[str] = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
 QDRANT_URL: Final[str] = os.getenv("QDRANT_URL", "http://localhost:6333")

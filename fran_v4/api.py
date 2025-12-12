@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from fran_v4 import config
 from fran_v4.agent import AgentRequest, AgentResponse, build_agent_graph, run_agent
-from fran_v4.database import Database
+from fran_v4.database import Database, rate_limits
 from fran_v4.memory import SessionMemory
 from fran_v4.search_engine import HybridSearchEngine
 
@@ -28,9 +30,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    redis_client = Redis.from_url(config.REDIS_URL, decode_responses=True)
-    memory = SessionMemory(config.REDIS_URL)
     database = Database()
+    memory = SessionMemory(session_factory=database.session_factory)
     search_engine = HybridSearchEngine()
     agent_graph = build_agent_graph(search_engine=search_engine, database=database, memory=memory)
 
@@ -43,18 +44,51 @@ def create_app() -> FastAPI:
             else:
                 form = await request.form()
                 session_id = form.get("From") or form.get("session_id")
-        except Exception:
+        except Exception:  # noqa: BLE001
             session_id = None
 
         if not session_id:
             raise HTTPException(status_code=400, detail="Missing session_id for rate limit")
 
-        key = f"rate:{session_id}"
-        count = await redis_client.incr(key)
-        if count == 1:
-            await redis_client.expire(key, 60)
-        if count > config.RATE_LIMIT_PER_MINUTE:
-            raise HTTPException(status_code=429, detail="Rate limit exceeded for session")
+        if not database.available:
+            logger.warning("Base de datos no disponible; se omite rate limiting.")
+            return
+
+        client_ip = request.client.host or "unknown"
+        cutoff = datetime.utcnow() - timedelta(minutes=1)
+
+        try:
+            async with database.session_factory() as session:
+                await session.execute(
+                    delete(rate_limits).where(rate_limits.c.created_at < cutoff)
+                )
+
+                result = await session.execute(
+                    select(func.count())
+                    .select_from(rate_limits)
+                    .where(
+                        rate_limits.c.ip_address == client_ip,
+                        rate_limits.c.created_at >= cutoff,
+                    )
+                )
+                count = result.scalar() or 0
+
+                if count >= config.RATE_LIMIT_PER_MINUTE:
+                    raise HTTPException(status_code=429, detail="Rate limit exceeded for session")
+
+                await session.execute(
+                    rate_limits.insert().values(ip_address=client_ip, created_at=datetime.utcnow())
+                )
+                await session.commit()
+        except HTTPException:
+            raise
+        except SQLAlchemyError as exc:  # pragma: no cover - infra fallback
+            logger.warning(
+                "Error al aplicar rate limiting en PostgreSQL (%s); se permite la solicitud.",
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Unexpected error in PostgreSQL rate limiter: %s", exc)
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -67,7 +101,6 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
-        await redis_client.aclose()
         await memory.close()
         await database.dispose()
 
@@ -79,7 +112,6 @@ def create_app() -> FastAPI:
             "components": {
                 "fastapi_async": True,
                 "postgresql": database.available,
-                "redis": True,
                 "qdrant": True,
                 "langgraph": True,
             },

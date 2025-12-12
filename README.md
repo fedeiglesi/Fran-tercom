@@ -1,8 +1,18 @@
-## Fran 4.0 (Arquitectura asincrónica)
-- Migración a **FastAPI** con servidor uvicorn para soportar `async/await` y despliegues en Railway.
-- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) y memoria de sesión/rate limiting en **Redis**.
-- Motor RAG externalizado a **Qdrant** con búsqueda híbrida y filtrado de metadata.
-- Orquestador reescrito sobre **LangGraph** con bucle de razonamiento y herramientas desacopladas.
+## Estado actual de Fran
+- **Fran 4.0** (FastAPI + PostgreSQL + Redis + Qdrant + LangGraph) es ahora el entrypoint por defecto. El servidor se
+  expone desde `fran_v4.api:app` y puede correrse localmente con `python main.py` o `uvicorn fran_v4:app --reload`.
+- La versión **3.x** en Flask (`app.py`) queda como legado para referencias históricas; no es la ruta recomendada de
+  despliegue.
+- El catálogo se carga desde PostgreSQL mediante el proceso `release` de Railway o ejecutando manualmente
+  `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing`.
+
+## Fran 4.0 (arquitectura asincrónica lista para producción)
+- **FastAPI** con uvicorn/gunicorn como servidor asíncrono preparado para Railway y contenedores.
+- Persistencia transaccional en **PostgreSQL** (SQLAlchemy async) con fallback en memoria para resiliencia
+  temporal si la base está caída.
+- Motor RAG externalizado a **Qdrant** con búsqueda híbrida (texto + denso) y filtrado por metadata.
+- Orquestador sobre **LangGraph** con bucle de razonamiento, herramientas desacopladas y memoria de sesión
+  persistente.
 - Código modular en `fran_v4/` separando base de datos, motor de búsqueda, LLM y grafo del agente.
 
 Constante	Valor	Descripción
@@ -58,3 +68,12 @@ python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3
 ```
 
 El cargador también acepta rutas locales a archivos CSV si prefieres cargar uno desde disco.
+
+### Configuración rápida para `Subir_catalogo`
+
+El script `Subir_catalogo` acepta dos formas de credenciales para conectarse a Postgres:
+
+- **DATABASE_URL**: una URL completa (`postgresql://usuario:password@host:puerto/db`).
+- `POSTGRES_*`: variables individuales `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_DB` y opcionalmente `POSTGRES_PORT` (5432 por defecto).
+
+En Railway normalmente dispones de `DATABASE_URL`. Si prefieres usar las variables separadas, el script mostrará qué host/puerto/DB está usando y te avisará si falta alguna. Si ninguna está definida, el mensaje de error te recordará qué variables debes completar.

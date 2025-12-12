@@ -1,6 +1,8 @@
 import csv
 import os
+import urllib.parse
 import psycopg2
+from psycopg2.extras import execute_values
 import requests
 from io import StringIO
 
