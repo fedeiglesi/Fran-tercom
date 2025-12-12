@@ -65,6 +65,8 @@ async def initialize_catalog(
 ) -> None:
     """Asegura el esquema vectorial y carga el catálogo CSV si no hay productos."""
 
+    logger.info("Iniciando inicialización de catálogo (catalog_path=%s)", catalog_path)
+
     try:
         await search_engine.ensure_schema()
     except Exception as exc:  # pragma: no cover - defensive logging
