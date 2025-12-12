@@ -48,25 +48,13 @@ def create_app() -> FastAPI:
     agent_graph = build_agent_graph(search_engine=search_engine, database=database, memory=memory)
 
     async def rate_limiter(request: Request) -> None:
-        session_id: str | None = None
-        try:
-            if request.headers.get("content-type", "").startswith("application/json"):
-                data = await request.json()
-                session_id = data.get("session_id")
-            else:
-                form = await request.form()
-                session_id = form.get("From") or form.get("session_id")
-        except Exception:  # noqa: BLE001
-            session_id = None
-
-        if not session_id:
-            raise HTTPException(status_code=400, detail="Missing session_id for rate limit")
-
+        # Use client IP for rate limiting to avoid reading the request body
+        # which would consume the stream and make it unavailable in the endpoint handler
         if not database.available:
             logger.warning("Base de datos no disponible; se omite rate limiting.")
             return
 
-        client_ip = request.client.host or "unknown"
+        client_ip = request.client.host if request.client else "unknown"
         cutoff = datetime.utcnow() - timedelta(minutes=1)
 
         try:
@@ -86,7 +74,7 @@ def create_app() -> FastAPI:
                 count = result.scalar() or 0
 
                 if count >= config.RATE_LIMIT_PER_MINUTE:
-                    raise HTTPException(status_code=429, detail="Rate limit exceeded for session")
+                    raise HTTPException(status_code=429, detail="Rate limit exceeded. Please try again later.")
 
                 await session.execute(
                     rate_limits.insert().values(ip_address=client_ip, created_at=datetime.utcnow())

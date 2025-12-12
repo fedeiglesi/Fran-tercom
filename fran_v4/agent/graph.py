@@ -1,6 +1,7 @@
 """Definición del LangGraph para Fran 4.0."""
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -124,21 +125,31 @@ def build_agent_graph(
         await db.log_event(state["session_id"], "assistant", reply)
         return {**state, "reply": reply}
 
-    graph = StateGraph(AgentState)
-    graph.add_node("understand", understand)
-    graph.add_node("act", act)
-    graph.add_node("requery", requery)
-    graph.add_node("respond", respond)
-
     async def parse_message(state: AgentState) -> AgentState:
         if state.get("tool") != "update_cart":
             return state
 
         prompt = [
-            {"role": "system", "content": "Extrae la entidad de la consulta del usuario. Devuelve un JSON con 'action', 'item' y 'quantity'."},
+            {"role": "system", "content": "Extrae la entidad de la consulta del usuario. Devuelve SOLO un JSON válido con 'code', 'quantity', 'name' (opcional) y 'price_ars' (opcional)."},
             {"role": "user", "content": state["message"]},
         ]
-        parsed_item = await llm_service.chat(prompt, temperature=0.1, max_tokens=128)
+        parsed_item_str = await llm_service.chat(prompt, temperature=0.1, max_tokens=128)
+
+        # Parse the JSON string into a dictionary
+        try:
+            parsed_item = json.loads(parsed_item_str)
+        except json.JSONDecodeError:
+            # If parsing fails, try to extract JSON from the response
+            import re
+            json_match = re.search(r'\{.*\}', parsed_item_str, re.DOTALL)
+            if json_match:
+                try:
+                    parsed_item = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    parsed_item = {}
+            else:
+                parsed_item = {}
+
         await db.log_event(state["session_id"], "system", f"Mensaje parseado: {parsed_item}")
         return {**state, "parsed_item": parsed_item}
 
