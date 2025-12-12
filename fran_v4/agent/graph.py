@@ -12,7 +12,7 @@ from fran_v4.agent import tools
 from fran_v4.database import Database
 from fran_v4.llm import LLMService
 from fran_v4.memory import SessionMemory
-from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.search_engine import SearchEngine
 
 
 class AgentRequest(BaseModel):
@@ -52,12 +52,12 @@ def _build_plan_prompt(query: str) -> str:
 
 def build_agent_graph(
     llm: Optional[LLMService] = None,
-    search_engine: Optional[HybridSearchEngine] = None,
+    search_engine: Optional[SearchEngine] = None,
     database: Optional[Database] = None,
     memory: Optional[SessionMemory] = None,
 ) -> Any:
     llm_service = llm or LLMService()
-    search = search_engine or HybridSearchEngine()
+    search = search_engine or SearchEngine()
     db = database or Database()
     session_memory = memory or SessionMemory()
 

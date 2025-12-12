@@ -8,5 +8,5 @@ from fran_v4.api import app
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host=config.UVICORN_HOST, port=config.UVICORN_PORT)
+    uvicorn.run("fran_v4.api:app", host=config.UVICORN_HOST, port=config.UVICORN_PORT, reload=True)
 
