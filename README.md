@@ -2,8 +2,7 @@
 - **Fran 4.0** (FastAPI + PostgreSQL/pgvector + Redis + LangGraph) es ahora el entrypoint por defecto. El servidor se
   expone desde `fran_v4.api:app` y puede correrse localmente con `python run_server.py` o `uvicorn fran_v4.api:app --reload`.
 - El código de la versión **3.x** en Flask (`app.py`) ha sido movido a la carpeta `_legacy` para referencias históricas.
-- El catálogo se carga desde PostgreSQL mediante el proceso `release` de Railway o ejecutando manualmente
-  `python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing`.
+- El catálogo se carga automáticamente desde un archivo CSV en el arranque de la aplicación.
 
 ## Fran 4.0 (arquitectura asincrónica lista para producción)
 - **FastAPI** con uvicorn/gunicorn como servidor asíncrono preparado para Railway y contenedores.
@@ -59,17 +58,7 @@ Solo después de confirmar la conectividad de red tiene sentido revisar errores 
   - `DB_INIT_MAX_DELAY` (límite superior del backoff; por defecto `10.0`).
 
 ## Carga automática del catálogo en Railway
-El proceso de `release` en Railway ahora ejecuta el cargador dinámico que crea la tabla `catalogo3`
-a partir del CSV indicado. Configura la variable de entorno `CATALOGO_CSV_URL` con la URL raw del
-CSV (por ejemplo, la de GitHub) y, en cada deploy, Railway descargará ese CSV y recreará la tabla.
-
-Si quieres probar el cargador manualmente desde tu máquina o desde una consola en Railway, ejecuta:
-
-```bash
-python -m fran_v4.catalog_to_postgres "$CATALOGO_CSV_URL" --table-name catalogo3 --drop-existing
-```
-
-El cargador también acepta rutas locales a archivos CSV si prefieres cargar uno desde disco.
+El catálogo se carga automáticamente al iniciar la aplicación. La aplicación buscará un archivo CSV de catálogo definido en la variable de entorno `CATALOG_URL` o, si no está definida, usará el archivo `catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv` local.
 
 ### Configuración rápida para `Subir_catalogo`
 
