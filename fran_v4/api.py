@@ -16,7 +16,7 @@ from fran_v4 import config
 from fran_v4.agent import AgentRequest, AgentResponse, build_agent_graph, run_agent
 from fran_v4.database import Database, rate_limits
 from fran_v4.memory import SessionMemory
-from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.search_engine import SearchEngine
 from fran_v4.startup import initialize_catalog
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def create_app() -> FastAPI:
 
     database = Database()
     memory = SessionMemory(session_factory=database.session_factory)
-    search_engine = HybridSearchEngine()
+    search_engine = SearchEngine()
     agent_graph = build_agent_graph(search_engine=search_engine, database=database, memory=memory)
 
     async def rate_limiter(request: Request) -> None:
