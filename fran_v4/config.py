@@ -6,9 +6,12 @@ directamente. Esto facilita la migración y los tests.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Final
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+logger = logging.getLogger(__name__)
 
 
 OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
@@ -20,42 +23,40 @@ OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv(
 
 def _fix_database_url(url: str) -> str:
     """Convierte postgresql:// a postgresql+asyncpg:// para SQLAlchemy async.
-
     Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
     necesita el driver explícito postgresql+asyncpg://. También convierte
     el parámetro sslmode (usado por psycopg2) a ssl (usado por asyncpg).
     """
+    logger.info("Fixing database URL: %s", url)
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
     # Parsear la URL para manejar parámetros
     parsed = urlparse(url)
-
-    # Si no hay parámetros de query, retornar la URL tal cual
-    if not parsed.query:
-        return url
-
-    # Parsear los parámetros de query
     params = parse_qs(parsed.query, keep_blank_values=True)
 
-    # Si existe sslmode, eliminarlo ya que asyncpg no lo soporta
-    # asyncpg manejará SSL automáticamente cuando sea necesario
+    # Convertir sslmode a ssl para asyncpg. Railway necesita 'require'.
     if "sslmode" in params:
+        if params.get("sslmode") == ["require"]:
+            params["ssl"] = "require"
+        # Eliminar el parámetro original que no es soportado por asyncpg
         del params["sslmode"]
 
-    # Reconstruir la query string sin sslmode
-    new_query = urlencode(params, doseq=True) if params else ""
+    # Reconstruir la query string
+    new_query = urlencode(params, doseq=True)
 
     # Reconstruir la URL
-    new_url = urlunparse((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        parsed.params,
-        new_query,
-        parsed.fragment
-    ))
-
+    new_url = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            new_query,
+            parsed.fragment,
+        )
+    )
+    logger.info("Fixed database URL for asyncpg: %s", new_url)
     return new_url
 
 
