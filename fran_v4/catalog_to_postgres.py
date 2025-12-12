@@ -35,6 +35,9 @@ from fran_v4 import config
 
 PRICE_COLUMNS = {"precio_pesos", "precio_dolares"}
 CHUNK_SIZE = 500
+DEFAULT_CATALOG_PATH = (
+    Path(__file__).resolve().parent.parent / "catalogo_tercom_ultra_normalizado_faiss_v2_FINAL.csv"
+)
 
 
 def _parse_decimal(value: str | None) -> Decimal | None:
@@ -79,9 +82,17 @@ def _resolve_csv_source(csv_path: str) -> Iterator[Path]:
     """Devuelve una ruta local al CSV, descargándolo si es una URL."""
     expanded_path = os.path.expandvars(csv_path)
     if expanded_path.startswith("$"):
-        raise FileNotFoundError(
-            "No se encontró la ruta al CSV porque la variable de entorno no está definida"
-        )
+        fallback = DEFAULT_CATALOG_PATH
+        if fallback.exists():
+            print(
+                "No se encontró la variable de entorno para el CSV; "
+                f"se usará el archivo local {fallback}"
+            )
+            expanded_path = str(fallback)
+        else:
+            raise FileNotFoundError(
+                "No se encontró la ruta al CSV porque la variable de entorno no está definida"
+            )
 
     csv_path = expanded_path
 
@@ -191,8 +202,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "csv_path",
         nargs="?",
-        default=config.CATALOG_URL,
-        help="Ruta al CSV del catálogo (por defecto usa la variable de entorno CATALOG_URL)",
+        default=config.CATALOG_URL or str(DEFAULT_CATALOG_PATH),
+        help=(
+            "Ruta al CSV del catálogo (por defecto usa la variable de entorno CATALOG_URL "
+            "o el archivo local incluido en el proyecto)"
+        ),
     )
     parser.add_argument(
         "--table-name",
