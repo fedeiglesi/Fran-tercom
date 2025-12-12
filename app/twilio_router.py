@@ -29,10 +29,21 @@ def create_twilio_router(agent_graph: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail="Missing session_id or message")
 
         agent_request = AgentRequest(session_id=session_id, message=message)
-        agent_response: AgentResponse = await run_agent(agent_graph, agent_request)
+
+        fallback_reply = (
+            "¡Hola! Soy Fran 4.0. No pude procesar tu mensaje ahora mismo, "
+            "pero avísame qué producto buscás y te ayudo."
+        )
+
+        try:
+            agent_response: AgentResponse = await run_agent(agent_graph, agent_request)
+            reply_text = agent_response.reply.strip() or fallback_reply
+        except Exception:
+            logger.exception("Error al procesar el mensaje de WhatsApp")
+            reply_text = fallback_reply
 
         resp = MessagingResponse()
-        resp.message(agent_response.reply or "No pude generar una respuesta en este momento.")
+        resp.message(reply_text)
 
         return Response(content=str(resp), media_type="application/xml")
 
