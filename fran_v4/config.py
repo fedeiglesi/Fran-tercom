@@ -115,7 +115,52 @@ def _fix_database_url(url: str) -> str:
     return new_url
 
 
-DATABASE_URL: Final[str] = _fix_database_url(os.environ["DATABASE_URL"])
+def _build_database_url() -> str:
+    """Obtiene una URL de base de datos válida a partir de las variables de entorno.
+
+    - Si `DATABASE_URL` está completa se usa directamente.
+    - Si `DATABASE_URL` solo contiene parámetros (p. ej., `?ssl=require`), se
+      intenta construir la URL con `POSTGRES_*` y se anexan esos parámetros.
+    - Si no hay URL ni credenciales completas, se lanza un error descriptivo
+      indicando qué variables faltan.
+    """
+
+    raw_url = os.getenv("DATABASE_URL", "").strip()
+    suffix_only = raw_url.startswith("?")
+
+    if raw_url and not suffix_only:
+        return raw_url
+
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    host = os.getenv("POSTGRES_HOST")
+    dbname = os.getenv("POSTGRES_DB")
+    port = os.getenv("POSTGRES_PORT", "5432")
+
+    if all([user, password, host, dbname]):
+        base_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
+        return f"{base_url}{raw_url}" if suffix_only else base_url
+
+    missing = [
+        name
+        for name, value in (
+            ("POSTGRES_USER", user),
+            ("POSTGRES_PASSWORD", password),
+            ("POSTGRES_HOST", host),
+            ("POSTGRES_DB", dbname),
+        )
+        if not value
+    ]
+
+    raise ValueError(
+        "DATABASE_URL no configurada o incompleta. "
+        "Define DATABASE_URL o las variables POSTGRES_USER, POSTGRES_PASSWORD, "
+        "POSTGRES_HOST y POSTGRES_DB"
+        + (f" (faltan: {', '.join(missing)})" if missing else "")
+    )
+
+
+DATABASE_URL: Final[str] = _fix_database_url(_build_database_url())
 
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
