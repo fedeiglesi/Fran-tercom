@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Final
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -47,120 +47,45 @@ OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv(
 def _fix_database_url(url: str) -> str:
     """Convierte postgresql:// a postgresql+asyncpg:// para SQLAlchemy async.
     Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
-    necesita el driver explícito postgresql+asyncpg://. También convierte
-    el parámetro sslmode (usado por psycopg2) a ssl (usado por asyncpg).
-    Añade ssl=require si la base de datos no es local.
+    necesita el driver explícito postgresql+asyncpg://.
     """
     logger.info("Fixing database URL: %s", _mask_credentials(url))
     if url.startswith("postgresql://") and "+asyncpg" not in url:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-    # Parsear la URL para manejar parámetros
     parsed = urlparse(url)
-    params = parse_qs(parsed.query, keep_blank_values=True)
-
-    allowed_sslmodes = {
-        "disable",
-        "allow",
-        "prefer",
-        "require",
-        "verify-ca",
-        "verify-full",
-    }
-
-    # Normalizar parámetro de SSL para asyncpg, que usa "ssl" en lugar
-    # del "sslmode" de psycopg2.
-    ssl_value = None
-    if "sslmode" in params:
-        ssl_value = params.pop("sslmode")[0]
-    elif "ssl" in params:
-        # Aceptar "ssl" como booleano ("true") o como un sslmode válido.
-        raw_ssl = params.pop("ssl")[0]
-        if raw_ssl.lower() in ("true", "1", "on"):
-            ssl_value = "require"
-        elif raw_ssl.lower() in ("false", "0", "off", "disable"):
-            ssl_value = "disable"
-        else:
-            ssl_value = raw_ssl  # Asumir que es un sslmode válido
-
-    if ssl_value:
-        if ssl_value in allowed_sslmodes:
-            if ssl_value != "disable":
-                params["ssl"] = ssl_value
-        else:
-            logger.warning(
-                "Valor ssl/sslmode inválido '%s'; usando 'require' para compatibilidad",
-                ssl_value,
-            )
-            params["ssl"] = "require"
-    elif parsed.hostname not in ("localhost", "127.0.0.1"):
-        # Para entornos cloud, asegurar TLS explícitamente si no se ha definido.
-        params["ssl"] = "require"
-
-    # Reconstruir la query string
-    new_query = urlencode(params, doseq=True)
-
-    # Reconstruir la URL
-    new_url = urlunparse(
+    fixed_url = urlunparse(
         (
             parsed.scheme,
             parsed.netloc,
             parsed.path,
             parsed.params,
-            new_query,
+            parsed.query,
             parsed.fragment,
         )
     )
-    logger.info("Fixed database URL for asyncpg: %s", _mask_credentials(new_url))
-    return new_url
+    logger.info("Fixed database URL for asyncpg: %s", _mask_credentials(fixed_url))
+    return fixed_url
 
 
-def _build_database_url() -> str:
-    """Obtiene una URL de base de datos válida a partir de las variables de entorno.
+def _get_database_url() -> str:
+    """Obtiene DATABASE_URL desde el entorno o lanza un error descriptivo."""
 
-    - Si `DATABASE_URL` está completa se usa directamente.
-    - Si `DATABASE_URL` solo contiene parámetros (p. ej., `?ssl=require`), se
-      intenta construir la URL con `POSTGRES_*` y se anexan esos parámetros.
-    - Si no hay URL ni credenciales completas, se lanza un error descriptivo
-      indicando qué variables faltan.
-    """
+    try:
+        raw_url = os.environ["DATABASE_URL"].strip()
+    except KeyError:
+        raise RuntimeError(
+            "DATABASE_URL no está definida. Debe configurarse en las variables de entorno"
+        ) from None
 
-    raw_url = os.getenv("DATABASE_URL", "").strip()
-    suffix_only = raw_url.startswith("?")
-
-    if raw_url and not suffix_only:
-        return raw_url
-
-    user = os.getenv("POSTGRES_USER")
-    password = os.getenv("POSTGRES_PASSWORD")
-    host = os.getenv("POSTGRES_HOST")
-    dbname = os.getenv("POSTGRES_DB")
-    port = os.getenv("POSTGRES_PORT", "5432")
-
-    if all([user, password, host, dbname]):
-        base_url = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-        return f"{base_url}{raw_url}" if suffix_only else base_url
-
-    missing = [
-        name
-        for name, value in (
-            ("POSTGRES_USER", user),
-            ("POSTGRES_PASSWORD", password),
-            ("POSTGRES_HOST", host),
-            ("POSTGRES_DB", dbname),
+    if not raw_url:
+        raise RuntimeError(
+            "DATABASE_URL está vacía. Debe configurarse con la URL completa de la base de datos"
         )
-        if not value
-    ]
 
-    raise ValueError(
-        "DATABASE_URL no configurada o incompleta. "
-        "Define DATABASE_URL o las variables POSTGRES_USER, POSTGRES_PASSWORD, "
-        "POSTGRES_HOST y POSTGRES_DB"
-        + (f" (faltan: {', '.join(missing)})" if missing else "")
-    )
+    return raw_url
 
 
-DATABASE_URL: Final[str] = _fix_database_url(_build_database_url())
+DATABASE_URL: Final[str] = _fix_database_url(_get_database_url())
 
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 
