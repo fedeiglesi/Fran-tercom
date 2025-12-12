@@ -74,6 +74,8 @@ def build_agent_graph(
             context, best_score = await tools.update_cart(db, state["session_id"], state.get("parsed_item"))
         elif tool == "get_pricing":
             context, best_score = await tools.get_pricing(db, state["session_id"])
+        elif tool == "greet_user":
+            context, best_score = await tools.greet_user()
         else:
             context, best_score = await tools.search_products(search, state["message"], filters)
             await tools.persist_snapshot(session_memory, state["session_id"], context)
@@ -81,7 +83,10 @@ def build_agent_graph(
         return {**state, "context": context, "best_score": best_score}
 
     async def evaluate(state: AgentState) -> str:
-        if state.get("tool") != "search_products":
+        tool = state.get("tool")
+        if tool == "greet_user":
+            return "respond"
+        if tool != "search_products":
             return "respond"
         if state.get("best_score", 0.0) >= config.RELEVANCE_MIN_SCORE or state.get("attempts", 0) >= 1:
             return "respond"
@@ -104,6 +109,8 @@ def build_agent_graph(
             system_prompt = "Confirma la acción del carrito y muestra el estado actual de forma clara."
         elif tool == "get_pricing":
             system_prompt = "Presenta el resumen del carrito con el total de precios."
+        elif tool == "greet_user":
+            system_prompt = "Responde al saludo de forma amable y profesional."
         else:
             system_prompt = "Eres Fran 4.0, agente de ventas. Responde basado en el contexto."
 
