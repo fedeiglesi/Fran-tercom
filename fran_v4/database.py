@@ -19,6 +19,9 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import insert
+import ssl
+from sqlalchemy.engine.url import make_url
+
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from fran_v4 import config
@@ -115,7 +118,20 @@ class Database:
     def __init__(self, url: Optional[str] = None) -> None:
         self._logger = logging.getLogger(__name__)
         self.url = url or config.DATABASE_URL
-        self.engine: AsyncEngine = create_async_engine(self.url, future=True, echo=False)
+
+        url_obj = make_url(self.url)
+        connect_args = {}
+
+        if url_obj.query.get('sslmode'):
+            ssl_mode = url_obj.query['sslmode']
+            if ssl_mode != 'disable':
+                ctx = ssl.create_default_context()
+                connect_args["ssl"] = ctx
+
+            # Eliminar sslmode de la query para evitar el error
+            url_obj = url_obj._replace(query={k: v for k, v in url_obj.query.items() if k != 'sslmode'})
+
+        self.engine: AsyncEngine = create_async_engine(url_obj, future=True, echo=False, connect_args=connect_args)
         self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
         )

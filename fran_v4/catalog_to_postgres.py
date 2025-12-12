@@ -27,6 +27,8 @@ from typing import Iterable, Iterator, List, Mapping
 from contextlib import contextmanager
 from urllib.parse import urlparse
 from urllib.request import urlopen
+import ssl
+from sqlalchemy.engine.url import make_url
 
 from sqlalchemy import Column, MetaData, Numeric, String, Table, Text, insert, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
@@ -176,7 +178,19 @@ async def ingest_catalog(
             sanitized_rows = [_sanitize_row(row) for row in reader]
 
     database_url = _to_async_database_url(config.DATABASE_URL)
-    engine = create_async_engine(database_url, echo=False, future=True)
+
+    url_obj = make_url(database_url)
+    connect_args = {}
+
+    if url_obj.query.get('sslmode'):
+        ssl_mode = url_obj.query['sslmode']
+        if ssl_mode != 'disable':
+            ctx = ssl.create_default_context()
+            connect_args["ssl"] = ctx
+
+        url_obj = url_obj._replace(query={k: v for k, v in url_obj.query.items() if k != 'sslmode'})
+
+    engine = create_async_engine(url_obj, echo=False, future=True, connect_args=connect_args)
     table = _build_table(headers, table_name)
 
     await _run_with_retries(
