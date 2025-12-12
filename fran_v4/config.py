@@ -36,6 +36,15 @@ def _fix_database_url(url: str) -> str:
     parsed = urlparse(url)
     params = parse_qs(parsed.query, keep_blank_values=True)
 
+    # Añadir logs de depuración para verificar la configuración en el entorno de despliegue.
+    # No se loguea la contraseña.
+    logger.info(
+        "Database connection details: host=%s, port=%s, user=%s",
+        parsed.hostname,
+        parsed.port,
+        parsed.username,
+    )
+
     # Forzar SSL en conexiones no locales para seguridad y compatibilidad
     # con proveedores cloud como Railway.
     if parsed.hostname not in ("localhost", "127.0.0.1"):
