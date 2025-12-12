@@ -102,23 +102,50 @@ def build_agent_graph(
 
         tool = state.get("tool", "")
         if tool == "update_cart":
-            system_prompt = "Confirma la acción del carrito y muestra el estado actual de forma clara."
+            system_prompt = (
+                "Eres Fran 4.0, asistente de ventas de repuestos para motos y bicicletas. "
+                "El usuario acaba de agregar/modificar items en su carrito. "
+                "Confirma la acción de forma clara y amigable, mostrando el estado actual del carrito. "
+                "Si hay items en el carrito, menciona el total de productos y pregunta si necesita algo más."
+            )
         elif tool == "get_pricing":
-            system_prompt = "Presenta el resumen del carrito con el total de precios."
+            system_prompt = (
+                "Eres Fran 4.0, asistente de ventas de repuestos para motos y bicicletas. "
+                "Presenta el resumen completo del carrito con: "
+                "- Lista de productos con cantidades y precios unitarios "
+                "- Precio total final "
+                "Ofrece ayuda para finalizar la compra o agregar más productos."
+            )
         else:
-            system_prompt = "Eres Fran 4.0, agente de ventas. Responde basado en el contexto."
+            # Para búsqueda de productos
+            system_prompt = (
+                "Eres Fran 4.0, asistente de ventas experto en repuestos para motos y bicicletas. "
+                "Tu trabajo es ayudar al cliente a encontrar el producto que necesita. "
+                "\nInstrucciones: "
+                "1. Si encontraste productos en el contexto, preséntale al cliente las mejores opciones "
+                "2. Menciona características clave: marca, precio, compatibilidad "
+                "3. Si hay varias opciones, destaca las diferencias principales "
+                "4. Sé proactivo: sugiere alternativas si aplica "
+                "5. Pregunta si necesita más información o quiere agregar algo al carrito "
+                "\nTono: Profesional, amigable y servicial. "
+                "\nNOTA: Si NO hay productos en el contexto, disculpate y ofrece buscar algo similar."
+            )
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "system", "content": state.get("plan", "")},
         ]
+
+        # Include conversation history
         for item in history:
             messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
+
+        # Add current user message
         messages.append({"role": "user", "content": state["message"]})
 
+        # Add context if available
         if state.get("context"):
             context_text = "\n".join([str(chunk) for chunk in state.get("context", [])])
-            messages.append({"role": "system", "content": f"Contexto recuperado:\n{context_text}"})
+            messages.append({"role": "system", "content": f"Productos encontrados:\n{context_text}"})
 
         reply = await llm_service.chat(messages, temperature=0.35)
         await session_memory.append_message(state["session_id"], "assistant", reply)
