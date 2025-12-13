@@ -14,6 +14,7 @@ class SearchEngine:
     def __init__(self, database_url: Optional[str] = None) -> None:
         self.database_url = self._normalize_db_url(database_url or config.DATABASE_URL)
         self._pool: Optional[asyncpg.Pool] = None
+        self.available: bool = True
 
     @staticmethod
     def _normalize_db_url(url: str) -> str:
@@ -21,9 +22,16 @@ class SearchEngine:
             return url.replace("postgresql+asyncpg://", "postgresql://", 1)
         return url
 
-    async def _get_pool(self) -> asyncpg.Pool:
+    async def _get_pool(self) -> Optional[asyncpg.Pool]:
         if self._pool is None:
-            self._pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
+            try:
+                self._pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
+                self.available = True
+                logger.info("Conexión a PostgreSQL establecida para SearchEngine")
+            except Exception as exc:
+                self.available = False
+                logger.warning("No se pudo conectar a PostgreSQL para búsqueda: %s", exc)
+                return None
         return self._pool
 
     async def dispose(self) -> None:
@@ -50,46 +58,55 @@ class SearchEngine:
     async def search(
         self, query_text: str, limit: int = 10, filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        filter_clause, filter_values = self._build_filters(filters)
         pool = await self._get_pool()
-        # Use simple_query to avoid issues with parameter indexes
-        ts_query = " | ".join(query_text.replace("'", " ").split())
+        if pool is None:
+            logger.warning("Base de datos no disponible; retornando resultados vacíos para búsqueda")
+            return []
 
-        # Parameters need to be passed correctly
-        # The ts_query is $1, limit is $2, and filter_values start from $3
+        try:
+            filter_clause, filter_values = self._build_filters(filters)
+            # Use simple_query to avoid issues with parameter indexes
+            ts_query = " | ".join(query_text.replace("'", " ").split())
 
-        sql_query = f"""
-            SELECT
-                codigo,
-                descripcion,
-                precio_pesos,
-                familia_nombre,
-                proveedor_nombre,
-                ts_rank_cd(
-                    to_tsvector('spanish', coalesce(descripcion_normalizada, '')),
-                    to_tsquery('spanish', $1)
-                ) AS rank
-            FROM products
-            WHERE
-                to_tsvector('spanish', coalesce(descripcion_normalizada, '')) @@ to_tsquery('spanish', $1)
-                {filter_clause.replace('$', f'${len(filter_values) + 2}')}
-            ORDER BY rank DESC
-            LIMIT $2
-        """
+            # Parameters need to be passed correctly
+            # The ts_query is $1, limit is $2, and filter_values start from $3
 
-        params = [ts_query, limit] + filter_values
+            sql_query = f"""
+                SELECT
+                    codigo,
+                    descripcion,
+                    precio_pesos,
+                    familia_nombre,
+                    proveedor_nombre,
+                    ts_rank_cd(
+                        to_tsvector('spanish', coalesce(descripcion_normalizada, '')),
+                        to_tsquery('spanish', $1)
+                    ) AS rank
+                FROM products
+                WHERE
+                    to_tsvector('spanish', coalesce(descripcion_normalizada, '')) @@ to_tsquery('spanish', $1)
+                    {filter_clause.replace('$', f'${len(filter_values) + 2}')}
+                ORDER BY rank DESC
+                LIMIT $2
+            """
 
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(sql_query, *params)
+            params = [ts_query, limit] + filter_values
 
-        return [
-            {
-                "codigo": row["codigo"],
-                "descripcion": row["descripcion"],
-                "precio_pesos": float(row["precio_pesos"]) if row["precio_pesos"] is not None else None,
-                "familia": row["familia_nombre"],
-                "proveedor": row["proveedor_nombre"],
-                "score": float(row["rank"] * 100) if row["rank"] is not None else 0.0,
-            }
-            for row in rows
-        ]
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(sql_query, *params)
+
+            return [
+                {
+                    "codigo": row["codigo"],
+                    "descripcion": row["descripcion"],
+                    "precio_pesos": float(row["precio_pesos"]) if row["precio_pesos"] is not None else None,
+                    "familia": row["familia_nombre"],
+                    "proveedor": row["proveedor_nombre"],
+                    "score": float(row["rank"] * 100) if row["rank"] is not None else 0.0,
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.error("Error durante búsqueda en PostgreSQL: %s", exc)
+            self.available = False
+            return []

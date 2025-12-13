@@ -112,6 +112,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         await memory.close()
+        await search_engine.dispose()
         await database.dispose()
 
     @app.get("/health")
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
             "components": {
                 "fastapi_async": True,
                 "postgresql": database.available,
+                "search_engine": search_engine.available,
                 "langgraph": True,
             },
         }

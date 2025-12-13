@@ -59,7 +59,8 @@ def build_agent_graph(
     llm_service = llm or LLMService()
     search = search_engine or SearchEngine()
     db = database or Database()
-    session_memory = memory or SessionMemory()
+    # If memory is not provided, create one using the database's session_factory
+    session_memory = memory or SessionMemory(session_factory=db.session_factory)
 
     async def understand(state: AgentState) -> AgentState:
         """
