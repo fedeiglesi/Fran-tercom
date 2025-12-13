@@ -10,7 +10,9 @@ from fran_v4.search_engine import SearchEngine
 
 
 def choose_tool(message: str) -> str:
-    text = message.lower()
+    text = message.lower().strip()
+    if text in ["hola", "buenas", "buenos dias", "buen dia"]:
+        return "greet_user"
     if any(keyword in text for keyword in ["carrito", "agrega", "agregar", "sumar"]):
         return "update_cart"
     if "precio" in text or "total" in text:
@@ -50,3 +52,9 @@ async def persist_snapshot(memory: SessionMemory, session_id: str, results: List
     if results:
         await memory.persist_search_snapshot(session_id, results)
 
+
+async def greet_user() -> Tuple[List[Dict[str, Any]], float]:
+    greeting = {
+        "message": "Hola, soy Fran, tu asistente de ventas de KMF. ¿En qué puedo ayudarte hoy?"
+    }
+    return [greeting], 100.0

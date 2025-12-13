@@ -85,6 +85,8 @@ def build_agent_graph(
             context, best_score = await tools.update_cart(db, state["session_id"], state.get("parsed_item"))
         elif tool == "get_pricing":
             context, best_score = await tools.get_pricing(db, state["session_id"])
+        elif tool == "greet_user":
+            context, best_score = await tools.greet_user()
         else:
             context, best_score = await tools.search_products(search, state["message"], filters)
             await tools.persist_snapshot(session_memory, state["session_id"], context)
@@ -92,7 +94,10 @@ def build_agent_graph(
         return {**state, "context": context, "best_score": best_score}
 
     async def evaluate(state: AgentState) -> str:
-        if state.get("tool") != "search_products":
+        tool = state.get("tool")
+        if tool == "greet_user":
+            return "respond"
+        if tool != "search_products":
             return "respond"
 
         # Si es un saludo o consulta general, no hacer requery
@@ -126,13 +131,9 @@ def build_agent_graph(
                 "Si hay items en el carrito, menciona el total de productos y pregunta si necesita algo más."
             )
         elif tool == "get_pricing":
-            system_prompt = (
-                "Eres Fran 4.0, asistente de ventas de repuestos para motos y bicicletas. "
-                "Presenta el resumen completo del carrito con: "
-                "- Lista de productos con cantidades y precios unitarios "
-                "- Precio total final "
-                "Ofrece ayuda para finalizar la compra o agregar más productos."
-            )
+            system_prompt = "Presenta el resumen del carrito con el total de precios."
+        elif tool == "greet_user":
+            system_prompt = "Responde al saludo de forma amable y profesional."
         else:
             # Para búsqueda de productos
             system_prompt = (
