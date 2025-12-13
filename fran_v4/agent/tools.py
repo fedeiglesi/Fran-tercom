@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 from fran_v4 import config
 from fran_v4.database import Database
 from fran_v4.memory import SessionMemory
-from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.search_engine import SearchEngine
 
 
 def choose_tool(message: str) -> str:
@@ -21,9 +21,9 @@ def choose_tool(message: str) -> str:
 
 
 async def search_products(
-    search_engine: HybridSearchEngine, query: str, filters: Dict[str, Any]
+    search_engine: SearchEngine, query: str, filters: Dict[str, Any]
 ) -> Tuple[List[Dict[str, Any]], float]:
-    results = await search_engine.hybrid_search(query_text=query, limit=config.MAX_SEARCH_RESULTS, filters=filters)
+    results = await search_engine.search(query_text=query, limit=config.MAX_SEARCH_RESULTS, filters=filters)
     best_score = max([item.get("score", 0.0) for item in results], default=0.0)
     return results, best_score
 

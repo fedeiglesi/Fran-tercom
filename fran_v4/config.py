@@ -6,8 +6,35 @@ directamente. Esto facilita la migración y los tests.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Final
+from urllib.parse import urlparse, urlunparse
+
+logger = logging.getLogger(__name__)
+
+
+def _mask_credentials(url: str) -> str:
+    """Evita filtrar contraseñas en logs."""
+    parsed = urlparse(url)
+    if parsed.password is None:
+        return url
+    redacted_netloc = parsed.netloc.replace(parsed.password, "***")
+    return urlunparse(
+        (
+            parsed.scheme,
+            redacted_netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def mask_database_url(url: str) -> str:
+    """Wrapper público para enmascarar credenciales al loguear URLs."""
+    return _mask_credentials(url)
 
 
 OPENAI_API_KEY: Final[str] = os.getenv("OPENAI_API_KEY", "test-key")
@@ -19,21 +46,46 @@ OPENAI_EMBEDDING_MODEL: Final[str] = os.getenv(
 
 def _fix_database_url(url: str) -> str:
     """Convierte postgresql:// a postgresql+asyncpg:// para SQLAlchemy async.
-
     Railway y otros proveedores usan postgresql:// pero SQLAlchemy async
     necesita el driver explícito postgresql+asyncpg://.
     """
+    logger.info("Fixing database URL: %s", _mask_credentials(url))
     if url.startswith("postgresql://") and "+asyncpg" not in url:
-        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    return url
-
-
-DATABASE_URL: Final[str] = _fix_database_url(
-    os.getenv(
-        "DATABASE_URL",
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/fran",
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    parsed = urlparse(url)
+    fixed_url = urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
     )
-)
+    logger.info("Fixed database URL for asyncpg: %s", _mask_credentials(fixed_url))
+    return fixed_url
+
+
+def _get_database_url() -> str:
+    """Obtiene DATABASE_URL desde el entorno o lanza un error descriptivo."""
+
+    try:
+        raw_url = os.environ["DATABASE_URL"].strip()
+    except KeyError:
+        raise RuntimeError(
+            "DATABASE_URL no está definida. Debe configurarse en las variables de entorno"
+        ) from None
+
+    if not raw_url:
+        raise RuntimeError(
+            "DATABASE_URL está vacía. Debe configurarse con la URL completa de la base de datos"
+        )
+
+    return raw_url
+
+
+DATABASE_URL: Final[str] = _fix_database_url(_get_database_url())
 
 SESSION_TTL_SECONDS: Final[int] = int(os.getenv("SESSION_TTL_SECONDS", "86400"))
 

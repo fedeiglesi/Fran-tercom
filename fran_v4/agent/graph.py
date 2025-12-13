@@ -1,6 +1,7 @@
 """Definición del LangGraph para Fran 4.0."""
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -11,7 +12,7 @@ from fran_v4.agent import tools
 from fran_v4.database import Database
 from fran_v4.llm import LLMService
 from fran_v4.memory import SessionMemory
-from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.search_engine import SearchEngine
 
 
 class AgentRequest(BaseModel):
@@ -51,16 +52,26 @@ def _build_plan_prompt(query: str) -> str:
 
 def build_agent_graph(
     llm: Optional[LLMService] = None,
-    search_engine: Optional[HybridSearchEngine] = None,
+    search_engine: Optional[SearchEngine] = None,
     database: Optional[Database] = None,
     memory: Optional[SessionMemory] = None,
 ) -> Any:
     llm_service = llm or LLMService()
-    search = search_engine or HybridSearchEngine()
+    search = search_engine or SearchEngine()
     db = database or Database()
-    session_memory = memory or SessionMemory()
+    # If memory is not provided, create one using the database's session_factory
+    session_memory = memory or SessionMemory(session_factory=db.session_factory)
 
     async def understand(state: AgentState) -> AgentState:
+        """
+        Analiza el mensaje del usuario y define el plan y herramienta a ejecutar.
+
+        Args:
+            state: Estado actual del agente con el mensaje del usuario.
+
+        Returns:
+            Estado actualizado con el plan generado y la herramienta seleccionada.
+        """
         await session_memory.append_message(state["session_id"], "user", state["message"])
         plan = _build_plan_prompt(state["message"])
         tool = tools.choose_tool(state["message"])
@@ -88,6 +99,13 @@ def build_agent_graph(
             return "respond"
         if tool != "search_products":
             return "respond"
+
+        # Si es un saludo o consulta general, no hacer requery
+        message_lower = state.get("message", "").lower()
+        greetings = ["hola", "buenas", "buenos días", "buenas tardes", "hey", "ayuda", "gracias"]
+        if any(greeting in message_lower for greeting in greetings):
+            return "respond"
+
         if state.get("best_score", 0.0) >= config.RELEVANCE_MIN_SCORE or state.get("attempts", 0) >= 1:
             return "respond"
         return "requery"
@@ -106,46 +124,77 @@ def build_agent_graph(
 
         tool = state.get("tool", "")
         if tool == "update_cart":
-            system_prompt = "Confirma la acción del carrito y muestra el estado actual de forma clara."
+            system_prompt = (
+                "Eres Fran 4.0, asistente de ventas de repuestos para motos y bicicletas. "
+                "El usuario acaba de agregar/modificar items en su carrito. "
+                "Confirma la acción de forma clara y amigable, mostrando el estado actual del carrito. "
+                "Si hay items en el carrito, menciona el total de productos y pregunta si necesita algo más."
+            )
         elif tool == "get_pricing":
             system_prompt = "Presenta el resumen del carrito con el total de precios."
         elif tool == "greet_user":
             system_prompt = "Responde al saludo de forma amable y profesional."
         else:
-            system_prompt = "Eres Fran 4.0, agente de ventas. Responde basado en el contexto."
+            # Para búsqueda de productos
+            system_prompt = (
+                "Eres Fran 4.0, asistente de ventas experto en repuestos para motos y bicicletas. "
+                "Tu trabajo es ayudar al cliente a encontrar el producto que necesita. "
+                "\nInstrucciones: "
+                "1. Si encontraste productos en el contexto, preséntale al cliente las mejores opciones "
+                "2. Menciona características clave: marca, precio, compatibilidad "
+                "3. Si hay varias opciones, destaca las diferencias principales "
+                "4. Sé proactivo: sugiere alternativas si aplica "
+                "5. Pregunta si necesita más información o quiere agregar algo al carrito "
+                "\nTono: Profesional, amigable y servicial. "
+                "\nNOTA: Si NO hay productos en el contexto, disculpate y ofrece buscar algo similar."
+            )
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "system", "content": state.get("plan", "")},
         ]
+
+        # Include conversation history
         for item in history:
             messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
+
+        # Add current user message
         messages.append({"role": "user", "content": state["message"]})
 
+        # Add context if available
         if state.get("context"):
             context_text = "\n".join([str(chunk) for chunk in state.get("context", [])])
-            messages.append({"role": "system", "content": f"Contexto recuperado:\n{context_text}"})
+            messages.append({"role": "system", "content": f"Productos encontrados:\n{context_text}"})
 
         reply = await llm_service.chat(messages, temperature=0.35)
         await session_memory.append_message(state["session_id"], "assistant", reply)
         await db.log_event(state["session_id"], "assistant", reply)
         return {**state, "reply": reply}
 
-    graph = StateGraph(AgentState)
-    graph.add_node("understand", understand)
-    graph.add_node("act", act)
-    graph.add_node("requery", requery)
-    graph.add_node("respond", respond)
-
     async def parse_message(state: AgentState) -> AgentState:
         if state.get("tool") != "update_cart":
             return state
 
         prompt = [
-            {"role": "system", "content": "Extrae la entidad de la consulta del usuario. Devuelve un JSON con 'action', 'item' y 'quantity'."},
+            {"role": "system", "content": "Extrae la entidad de la consulta del usuario. Devuelve SOLO un JSON válido con 'code', 'quantity', 'name' (opcional) y 'price_ars' (opcional)."},
             {"role": "user", "content": state["message"]},
         ]
-        parsed_item = await llm_service.chat(prompt, temperature=0.1, max_tokens=128)
+        parsed_item_str = await llm_service.chat(prompt, temperature=0.1, max_tokens=128)
+
+        # Parse the JSON string into a dictionary
+        try:
+            parsed_item = json.loads(parsed_item_str)
+        except json.JSONDecodeError:
+            # If parsing fails, try to extract JSON from the response
+            import re
+            json_match = re.search(r'\{.*\}', parsed_item_str, re.DOTALL)
+            if json_match:
+                try:
+                    parsed_item = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    parsed_item = {}
+            else:
+                parsed_item = {}
+
         await db.log_event(state["session_id"], "system", f"Mensaje parseado: {parsed_item}")
         return {**state, "parsed_item": parsed_item}
 

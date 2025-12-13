@@ -28,6 +28,10 @@ class SessionMemory:
         if session_factory is not None:
             self.session_factory = session_factory
         else:
+            self._logger.info(
+                "Creando SessionMemory con base de datos: %s",
+                config.mask_database_url(config.DATABASE_URL),
+            )
             self._engine = create_async_engine(config.DATABASE_URL, future=True, echo=False)
             self.session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
         self._fallback_store: Dict[str, Dict[str, Any]] = {}
@@ -79,17 +83,19 @@ class SessionMemory:
         limit = max(1, min(limit, 50))
         try:
             async with self.session_factory() as session:
+                # Order by descending to get most recent messages first, then reverse
                 result = await session.execute(
                     select(session_messages.c.role, session_messages.c.content)
                     .where(session_messages.c.session_id == session_id)
-                    .order_by(session_messages.c.created_at.asc())
+                    .order_by(session_messages.c.created_at.desc())
                     .limit(limit)
                 )
                 rows = result.fetchall()
                 history: List[Dict[str, Any]] = []
                 for row in rows:
                     history.append({"role": row.role, "content": row.content})
-                return history[-limit:]
+                # Reverse to get chronological order (oldest to newest)
+                return list(reversed(history))
         except SQLAlchemyError as exc:  # pragma: no cover - infra fallback
             self._logger.warning(
                 "No se pudo obtener historial desde PostgreSQL (%s); usando fallback en memoria.",

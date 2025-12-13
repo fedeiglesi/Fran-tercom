@@ -115,6 +115,7 @@ class Database:
     def __init__(self, url: Optional[str] = None) -> None:
         self._logger = logging.getLogger(__name__)
         self.url = url or config.DATABASE_URL
+        self._logger.info("Inicializando Database con URL: %s", config.mask_database_url(self.url))
         self.engine: AsyncEngine = create_async_engine(self.url, future=True, echo=False)
         self.session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self.engine, expire_on_commit=False
@@ -137,6 +138,7 @@ class Database:
         attempt = 0
         while True:
             try:
+                self._logger.info("Creando tablas en la base de datos...")
                 async with self.engine.begin() as conn:
                     await conn.run_sync(metadata.create_all)
                 self.available = True
