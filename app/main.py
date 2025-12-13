@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fran_v4.agent import build_agent_graph
 from fran_v4.database import Database
 from fran_v4.memory import SessionMemory
-from fran_v4.search_engine import HybridSearchEngine
+from fran_v4.search_engine import SearchEngine
 from fran_v4.startup import initialize_catalog
 
 from .twilio_router import create_twilio_router
@@ -27,7 +27,7 @@ def create_app() -> FastAPI:
 
     database = Database()
     memory = SessionMemory(session_factory=database.session_factory)
-    search_engine = HybridSearchEngine()
+    search_engine = SearchEngine()
     agent_graph = build_agent_graph(
         search_engine=search_engine, database=database, memory=memory
     )
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         await memory.close()
+        await search_engine.dispose()
         await database.dispose()
 
     @app.get("/")
