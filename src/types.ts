@@ -8,6 +8,8 @@ export interface Product {
   stock?: number;
   _normName?: string;
   _normCode?: string;
+  _tokens?: string[];
+  _ngrams?: string[];
 }
 
 export interface ChatMessage {

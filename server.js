@@ -24,6 +24,16 @@ REGLAS:
 3. Sé breve y servicial. Si te saludan, saludá con onda.`;
 
 const STOP_WORDS = new Set(['para', 'de', 'el', 'la', 'con', 'los', 'las', 'y', 'un', 'una', 'moto', 'motos', 'en', 'del']);
+const SYNONYM_MAP = {
+  ruleman: 'rodamiento',
+  rulemanes: 'rodamientos',
+  goma: 'cubierta',
+  gomas: 'cubiertas',
+  valvula: 'valvula',
+  valvulas: 'valvulas',
+  focos: 'lamparas',
+  foco: 'lampara'
+};
 
 function normalize(text = '') {
   return text
@@ -41,20 +51,78 @@ function tokenize(text) {
     .filter((token) => token.length > 0 && !STOP_WORDS.has(token));
 }
 
+function expandWithSynonyms(tokens = []) {
+  const expanded = new Set();
+  for (const token of tokens) {
+    expanded.add(token);
+    if (SYNONYM_MAP[token]) {
+      expanded.add(SYNONYM_MAP[token]);
+    }
+  }
+  return Array.from(expanded);
+}
+
+function toNgrams(text, n = 3) {
+  const clean = normalize(text).replace(/\s+/g, '');
+  const grams = [];
+  for (let i = 0; i <= clean.length - n; i += 1) {
+    grams.push(clean.slice(i, i + n));
+  }
+  return grams;
+}
+
+function enrichProduct(p) {
+  return {
+    ...p,
+    _normName: normalize(p.name),
+    _normCode: normalize(p.code),
+    _tokens: expandWithSynonyms(tokenize(p.name)),
+    _ngrams: toNgrams(p.name)
+  };
+}
+
 function scoreProduct(query, product) {
   const normQuery = normalize(query);
-  const tokens = tokenize(query);
+  const queryTokens = expandWithSynonyms(tokenize(query));
   const code = product._normCode || normalize(product.code);
   const name = product._normName || normalize(product.name);
+  const tokens = product._tokens || expandWithSynonyms(tokenize(product.name));
+  const ngrams = product._ngrams || toNgrams(product.name);
 
   let score = 0;
 
-  if (code === normQuery) score += 50000;
-  if (normQuery && code.includes(normQuery)) score += 15000;
+  // Código exacto
+  if (code === normQuery && normQuery.length > 0) {
+    score += 50000;
+  }
 
-  for (const token of tokens) {
-    if (name.includes(token)) score += 2000;
-    if (code.startsWith(token)) score += 500;
+  const tokenHits = [];
+  for (const token of queryTokens) {
+    if (tokens.some((t) => t === token)) {
+      score += 2000;
+      tokenHits.push(token);
+    } else if (tokens.some((t) => t === SYNONYM_MAP[token])) {
+      score += 1500;
+      tokenHits.push(token);
+    }
+    if (code.startsWith(token)) {
+      score += 500;
+    }
+  }
+
+  // Bono si todas las palabras aparecen
+  if (tokenHits.length === queryTokens.length && queryTokens.length > 0) {
+    score += 5000;
+  }
+
+  // Bono de n-gramas para fuzzy
+  const queryNgrams = toNgrams(query);
+  const overlap = queryNgrams.filter((g) => ngrams.includes(g));
+  score += overlap.length * 500;
+
+  // Fallback: coincidencia parcial de string completo
+  if (!tokenHits.length && name.includes(normQuery) && normQuery.length > 0) {
+    score += 15000;
   }
 
   return score;
@@ -127,11 +195,7 @@ app.post('/api/catalog', (req, res) => {
       return res.status(400).json({ success: false, message: 'Falta el catálogo para sincronizar' });
     }
     // Pre-indexado para acelerar búsquedas
-    products = newProducts.map((p) => ({
-      ...p,
-      _normName: normalize(p.name),
-      _normCode: normalize(p.code)
-    }));
+    products = newProducts.map((p) => enrichProduct(p));
     return res.json({ success: true, count: products.length });
   } catch (error) {
     console.error('Error en /api/catalog', error);
