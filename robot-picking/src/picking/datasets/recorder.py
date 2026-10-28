@@ -91,6 +91,7 @@ class EpisodeRecorder:
             "extra.target_joints": np.asarray(after.joints, np.float32),
             "extra.object_pose": np.concatenate([d.privileged["object_pos"], [np.cos(d.privileged["object_yaw"] / 2), 0, 0, np.sin(d.privileged["object_yaw"] / 2)]]).astype(np.float32),
             "extra.safety_rejected": np.array([0.0 if d.safe_action is not None else 1.0], np.float32),
+            "extra.corrected": np.array([1.0 if d.info.get("corrected") else 0.0], np.float32),
         }
         for cam in self.camera_names:
             frame[f"observation.images.{cam}"] = obs.images[cam]

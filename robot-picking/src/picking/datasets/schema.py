@@ -34,4 +34,5 @@ def build_features(camera_names: list[str], image_hw: tuple[int, int], with_dept
     feats["extra.target_joints"] = {"dtype": "float32", "shape": (6,), "names": JOINT_NAMES}
     feats["extra.object_pose"] = {"dtype": "float32", "shape": (7,), "names": POSE7_NAMES}
     feats["extra.safety_rejected"] = {"dtype": "float32", "shape": (1,), "names": None}
+    feats["extra.corrected"] = {"dtype": "float32", "shape": (1,), "names": None}  # 1 = human override (DAgger)
     return feats
