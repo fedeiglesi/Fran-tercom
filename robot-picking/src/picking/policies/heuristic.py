@@ -54,6 +54,8 @@ class ScriptedPickPlace(Policy):
         self._done = False
         self.phase_log: list[str] = []
         self.lifted_z = None
+        self.stall = 0
+        self._last_tcp = None
 
     def done(self) -> bool:
         return self._done
@@ -100,7 +102,13 @@ class ScriptedPickPlace(Policy):
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])
             a = self._move(tcp, tgt, 0.0, self.grasp_yaw, R_cur)
-            if np.linalg.norm(tgt - tcp) < 0.003:
+            # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
+            # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
+            progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
+            self.stall = 0 if progress else self.stall + 1
+            self._last_tcp = tcp.copy()
+            if np.linalg.norm(tgt - tcp) < 0.003 or self.stall >= 6:
+                self.stall = 0
                 self._next("close")
             return a
         if ph == "close":

@@ -17,6 +17,10 @@ class Policy(abc.ABC):
     def act(self, obs: Observation) -> Action | None:
         """Return the next action, or None to signal HOLD (e.g. remote timeout)."""
 
+    def needs_frame_now(self) -> bool:
+        """Perception-on-demand: return False when the policy can act without a new camera frame."""
+        return True
+
     def done(self) -> bool:
         """Optional: policy declares the task complete (used by scripted policies)."""
         return False

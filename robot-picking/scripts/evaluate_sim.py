@@ -32,6 +32,14 @@ def make_policy(args, cfg, safety: SafetyFilter):
         from picking.policies.heuristic import ScriptedPickPlace
 
         return ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 7))
+    if args.policy == "perception":
+        from picking.calibration.extrinsics import load_calibration
+        from picking.policies.perception_scripted import PerceptionScriptedPickPlace
+
+        T = load_calibration(args.calibration) if args.calibration else None
+        pol = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=cfg["camera"]["name"], color=args.color, object_id=cfg["task"]["target_object"], lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None)
+        pol.T_override = T
+        return pol
     if args.policy == "act":
         from picking.policies.act_policy import ACTPolicyWrapper
 
@@ -48,7 +56,9 @@ def main() -> int:
     ap.add_argument("--config", default="sim/level1_cube.yaml")
     ap.add_argument("--safety", default="safety/sim_default.yaml")
     ap.add_argument("--override", default=None, help="JSON dict merged into the config")
-    ap.add_argument("--policy", default="heuristic", choices=["heuristic", "act", "remote"])
+    ap.add_argument("--policy", default="heuristic", choices=["heuristic", "perception", "act", "remote"])
+    ap.add_argument("--calibration", default=None, help="perception policy: calibration YAML (default: sim ground truth)")
+    ap.add_argument("--color", default="red")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--server-url", default="ws://127.0.0.1:8765")
     ap.add_argument("--device", default="cpu")
@@ -72,6 +82,8 @@ def main() -> int:
     adapter = SimRobotAdapter(env)
     safety = SafetyFilter(safety_cfg)
     policy = make_policy(args, cfg, safety)
+    if args.policy == "perception" and getattr(policy, "T_override", None) is not None:
+        env.T_base_camera = policy.T_override
     image_size = tuple(cfg["camera"].get("policy_image_size", [96, 96]))
     ts = time.strftime("%Y%m%d_%H%M%S")
     out = Path(args.out) if args.out else project_root() / "reports" / "eval" / f"{ts}_{args.policy}{('_' + args.tag) if args.tag else ''}"
@@ -80,7 +92,7 @@ def main() -> int:
     t0 = time.time()
     for i in range(args.episodes):
         seed = args.seed_start + i
-        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size)
+        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, full_frame=(args.policy == "perception"))
         results.append(r)
         if (i + 1) % args.log_every == 0 or not r.success:
             sr = sum(x.success for x in results) / len(results)

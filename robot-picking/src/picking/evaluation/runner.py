@@ -37,11 +37,22 @@ class StepCallbackData:
     info: dict = field(default_factory=dict)
 
 
-def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: str, image_size: tuple[int, int] | None, with_images: bool, with_depth: bool = False) -> tuple[Observation, dict]:
+def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: str, image_size: tuple[int, int] | None, with_images: bool, with_depth: bool = False, full_frame: bool = False, render_now: bool = True) -> tuple[Observation, dict]:
     state = adapter.get_state()
     images = {}
     depth = {}
-    if with_images:
+    extra_cam = {}
+    if with_images and full_frame:
+        # perception policies get the full frame + depth + intrinsics + calibration (no privileged pose)
+        if render_now:
+            images[env.cam_name] = env.render_rgb()
+            depth[env.cam_name] = env.render_depth()
+        from picking.cameras.base import Intrinsics
+        from picking.cameras.sim_camera import SimCamera
+
+        i = env.camera_intrinsics()
+        extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": env.tray_center()}
+    elif with_images:
         rgb = env.render_rgb()
         crop = env.cfg["camera"].get("policy_crop")
         if crop:
@@ -73,7 +84,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         joints=state.joints,
         gripper=state.gripper,
         language_instruction=instruction,
-        extra={"privileged": priv, "sim_time": env.sim_time()},
+        extra={"privileged": priv, "sim_time": env.sim_time(), **extra_cam},
     )
     return obs, priv
 
@@ -92,6 +103,7 @@ def run_episode(
     randomize: bool | None = None,
     settle_steps_after_done: int = 5,
     force_images: bool = False,
+    full_frame: bool = False,
 ) -> EpisodeResult:
     cfg = env.cfg
     task_cfg = cfg["task"]
@@ -114,7 +126,7 @@ def run_episode(
     n_steps = 0
     done_countdown = None
     for step in range(env.max_steps):
-        obs, priv = build_observation(env, adapter, instruction, image_size, with_images, with_depth)
+        obs, priv = build_observation(env, adapter, instruction, image_size, with_images, with_depth, full_frame, render_now=policy.needs_frame_now())
         state_before = adapter.get_state()
         t0 = time.perf_counter()
         action = policy.act(obs)
