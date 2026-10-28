@@ -15,7 +15,7 @@ Entorno de medición: contenedor Linux x86_64, 4 vCPU, sin GPU, MuJoCo 3.17, LeR
 | 3 | Baseline 0 privilegiado | 120 | 92.5 % | — | 0.0 % | 0.0 % | 1.7 % | — | no |
 | 1 (cubo) | ACT visual (LeRobot 0.6.1, ResNet18 desde cero, 128×128), 200 demos, ckpt 500/1000/2000 | 30 c/u | 53 % / 50 % / 53 % | 60 % | 0 % | 10 % | ~45 % | — | no |
 | 1 (cubo) | ACT visual, recorte ajustado 160×90 (cubo ≈15 px), con/sin desplazamiento aleatorio | 30 c/u | 50–57 % | 57 % | 7–17 % | 0 % | 27–37 % | — | no |
-| 1 (cubo) | **ACT de baja dimensión** (estado + pose del objeto desde la percepción), experto suave + velocidad mínima, 200 demos, n_action_steps=5 | 100 (seeds 100100+) | **84 %** | 100 % | 0 % | 3 % | 13 % | 13.4 / 14.8 | no (todavía) |
+| 1 (cubo) | **ACT de baja dimensión** (estado + pose del objeto desde la percepción), experto suave + velocidad mínima, 200 demos, n_action_steps=5 | **1000** (seeds 101000+) | **87.2 %** | 99.7 % | 0.0 % | 3.8 % | 16.2 % | 13.6 / 14.8 | no |
 
 Notas:
 * "Baseline 0 percepción" NO usa estado privilegiado: segmentación de color + profundidad + `T_base_camera`
@@ -28,7 +28,9 @@ Notas:
 * Historia completa de las 30 iteraciones del loop experimental (hipótesis, resultado, keep/revert) en EXPERIMENTS.md.
   Hallazgos clave para policies aprendidas: (1) el ACT visual entrenado desde cero en CPU no aprende a leer la
   posición del objeto (ejecuta la trayectoria media); (2) con features explícitas de percepción, lo decisivo fue un
-  experto *suave* (acciones proporcionales, no saturadas, con velocidad mínima) y ejecutar chunks de 5 acciones.
+  experto *suave* (acciones proporcionales, no saturadas, con velocidad mínima) y ejecutar chunks de 5 acciones;
+  (3) la policy aprendida es frágil: otro entrenamiento con 400 demos del mismo experto dio 17 % (E032), así que
+  hace falta selección de checkpoint por evaluación y una acción de gripper discreta antes de confiar en ella.
 
 ## 2. Robot real (myCobot 280 + OAK-D)
 
