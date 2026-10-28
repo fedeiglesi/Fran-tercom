@@ -76,6 +76,8 @@ def main() -> int:
     ds = LeRobotDataset(f"local/{root.name}", root=root, delta_timestamps={cfg["action_key"]: [i / fps for i in range(chunk)]})
     feat = ds.meta.features
     image_hw = tuple(feat[cfg["image_key"]]["shape"][:2])
+    train_hw = tuple(tr["image_size"]) if tr.get("image_size") else image_hw  # optional downscale for speed
+    image_hw = train_hw
     state_dim = int(feat[cfg["state_key"]]["shape"][0])
     action_dim = int(feat[cfg["action_key"]]["shape"][0])
     assert state_dim == STATE_DIM and action_dim == ACTION_DIM, (state_dim, action_dim)
@@ -131,6 +133,8 @@ def main() -> int:
         except StopIteration:
             it = iter(loader)
             batch = next(it)
+        if tuple(batch[cfg["image_key"]].shape[-2:]) != tuple(train_hw):
+            batch[cfg["image_key"]] = torch.nn.functional.interpolate(batch[cfg["image_key"]], size=train_hw, mode="area")
         if aug is not None:
             batch[cfg["image_key"]] = aug(batch[cfg["image_key"]])
         batch = pre(batch)
