@@ -73,7 +73,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     yaw = float(mat_to_euler_xyz(T_obj[:3, :3])[2])
     spec = env.target_spec()
     period = np.pi / 2
-    if spec.get("type") == "box":
+    if spec.get("type") in ("box", "ellipsoid"):
         sx, sy = spec["size"][0], spec["size"][1]
         if sx > sy:
             yaw += np.pi / 2  # grasp across the short side
@@ -111,7 +111,7 @@ def run_episode(
     step_callback: Callable[[StepCallbackData], None] | None = None,
     episode_id: str | None = None,
     randomize: bool | None = None,
-    settle_steps_after_done: int = 5,
+    settle_steps_after_done: int = 12,
     force_images: bool = False,
     full_frame: bool = False,
 ) -> EpisodeResult:
@@ -164,7 +164,8 @@ def run_episode(
             done_countdown = settle_steps_after_done
         if done_countdown is not None:
             done_countdown -= 1
-            if done_countdown <= 0:
+            # end once the object has come to rest (rolling objects need a few extra steps) or after the budget
+            if done_countdown <= 0 or (done_countdown < settle_steps_after_done - 2 and np.linalg.norm(env.object_velocity(target)[:3]) < 0.01):
                 break
     else:
         timeout = True

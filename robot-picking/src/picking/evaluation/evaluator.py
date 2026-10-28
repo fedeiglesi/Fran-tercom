@@ -95,6 +95,8 @@ class EpisodeEvaluator:
         if not success:
             if self.collision:
                 ft = FailureType.COLLISION
+            elif (metadata or {}).get("policy_info", {}).get("bad_target") and not self.grasped:
+                ft = FailureType.BAD_TARGET
             elif timeout and not self.grasped:
                 ft = FailureType.TIMEOUT
             elif not self.grasped:

@@ -261,6 +261,8 @@ class PickPlaceEnv:
             return float(size[2])
         if t in (self.mj.mjtGeom.mjGEOM_CYLINDER, self.mj.mjtGeom.mjGEOM_CAPSULE):
             return float(size[1] + (size[0] if t == self.mj.mjtGeom.mjGEOM_CAPSULE else 0))
+        if t == self.mj.mjtGeom.mjGEOM_ELLIPSOID:
+            return float(size[2])
         return float(size[0])
 
     def target_spec(self) -> dict:

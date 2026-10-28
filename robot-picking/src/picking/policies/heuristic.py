@@ -58,12 +58,13 @@ class ScriptedPickPlace(Policy):
         self.lifted_z = None
         self.stall = 0
         self._last_tcp = None
+        self.bad_target = False
 
     def done(self) -> bool:
         return self._done
 
     def info(self) -> dict:
-        return {"retries": self.retries, "phases": self.phase_log, "final_phase": self.phase}
+        return {"retries": self.retries, "phases": self.phase_log, "final_phase": self.phase, "bad_target": self.bad_target}
 
     # ------------------------------------------------------------------
     def _move(self, tcp: np.ndarray, target: np.ndarray, gripper: float, yaw_target: float | None, R_cur: np.ndarray) -> Action:
@@ -99,8 +100,16 @@ class ScriptedPickPlace(Policy):
         if ph == "approach":
             tgt = np.array([obj[0], obj[1], grasp_z + self.approach_height])
             a = self._move(tcp, tgt, 0.0, self.grasp_yaw, R_cur)
+            progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.0015
+            self.stall = 0 if progress else self.stall + 1
+            self._last_tcp = tcp.copy()
             if np.linalg.norm(tgt - tcp) < 0.004:
+                self.stall = 0
                 self._next("descend")
+            elif self.stall >= 10:
+                # unreachable target (IK/workspace): give up instead of chasing it until the timeout
+                self.bad_target = True
+                self._next("failed")
             return a
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])

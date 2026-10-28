@@ -220,6 +220,8 @@ def scene_xml(cfg: dict, object_overrides: dict | None = None, camera_override: 
             g = f'<geom name="{o["id"]}_geom" type="cylinder" size="{_v(o["size"][:2])}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'
         elif o["type"] == "sphere":
             g = f'<geom name="{o["id"]}_geom" type="sphere" size="{o["size"][0]:.4f}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'
+        elif o["type"] == "ellipsoid":
+            g = f'<geom name="{o["id"]}_geom" type="ellipsoid" size="{_v(o["size"][:3])}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'
         elif o["type"] == "capsule":
             g = f'<geom name="{o["id"]}_geom" type="capsule" size="{_v(o["size"][:2])}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'
         else:
