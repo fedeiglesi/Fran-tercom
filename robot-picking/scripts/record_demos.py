@@ -38,6 +38,7 @@ def main() -> int:
     ap.add_argument("--max-episodes-fail-ratio", type=float, default=0.5)
     ap.add_argument("--dart-noise", type=float, default=0.0, help="DART: execute noisy actions (std, normalized units) but label with the expert's clean action")
     ap.add_argument("--dart-fraction", type=float, default=0.5, help="fraction of episodes recorded with DART noise")
+    ap.add_argument("--expert-gain", type=float, default=1.0, help="proportional gain of the scripted expert (lower = smoother, less saturated actions)")
     ap.add_argument("--lowdim", action="store_true", help="no images; record observation.environment_state = object pose (privileged + noise)")
     ap.add_argument("--env-state-noise", type=float, default=0.002, help="[m] gaussian noise on the recorded object position (matches measured perception error)")
     args = ap.parse_args()
@@ -49,7 +50,7 @@ def main() -> int:
     safety = SafetyFilter(load_yaml(config_path(args.safety)))
     env = PickPlaceEnv(cfg, render=not args.lowdim)
     adapter = SimRobotAdapter(env)
-    policy = ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 11))
+    policy = ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 11), gain=args.expert_gain)
     image_size = tuple(cfg["camera"]["policy_image_size"])  # (w, h)
     noise_rng = np.random.default_rng(args.seed_start + 99)
 
