@@ -1,0 +1,21 @@
+# Real myCobot 280 M5 connection + mapping between our URDF-based model and pymycobot angles.
+# ALL "verify" items must be checked with scripts/test_mycobot_readonly.py and scripts/real_tests.py
+# before autonomous control (docs/REAL_ROBOT.md).
+robot:
+  name: mycobot_280_m5
+  port: auto                # e.g. /dev/tty.usbserial-XXXX on macOS; "auto" scans typical names
+  baudrate: 115200
+  pymycobot_class: MyCobot280   # pymycobot >= 3.x class name; falls back to MyCobot
+  tcp_offset: [0.0, 0.0, 0.065] # flange -> grasp centre of the gripper [m]  (verify: measure your gripper)
+  home_joints_deg: [21.0, 0.2, -96.8, 6.7, 0.0, -69.0]
+  gripper_max_opening: 0.045
+  gravity_compensation: true
+  # mapping model_angle_rad = sign * deg2rad(pymycobot_deg - offset_deg). Verify with Test 2 (one joint at a time).
+  joint_sign: [1, 1, 1, 1, 1, 1]
+  joint_offset_deg: [0, 0, 0, 0, 0, 0]
+  move_speed: 20            # pymycobot speed 1..100 (keep low for first tests)
+  gripper_speed: 50
+  gripper_value_open: 100   # pymycobot set_gripper_value: 100 = open, 0 = closed (verify on hardware)
+  gripper_value_closed: 0
+  settle_time_s: 0.15
+  control_hz: 5             # conservative real-robot control rate

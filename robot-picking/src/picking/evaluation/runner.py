@@ -43,14 +43,20 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     depth = {}
     if with_images:
         rgb = env.render_rgb()
+        crop = env.cfg["camera"].get("policy_crop")
+        if crop:
+            x0, y0, x1, y1 = crop
+            rgb = rgb[y0:y1, x0:x1]
         if image_size is not None and (rgb.shape[1], rgb.shape[0]) != tuple(image_size):
             rgb = cv2.resize(rgb, tuple(image_size), interpolation=cv2.INTER_AREA)
-        images[env.cam_name] = rgb
+        images[env.cam_name] = np.ascontiguousarray(rgb)
         if with_depth:
             d = env.render_depth()
+            if crop:
+                d = d[y0:y1, x0:x1]
             if image_size is not None:
                 d = cv2.resize(d, tuple(image_size), interpolation=cv2.INTER_NEAREST)
-            depth[env.cam_name] = d
+            depth[env.cam_name] = np.ascontiguousarray(d)
     target = env.cfg["task"]["target_object"]
     T_obj = env.object_pose(target)
     priv = {

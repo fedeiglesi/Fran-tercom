@@ -6,8 +6,6 @@ Robot control goes through `picking.robots.sim.SimRobotAdapter`, success/failure
 """
 from __future__ import annotations
 
-import os
-import platform
 import time
 from dataclasses import dataclass, field
 
@@ -18,19 +16,7 @@ from picking.simulation.mjcf import JOINT_NAMES, camera_quat_lookat, scene_xml
 from picking.simulation.randomization import EpisodeRandomization, sample_randomization
 
 
-def select_gl_backend(preferred: str = "auto") -> str:
-    """Choose a MuJoCo GL backend. On a headless Linux box OSMesa is the robust choice; on macOS the
-    default (cgl/glfw) works. Must be called before importing mujoco for the first time."""
-    if preferred != "auto":
-        os.environ["MUJOCO_GL"] = preferred
-        return preferred
-    if "MUJOCO_GL" in os.environ:
-        return os.environ["MUJOCO_GL"]
-    if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
-        os.environ["MUJOCO_GL"] = "osmesa"
-        os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
-        return "osmesa"
-    return "default"
+from picking.utils.gl import select_gl_backend  # noqa: E402,F401
 
 
 @dataclass
@@ -135,17 +121,18 @@ class PickPlaceEnv:
         self.episode_rand = sample_randomization(self.cfg, self.rng, enabled)
         er = self.episode_rand
         for oid, spec in er.objects.items():
+            self.model.body_mass[self.object_body[oid]] = spec["mass"]
+            self.model.geom_friction[self.object_geom[oid], 0] = spec["friction"]
+            if spec.get("color") is not None:
+                self.model.geom_rgba[self.object_geom[oid]] = spec["color"]
+        mj.mj_setConst(self.model, self.data)  # recompute inertia after mass change (resets qpos -> do it first)
+        for oid, spec in er.objects.items():
             adr = self.object_qadr[oid]
             self.data.qpos[adr : adr + 3] = spec["position"]
             yaw = np.deg2rad(spec["yaw_deg"])
             self.data.qpos[adr + 3 : adr + 7] = mat_to_quat(
                 np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
             )
-            self.model.body_mass[self.object_body[oid]] = spec["mass"]
-            self.model.geom_friction[self.object_geom[oid], 0] = spec["friction"]
-            if spec.get("color") is not None:
-                self.model.geom_rgba[self.object_geom[oid]] = spec["color"]
-        mj.mj_setConst(self.model, self.data)  # recompute inertia after mass change
         if er.camera_position is not None:
             self.model.cam_pos[self.cam_id] = er.camera_position
             self.model.cam_quat[self.cam_id] = camera_quat_lookat(er.camera_position, er.camera_lookat)

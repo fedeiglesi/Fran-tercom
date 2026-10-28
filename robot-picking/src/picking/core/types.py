@@ -15,6 +15,7 @@ import numpy as np
 ACTION_DIM = 7  # dx, dy, dz, drx, dry, drz, gripper
 ACTION_NAMES = ["dx", "dy", "dz", "drx", "dry", "drz", "gripper"]
 PROTOCOL_VERSION = "1.0"
+STATE_DIM = 10  # tcp xyz (3) + rotation 6D (6) + gripper (1)
 
 
 @dataclass
@@ -64,8 +65,16 @@ class Observation:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def state_vector(self) -> np.ndarray:
-        """Low-dim proprioceptive state used by learned policies: tcp(7) + gripper(1) = 8."""
-        return np.concatenate([self.tcp_pose, [self.gripper]]).astype(np.float32)
+        """Low-dim proprioceptive state used by learned policies: tcp xyz(3) + rot6d(6) + gripper(1) = 10.
+
+        Orientation uses the continuous 6D representation (first two columns of the rotation matrix)
+        instead of a quaternion, whose sign flips around 180 deg (the straight-down grasp orientation).
+        """
+        from picking.core.transforms import quat_to_mat
+
+        R = quat_to_mat(self.tcp_pose[3:7])
+        rot6d = np.concatenate([R[:, 0], R[:, 1]])
+        return np.concatenate([self.tcp_pose[:3], rot6d, [self.gripper]]).astype(np.float32)
 
 
 @dataclass

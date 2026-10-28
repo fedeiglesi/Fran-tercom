@@ -8,3 +8,7 @@ Layers (strictly separated, see docs/ARCHITECTURE.md):
   evaluation  -> picking.evaluation
 """
 __version__ = "0.1.0"
+
+from picking.utils.gl import select_gl_backend as _select_gl_backend  # noqa: E402
+
+_select_gl_backend(__import__("os").environ.get("PICKING_GL", "auto"))

@@ -19,9 +19,10 @@ camera:
   width: 640
   height: 480
   fovy_deg: 55.0           # OAK-D RGB: HFOV 69 deg -> VFOV ~55 deg at 4:3
-  position: [0.60, 0.0, 0.45]
-  lookat: [0.20, 0.0, 0.02]
-  policy_image_size: [96, 96]    # downscaled image fed to learned policies
+  position: [0.52, 0.0, 0.40]    # tripod in front of the robot, ~0.5 m from the workspace centre
+  lookat: [0.18, 0.0, 0.02]
+  policy_crop: [96, 60, 544, 420]   # x0, y0, x1, y1 pixel ROI of the workspace in the full frame
+  policy_image_size: [128, 128]     # (w, h) image fed to learned policies after crop
 scene:
   table_size: [0.5, 0.5, 0.02]   # half-sizes are derived; table top at z=0 (robot base sits on it)
   table_color: [0.85, 0.85, 0.82, 1]
