@@ -1,0 +1,18 @@
+# Conservative limits for the FIRST physical tests with the myCobot 280 (small workspace, slow).
+workspace:
+  x: [0.12, 0.26]
+  y: [-0.15, 0.15]
+  z: [0.015, 0.20]
+orientation:
+  max_tilt_from_down_deg: 25.0
+per_step:
+  max_delta_pos: 0.005       # 5 mm per step
+  max_delta_rot: 0.05
+  max_gripper_delta: 1.0
+velocity:
+  max_tcp_speed: 0.05        # 5 cm/s
+  max_joint_speed: 0.6
+joint_limits_margin_deg: 10.0
+comm:
+  action_timeout_s: 0.5
+  max_stale_action_age_s: 0.3

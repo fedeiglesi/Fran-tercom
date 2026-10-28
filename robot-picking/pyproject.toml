@@ -1,0 +1,43 @@
+[project]
+name = "picking"
+version = "0.1.0"
+description = "Robot-agnostic VLA / imitation-learning picking platform (sim -> myCobot 280 + OAK-D -> UR10e)"
+authors = [{ name = "Tercom Robotics Lab" }]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=2.0,<2.3",
+    "scipy>=1.14",
+    "mujoco>=3.3",
+    "pyyaml>=6.0",
+    "opencv-python-headless>=4.9,<4.14",
+    "imageio>=2.34",
+    "pandas>=2.0",
+    "pyarrow>=21.0",
+    "matplotlib>=3.10",
+    "gymnasium>=1.1",
+    "torch>=2.7,<2.12",
+    "torchvision>=0.22,<0.27",
+    "lerobot[dataset]>=0.6.1,<0.7",
+    "pydantic>=2.0",
+    "websockets>=13.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3", "ruff>=0.6"]
+real = ["pymycobot>=4.0", "depthai>=3.0", "pyserial>=3.5"]
+
+[tool.uv]
+default-groups = []
+
+[build-system]
+requires = ["uv_build>=0.11.32,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 600
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"

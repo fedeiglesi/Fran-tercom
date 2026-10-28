@@ -45,3 +45,12 @@ Thumbs.db
 
 # Twilio/WhatsApp test files
 test_webhook.py
+
+# robot-picking
+robot-picking/.venv/
+robot-picking/reports/eval/
+robot-picking/outputs/
+robot-picking/data/
+robot-picking/**/__pycache__/
+robot-picking/.pytest_cache/
+robot-picking/.ruff_cache/

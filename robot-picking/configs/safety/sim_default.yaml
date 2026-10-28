@@ -1,0 +1,19 @@
+# Deterministic safety limits applied to EVERY action before it reaches a robot (sim or real).
+# Units: metres, radians, seconds. The policy can never relax these.
+workspace:
+  x: [0.08, 0.30]
+  y: [-0.22, 0.22]
+  z: [0.008, 0.22]          # TCP (grasp centre) height above the table top (0.22 = practical reach limit)
+orientation:
+  max_tilt_from_down_deg: 35.0    # gripper z axis must stay within this cone around straight-down
+per_step:
+  max_delta_pos: 0.012       # [m] per control step (10 Hz -> 0.12 m/s)
+  max_delta_rot: 0.10        # [rad] per control step (~5.7 deg)
+  max_gripper_delta: 1.0
+velocity:
+  max_tcp_speed: 0.15        # [m/s]
+  max_joint_speed: 1.5       # [rad/s]
+joint_limits_margin_deg: 3.0
+comm:
+  action_timeout_s: 0.5      # if no valid action within this window -> HOLD
+  max_stale_action_age_s: 0.3

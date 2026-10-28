@@ -1,0 +1,58 @@
+# Level 1: one simple object, known position (small jitter), fixed tray, fixed lighting.
+name: level1_cube
+sim:
+  timestep: 0.002          # physics dt [s]
+  control_hz: 10           # policy / action rate
+  max_steps: 150           # episode timeout (15 s at 10 Hz)
+  gl_backend: auto         # auto | osmesa | egl | glfw
+robot:
+  name: mycobot_280_m5
+  tcp_offset: [0.0, 0.0, 0.065]   # flange -> TCP (grasp centre between finger pads) [m]  TODO: verify on hardware
+  home_joints_deg: [21.0, 0.2, -96.8, 6.7, 0.0, -69.0]   # IK solution for TCP (0.18, 0, 0.12) pointing straight down, elbow up
+  gripper_max_opening: 0.045       # [m] between pads when fully open (approx; verify on hardware)
+  gripper_pad_friction: 2.0
+  actuator_kp: 100.0
+  gravity_compensation: true     # servo emulation: no steady-state sag under gravity
+  joint_damping: 1.5
+camera:
+  name: oakd_sim
+  width: 640
+  height: 480
+  fovy_deg: 55.0           # OAK-D RGB: HFOV 69 deg -> VFOV ~55 deg at 4:3
+  position: [0.60, 0.0, 0.45]
+  lookat: [0.20, 0.0, 0.02]
+  policy_image_size: [96, 96]    # downscaled image fed to learned policies
+scene:
+  table_size: [0.5, 0.5, 0.02]   # half-sizes are derived; table top at z=0 (robot base sits on it)
+  table_color: [0.85, 0.85, 0.82, 1]
+  tray:
+    position: [0.14, -0.14, 0.0]
+    inner_size: [0.08, 0.08]      # [m]
+    wall_height: 0.015
+    wall_thickness: 0.004
+    color: [0.2, 0.3, 0.8, 1]
+  objects:
+    - id: red_cube
+      type: box
+      size: [0.0125, 0.0125, 0.0125]   # half-sizes [m] -> 25 mm cube
+      mass: 0.03
+      color: [0.9, 0.1, 0.1, 1]
+      position: [0.18, 0.09, 0.0125]
+      yaw_deg: 0.0
+      friction: 1.0
+task:
+  instruction: "Pick the red cube and place it in the blue tray."
+  target_object: red_cube
+  destination: tray
+  lift_height: 0.05            # [m] above table top required for pick success
+randomization:
+  enabled: true
+  object_xy_range: [0.015, 0.015]  # +- jitter [m] around nominal position (level 1: small, known position)
+  object_yaw_range_deg: 10.0
+  tray_xy_range: [0.0, 0.0]
+  object_mass_range: [0.03, 0.03]
+  object_friction_range: [1.0, 1.0]
+  camera_pos_noise: 0.0
+  camera_rot_noise_deg: 0.0
+  light_noise: 0.0
+  color_noise: 0.0
