@@ -17,6 +17,18 @@ Motor: **MuJoCo 3.x** (`src/picking/simulation`). Render headless con OSMesa en 
 Cubo rojo de 25 mm en (0.18, 0.09) ± 15 mm, yaw ± 10°; bandeja azul 80×80 mm en (0.14, −0.14).
 Control a 10 Hz, física a 500 Hz, timeout 150 pasos (15 s).
 
+## Niveles del currículo (configs/sim)
+
+| Nivel | Config | Contenido |
+|---|---|---|
+| 1 | `level1_cube.yaml` | 1 cubo rojo 25 mm, ±15 mm, ±10° |
+| 2 | `level2_objects.yaml` | 10 objetos simples (cajas, cilindros, esfera), 4 colores, ±3 cm, ±45°, masa/fricción aleatorias, uno por episodio |
+| 3 | `level3_geometries.yaml` | 24 geometrías (cajas, cilindros, esferas, cápsulas, elipsoides) + ruido de cámara 3 mm/0.5°, luz ±30 %, color ±0.06, color de mesa |
+| 4–7 | pendientes | motopartes digitalizadas, varios objetos, clutter, bin |
+
+Resultados por nivel en RESULTS.md. Con `one_object_per_episode: true` el objetivo se elige por seed y los demás
+objetos se aparcan fuera de la vista; la instrucción se genera con `instruction_template`.
+
 ## Comandos
 
 ```

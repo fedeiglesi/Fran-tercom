@@ -1,0 +1,18 @@
+# Starting limits for a UR10e cell (mock today). Same structure as the myCobot file; the policy is unchanged.
+workspace:
+  x: [0.30, 0.90]
+  y: [-0.40, 0.40]
+  z: [0.02, 0.50]
+orientation:
+  max_tilt_from_down_deg: 25.0
+per_step:
+  max_delta_pos: 0.005
+  max_delta_rot: 0.05
+  max_gripper_delta: 1.0
+velocity:
+  max_tcp_speed: 0.05
+  max_joint_speed: 0.5
+joint_limits_margin_deg: 10.0
+comm:
+  action_timeout_s: 0.5
+  max_stale_action_age_s: 0.3

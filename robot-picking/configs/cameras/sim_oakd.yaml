@@ -1,0 +1,7 @@
+# Simulated counterpart of the OAK-D (MuJoCo camera "oakd_sim"); the sim configs embed these values.
+name: oakd_sim
+width: 640
+height: 480
+fovy_deg: 55.0            # OAK-D RGB HFOV 69 deg at 4:3 -> VFOV ~55 deg
+position: [0.52, 0.0, 0.40]
+lookat: [0.18, 0.0, 0.02]

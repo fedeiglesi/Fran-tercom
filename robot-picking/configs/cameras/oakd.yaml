@@ -1,0 +1,12 @@
+# Luxonis OAK-D, fixed on a tripod in front of the robot (DepthAI 3.x). Intrinsics are read from the device
+# EEPROM at runtime (picking/cameras/oakd.py); extrinsics come from calibration/oakd_to_mycobot_vNNN.yaml.
+name: oakd
+width: 640
+height: 400
+fps: 30
+align_depth_to_rgb: true
+policy_crop: null          # set after mounting: [x0, y0, x1, y1] pixel ROI of the workspace
+policy_image_size: [128, 128]
+nominal_pose_base:          # approximate, for sanity checks only (never used for control)
+  position: [0.52, 0.0, 0.40]
+  lookat: [0.18, 0.0, 0.02]

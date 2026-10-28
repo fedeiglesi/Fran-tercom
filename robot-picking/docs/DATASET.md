@@ -17,6 +17,7 @@ Ubicación: `data/datasets/<nombre>_vNNN/` — **nunca se sobrescribe**; cada gr
 | `extra.target_joints` | float32 (6,) | joints resultantes |
 | `extra.object_pose` | float32 (7,) | pose privilegiada del objeto (sim) |
 | `extra.safety_rejected` | float32 (1,) | 1 si safety detuvo el robot en ese paso |
+| `extra.corrected` | float32 (1,) | 1 si la acción ejecutada fue una corrección humana (DAgger, `scripts/dagger.py`) |
 | `task` | str | instrucción textual |
 | `timestamp, frame_index, episode_index, index, task_index` | — | añadidos por LeRobot |
 
