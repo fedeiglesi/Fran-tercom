@@ -13,7 +13,9 @@ Entorno de medición: contenedor Linux x86_64, 4 vCPU, sin GPU, MuJoCo 3.17, LeR
 | 2 (10 objetos) | Baseline 0 percepción | 1000 | **100.0 %** | 100 % | 0.0 % | 0.0 % | 0.0 % | 7.9 / 8.5 | PASA |
 | 3 (24 geometrías + DR cámara/luz/color) | Baseline 0 percepción | 120 | 90.8 % | 92 % | 1.7 % | 0.0 % | 0.0 % | — | no (elipsoides que ruedan) |
 | 3 | Baseline 0 privilegiado | 120 | 92.5 % | — | 0.0 % | 0.0 % | 1.7 % | — | no |
-| 1 (cubo) | ACT (LeRobot 0.6.1), checkpoint paso 500/6000, 200 demos | 30 | ~30 % (provisional) | — | — | — | mayoría timeouts | — | no (entrenamiento en curso) |
+| 1 (cubo) | ACT visual (LeRobot 0.6.1, ResNet18 desde cero, 128×128), 200 demos, ckpt 500/1000/2000 | 30 c/u | 53 % / 50 % / 53 % | 60 % | 0 % | 10 % | ~45 % | — | no |
+| 1 (cubo) | ACT visual, recorte ajustado 160×90 (cubo ≈15 px), con/sin desplazamiento aleatorio | 30 c/u | 50–57 % | 57 % | 7–17 % | 0 % | 27–37 % | — | no |
+| 1 (cubo) | **ACT de baja dimensión** (estado + pose del objeto desde la percepción), experto suave + velocidad mínima, 200 demos, n_action_steps=5 | 100 (seeds 100100+) | **84 %** | 100 % | 0 % | 3 % | 13 % | 13.4 / 14.8 | no (todavía) |
 
 Notas:
 * "Baseline 0 percepción" NO usa estado privilegiado: segmentación de color + profundidad + `T_base_camera`
@@ -22,7 +24,11 @@ Notas:
 * Nivel 3: 24 objetos; 19 al 100 %. Fallos concentrados en `red_egg` (elipsoide inestable que rueda al ser tocado
   → BAD_TARGET fuera de alcance o no queda en reposo en la bandeja), `blue_bean`, `green_lens`. Desglose por objeto
   en `reports/eval/*level3_perception_v2/episodes.json`.
-* Latencia de policy: heurística < 0.1 ms; ACT en CPU (ResNet18, 128×128) ≈ 250 ms/paso en este contenedor.
+* Latencia de policy: heurística < 0.1 ms; ACT visual en CPU (ResNet18, 128×128) ≈ 125 ms/paso; ACT de baja dimensión ≈ 2 ms/paso.
+* Historia completa de las 30 iteraciones del loop experimental (hipótesis, resultado, keep/revert) en EXPERIMENTS.md.
+  Hallazgos clave para policies aprendidas: (1) el ACT visual entrenado desde cero en CPU no aprende a leer la
+  posición del objeto (ejecuta la trayectoria media); (2) con features explícitas de percepción, lo decisivo fue un
+  experto *suave* (acciones proporcionales, no saturadas, con velocidad mínima) y ejecutar chunks de 5 acciones.
 
 ## 2. Robot real (myCobot 280 + OAK-D)
 
