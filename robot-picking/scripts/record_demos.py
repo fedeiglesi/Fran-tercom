@@ -36,6 +36,8 @@ def main() -> int:
     ap.add_argument("--keep-failures", action="store_true", default=True)
     ap.add_argument("--depth", action="store_true")
     ap.add_argument("--max-episodes-fail-ratio", type=float, default=0.5)
+    ap.add_argument("--lowdim", action="store_true", help="no images; record observation.environment_state = object pose (privileged + noise)")
+    ap.add_argument("--env-state-noise", type=float, default=0.002, help="[m] gaussian noise on the recorded object position (matches measured perception error)")
     args = ap.parse_args()
     setup_logging()
     log = logging.getLogger("record_demos")
@@ -43,23 +45,31 @@ def main() -> int:
     if args.override:
         cfg = deep_update(cfg, json.loads(args.override))
     safety = SafetyFilter(load_yaml(config_path(args.safety)))
-    env = PickPlaceEnv(cfg, render=True)
+    env = PickPlaceEnv(cfg, render=not args.lowdim)
     adapter = SimRobotAdapter(env)
     policy = ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 11))
     image_size = tuple(cfg["camera"]["policy_image_size"])  # (w, h)
+    noise_rng = np.random.default_rng(args.seed_start + 99)
+
+    def env_state(d):
+        p = np.asarray(d.privileged["object_pos"], float) + noise_rng.normal(0, args.env_state_noise, 3)
+        yaw = float(d.privileged["object_yaw"])
+        return np.array([p[0], p[1], p[2], np.cos(yaw), np.sin(yaw)], np.float32)
+
     rec = EpisodeRecorder(
         name=args.name,
         fps=int(cfg["sim"]["control_hz"]),
-        camera_names=[env.cam_name],
+        camera_names=[] if args.lowdim else [env.cam_name],
         image_hw=(image_size[1], image_size[0]),
-        with_depth=args.depth,
+        with_depth=args.depth and not args.lowdim,
+        env_state_fn=env_state if args.lowdim else None,
         metadata={"source": "simulation", "config": args.config, "config_resolved": cfg, "safety": args.safety, "policy": policy.name, "policy_version": policy.version, "action_noise": args.action_noise, "seed_start": args.seed_start, "n_requested": args.episodes},
     )
     results = []
     t0 = time.time()
     for i in range(args.episodes):
         seed = args.seed_start + i
-        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, with_depth=args.depth, step_callback=rec.on_step, force_images=True)
+        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, with_depth=args.depth and not args.lowdim, step_callback=rec.on_step, force_images=not args.lowdim)
         rec.end_episode(r)
         results.append(r)
         if (i + 1) % 10 == 0:

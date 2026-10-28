@@ -1,0 +1,35 @@
+# ACT on explicit perception features (no image encoder): state (10) + environment_state (object pose, 5).
+# Much cheaper to train; perception comes from picking.perception (colour+depth+calibration) at run time.
+policy: act
+dataset: level1_cube_lowdim_v001
+image_key: null
+state_key: observation.state
+action_key: action
+act:
+  chunk_size: 20
+  n_action_steps: 10
+  vision_backbone: resnet18        # unused (no image feature)
+  pretrained_backbone_weights: null
+  dim_model: 256
+  n_heads: 8
+  dim_feedforward: 1024
+  n_encoder_layers: 4
+  n_decoder_layers: 1
+  use_vae: true
+  latent_dim: 32
+  kl_weight: 10.0
+  dropout: 0.1
+  temporal_ensemble_coeff: null
+training:
+  steps: 3000
+  batch_size: 64
+  lr: 3.0e-4
+  lr_backbone: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 10.0
+  num_workers: 2
+  log_every: 100
+  save_every: 1000
+  seed: 1
+  device: cpu
+  image_augmentation: false

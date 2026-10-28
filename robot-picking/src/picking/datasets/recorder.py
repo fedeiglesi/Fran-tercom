@@ -41,12 +41,16 @@ class EpisodeRecorder:
         metadata: dict | None = None,
         robot_type: str = "mycobot_280_m5",
         use_videos: bool = False,
+        env_state_fn=None,
     ):
+        """env_state_fn: optional callable(StepCallbackData) -> np.ndarray (ENV_STATE_DIM,) recorded as
+        observation.environment_state (explicit perception features)."""
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
         self.root = root or next_dataset_root(name)
         self.repo_id = f"local/{self.root.name}"
-        self.features = build_features(camera_names, image_hw, with_depth, use_videos)
+        self.env_state_fn = env_state_fn
+        self.features = build_features(camera_names, image_hw, with_depth, use_videos, with_env_state=env_state_fn is not None)
         self.ds = LeRobotDataset.create(
             repo_id=self.repo_id,
             fps=fps,
@@ -93,6 +97,8 @@ class EpisodeRecorder:
             "extra.safety_rejected": np.array([0.0 if d.safe_action is not None else 1.0], np.float32),
             "extra.corrected": np.array([1.0 if d.info.get("corrected") else 0.0], np.float32),
         }
+        if self.env_state_fn is not None:
+            frame["observation.environment_state"] = np.asarray(self.env_state_fn(d), np.float32)
         for cam in self.camera_names:
             frame[f"observation.images.{cam}"] = obs.images[cam]
             if self.with_depth:

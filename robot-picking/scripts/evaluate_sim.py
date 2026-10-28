@@ -43,7 +43,21 @@ def make_policy(args, cfg, safety: SafetyFilter):
     if args.policy == "act":
         from picking.policies.act_policy import ACTPolicyWrapper
 
-        return ACTPolicyWrapper(args.checkpoint, device=args.device, act_override=json.loads(args.act_override) if args.act_override else None)
+        pol = ACTPolicyWrapper(args.checkpoint, device=args.device, act_override=json.loads(args.act_override) if args.act_override else None)
+        if pol.env_state_key:
+            from picking.perception.env_state import PerceptionEnvState
+
+            prov = PerceptionEnvState(cfg["camera"]["name"], args.color, cfg["task"]["target_object"], roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None)
+            pol.env_state_provider = prov
+            _orig_reset = pol.reset
+
+            def _reset(instruction="", task_info=None):
+                prov.reset(task_info)
+                _orig_reset(instruction, task_info)
+
+            pol.reset = _reset
+            pol.full_frame = True
+        return pol
     if args.policy == "remote":
         from picking.policies.remote import RemotePolicy
 
@@ -93,7 +107,7 @@ def main() -> int:
     t0 = time.time()
     for i in range(args.episodes):
         seed = args.seed_start + i
-        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, full_frame=(args.policy == "perception"))
+        r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, full_frame=(args.policy == "perception" or getattr(policy, "full_frame", False)))
         results.append(r)
         if (i + 1) % args.log_every == 0 or not r.success:
             sr = sum(x.success for x in results) / len(results)

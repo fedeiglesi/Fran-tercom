@@ -18,7 +18,11 @@ JOINT_NAMES = [f"joint{i}" for i in range(1, 7)]
 SCHEMA_VERSION = "1.0"
 
 
-def build_features(camera_names: list[str], image_hw: tuple[int, int], with_depth: bool = False, use_videos: bool = False) -> dict:
+ENV_STATE_NAMES = ["obj_x", "obj_y", "obj_z", "obj_yaw_cos", "obj_yaw_sin"]
+ENV_STATE_DIM = 5
+
+
+def build_features(camera_names: list[str], image_hw: tuple[int, int], with_depth: bool = False, use_videos: bool = False, with_env_state: bool = False) -> dict:
     h, w = image_hw
     img_dtype = "video" if use_videos else "image"
     feats: dict = {}
@@ -27,6 +31,9 @@ def build_features(camera_names: list[str], image_hw: tuple[int, int], with_dept
         if with_depth:
             feats[f"observation.depth.{cam}"] = {"dtype": "float32", "shape": (h, w), "names": None}
     feats["observation.state"] = {"dtype": "float32", "shape": (10,), "names": STATE_NAMES}
+    if with_env_state:
+        # explicit perception features (object pose from the perception module; in sim: privileged pose + noise)
+        feats["observation.environment_state"] = {"dtype": "float32", "shape": (ENV_STATE_DIM,), "names": ENV_STATE_NAMES}
     feats["observation.joints"] = {"dtype": "float32", "shape": (6,), "names": JOINT_NAMES}
     feats["action"] = {"dtype": "float32", "shape": (7,), "names": ACTION_NAMES}
     feats["extra.policy_action"] = {"dtype": "float32", "shape": (7,), "names": ACTION_NAMES}

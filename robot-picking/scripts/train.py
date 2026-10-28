@@ -78,13 +78,18 @@ def main() -> int:
     fps = probe.fps
     ds = LeRobotDataset(f"local/{root.name}", root=root, delta_timestamps={cfg["action_key"]: [i / fps for i in range(chunk)]})
     feat = ds.meta.features
-    image_hw = tuple(feat[cfg["image_key"]]["shape"][:2])
-    train_hw = tuple(tr["image_size"]) if tr.get("image_size") else image_hw  # optional downscale for speed
+    if cfg.get("image_key") and cfg["image_key"] not in feat:
+        cfg["image_key"] = None  # low-dim dataset (no images)
+    if "observation.environment_state" in feat:
+        cfg["env_state_key"] = "observation.environment_state"
+        cfg["env_state_dim"] = int(feat["observation.environment_state"]["shape"][0])
+    image_hw = tuple(feat[cfg["image_key"]]["shape"][:2]) if cfg.get("image_key") else (0, 0)
+    train_hw = tuple(tr["image_size"]) if tr.get("image_size") and cfg.get("image_key") else image_hw
     image_hw = train_hw
     state_dim = int(feat[cfg["state_key"]]["shape"][0])
     action_dim = int(feat[cfg["action_key"]]["shape"][0])
     assert state_dim == STATE_DIM and action_dim == ACTION_DIM, (state_dim, action_dim)
-    stats_json = {k: {kk: np.asarray(vv).tolist() for kk, vv in v.items()} for k, v in ds.meta.stats.items() if k in (cfg["image_key"], cfg["state_key"], cfg["action_key"])}
+    stats_json = {k: {kk: np.asarray(vv).tolist() for kk, vv in v.items()} for k, v in ds.meta.stats.items() if k in (cfg.get("image_key"), cfg["state_key"], cfg["action_key"], cfg.get("env_state_key"))}
     stats = _stats_to_tensors(stats_json)
     policy, pre, post, act_cfg = build_act_policy(cfg, stats, image_hw, state_dim, action_dim, device)
     policy.to(device).train()
@@ -138,10 +143,11 @@ def main() -> int:
         except StopIteration:
             it = iter(loader)
             batch = next(it)
-        if tuple(batch[cfg["image_key"]].shape[-2:]) != tuple(train_hw):
-            batch[cfg["image_key"]] = torch.nn.functional.interpolate(batch[cfg["image_key"]], size=train_hw, mode="area")
-        if aug is not None:
-            batch[cfg["image_key"]] = aug(batch[cfg["image_key"]])
+        if cfg.get("image_key"):
+            if tuple(batch[cfg["image_key"]].shape[-2:]) != tuple(train_hw):
+                batch[cfg["image_key"]] = torch.nn.functional.interpolate(batch[cfg["image_key"]], size=train_hw, mode="area")
+            if aug is not None:
+                batch[cfg["image_key"]] = aug(batch[cfg["image_key"]])
         batch = pre(batch)
         loss, info = policy.forward(batch)
         optim.zero_grad(set_to_none=True)
