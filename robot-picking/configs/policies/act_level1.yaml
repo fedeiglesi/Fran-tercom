@@ -31,4 +31,6 @@ training:
   save_every: 2000
   seed: 1
   device: cpu
-  image_augmentation: true       # random shift/brightness (small) for robustness
+  image_augmentation: true       # brightness jitter only; pixel shift disabled for a fixed camera (see train.py)
+  image_shift_pad: 0
+  image_brightness: 0.1

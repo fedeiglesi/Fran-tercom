@@ -31,11 +31,14 @@ class RandomShift:
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
-        xp = torch.nn.functional.pad(x, (self.pad,) * 4, mode="replicate")
-        out = torch.empty_like(x)
-        for i in range(b):
-            dx, dy = random.randint(0, 2 * self.pad), random.randint(0, 2 * self.pad)
-            out[i] = xp[i, :, dy : dy + h, dx : dx + w]
+        if self.pad > 0:
+            xp = torch.nn.functional.pad(x, (self.pad,) * 4, mode="replicate")
+            out = torch.empty_like(x)
+            for i in range(b):
+                dx, dy = random.randint(0, 2 * self.pad), random.randint(0, 2 * self.pad)
+                out[i] = xp[i, :, dy : dy + h, dx : dx + w]
+        else:
+            out = x.clone()
         if self.brightness > 0:
             f = 1 + (torch.rand(b, 1, 1, 1) * 2 - 1) * self.brightness
             out = (out * f).clamp(0, 1)
@@ -105,7 +108,9 @@ def main() -> int:
         st = json.load(open(Path(args.resume) / "picking_policy.json"))
         start_step = st.get("step", 0)
     loader = torch.utils.data.DataLoader(ds, batch_size=int(tr["batch_size"]), shuffle=True, num_workers=int(tr.get("num_workers", 0)), drop_last=True, persistent_workers=int(tr.get("num_workers", 0)) > 0)
-    aug = RandomShift() if tr.get("image_augmentation", True) else None
+    # NOTE: with a FIXED camera, a random pixel shift destroys the mapping pixel -> world position (a 4 px
+    # shift at 128 px ~ 15 mm, the whole object-position range at level 1). Keep shift at 0 for fixed cameras.
+    aug = RandomShift(pad=int(tr.get("image_shift_pad", 0)), brightness=float(tr.get("image_brightness", 0.1))) if tr.get("image_augmentation", True) else None
     meta = {
         "version": out.name,
         "config": cfg,
