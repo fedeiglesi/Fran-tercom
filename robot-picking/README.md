@@ -13,7 +13,7 @@ Está escrito para que una persona **sin conocimientos de programación** pueda 
 | Capa de seguridad determinista | `src/picking/safety` | funcionando, con tests |
 | Evaluador automático (pick, place, colisión, drop, timeout) + métricas | `src/picking/evaluation` | funcionando |
 | Dataset LeRobot v3 versionado (éxitos y fallos) | `src/picking/datasets` | funcionando |
-| Policies: heurística (Baseline 0), ACT (Baseline 1), remota (cliente/servidor) | `src/picking/policies`, `networking` | ver RESULTS.md |
+| Policies: heurística con percepción (Baseline 0: 1000/1000 niveles 1 y 2), ACT visual (~55 %), ACT de baja dimensión (87.2 % en 1000 ep), remota (cliente/servidor) | `src/picking/policies`, `networking` | ver RESULTS.md y EXPERIMENTS.md |
 | Calibración cámara→robot (ArUco + puntos, hand-eye) | `src/picking/calibration` | validada en sim |
 | Cámara OAK-D (DepthAI 3) y teleoperación por teclado | `src/picking/cameras`, `teleop` | pendiente de prueba física |
 | Scripts de primer contacto con el robot (tests 1–7) | `scripts/`, `run_robot.sh` | pendiente de prueba física |
