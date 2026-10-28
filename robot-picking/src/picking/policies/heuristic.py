@@ -55,6 +55,7 @@ class ScriptedPickPlace(Policy):
         self.grasp_yaw = 0.0
         self._done = False
         self.phase_log: list[str] = []
+        self.clean_action = None
         self.lifted_z = None
         self.stall = 0
         self._last_tcp = None
@@ -76,6 +77,7 @@ class ScriptedPickPlace(Policy):
             R_des = rotvec_to_mat(np.array([0, 0, yaw_target])) @ rotvec_to_mat(np.array([np.pi, 0, 0]))
             rv = mat_to_rotvec(R_des @ R_cur.T)
             drot = np.clip(rv / self.max_dr, -1, 1)
+        self.clean_action = Action(dpos=dpos.copy(), drot=drot.copy(), gripper=gripper)  # DART label
         if self.noise_std > 0:
             dpos = np.clip(dpos + self.rng.normal(0, self.noise_std, 3), -1, 1)
         return Action(dpos=dpos, drot=drot, gripper=gripper)

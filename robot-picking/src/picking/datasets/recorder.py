@@ -42,6 +42,7 @@ class EpisodeRecorder:
         robot_type: str = "mycobot_280_m5",
         use_videos: bool = False,
         env_state_fn=None,
+        dart_labels: bool = False,
     ):
         """env_state_fn: optional callable(StepCallbackData) -> np.ndarray (ENV_STATE_DIM,) recorded as
         observation.environment_state (explicit perception features)."""
@@ -50,6 +51,7 @@ class EpisodeRecorder:
         self.root = root or next_dataset_root(name)
         self.repo_id = f"local/{self.root.name}"
         self.env_state_fn = env_state_fn
+        self.dart_labels = dart_labels  # DART: label = expert's clean action while the executed action was perturbed
         self.features = build_features(camera_names, image_hw, with_depth, use_videos, with_env_state=env_state_fn is not None)
         self.ds = LeRobotDataset.create(
             repo_id=self.repo_id,
@@ -83,6 +85,8 @@ class EpisodeRecorder:
     def on_step(self, d: StepCallbackData) -> None:
         obs = d.obs
         executed = d.safe_action.to_array() if d.safe_action is not None else np.zeros(7, np.float32)
+        if self.dart_labels and d.info.get("clean_action") is not None:
+            executed = d.info["clean_action"].to_array()
         raw = d.policy_action.to_array() if d.policy_action is not None else np.zeros(7, np.float32)
         after = d.state_after
         frame = {

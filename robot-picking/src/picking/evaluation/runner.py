@@ -157,7 +157,7 @@ def run_episode(
         evaluator.update(env.sim_time(), state_after.tcp.position, obj_pos, state_after.gripper, contacts, env.object_in_tray(target), moved_other)
         n_steps = step + 1
         if step_callback is not None:
-            step_callback(StepCallbackData(step, obs, action, safe, state_before, state_after, priv, {"contacts": contacts, "in_tray": env.object_in_tray(target)}))
+            step_callback(StepCallbackData(step, obs, action, safe, state_before, state_after, priv, {"contacts": contacts, "in_tray": env.object_in_tray(target), "clean_action": getattr(policy, "clean_action", None)}))
         if evaluator.collision and cfg["sim"].get("stop_on_collision", True):
             break
         task_achieved = evaluator.grasped and env.object_in_tray(target) and state_after.gripper < 0.5 and not contacts.finger_object.get(target, 0)

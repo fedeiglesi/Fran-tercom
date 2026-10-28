@@ -36,6 +36,8 @@ def main() -> int:
     ap.add_argument("--keep-failures", action="store_true", default=True)
     ap.add_argument("--depth", action="store_true")
     ap.add_argument("--max-episodes-fail-ratio", type=float, default=0.5)
+    ap.add_argument("--dart-noise", type=float, default=0.0, help="DART: execute noisy actions (std, normalized units) but label with the expert's clean action")
+    ap.add_argument("--dart-fraction", type=float, default=0.5, help="fraction of episodes recorded with DART noise")
     ap.add_argument("--lowdim", action="store_true", help="no images; record observation.environment_state = object pose (privileged + noise)")
     ap.add_argument("--env-state-noise", type=float, default=0.002, help="[m] gaussian noise on the recorded object position (matches measured perception error)")
     args = ap.parse_args()
@@ -72,6 +74,7 @@ def main() -> int:
         image_hw=(image_size[1], image_size[0]),
         with_depth=args.depth and not args.lowdim,
         env_state_fn=env_state if args.lowdim else None,
+        dart_labels=args.dart_noise > 0,
         metadata={"source": "simulation", "config": args.config, "config_resolved": cfg, "safety": args.safety, "policy": policy.name, "policy_version": policy.version, "action_noise": args.action_noise, "seed_start": args.seed_start, "n_requested": args.episodes},
     )
     results = []
@@ -79,6 +82,7 @@ def main() -> int:
     for i in range(args.episodes):
         seed = args.seed_start + i
         held["v"] = None
+        policy.noise_std = args.dart_noise if (args.dart_noise > 0 and (i % 100) < args.dart_fraction * 100) else args.action_noise
         r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, with_depth=args.depth and not args.lowdim, step_callback=rec.on_step, force_images=not args.lowdim)
         rec.end_episode(r)
         results.append(r)
