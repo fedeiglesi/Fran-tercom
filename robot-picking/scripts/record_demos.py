@@ -51,10 +51,19 @@ def main() -> int:
     image_size = tuple(cfg["camera"]["policy_image_size"])  # (w, h)
     noise_rng = np.random.default_rng(args.seed_start + 99)
 
+    from picking.perception.env_state import env_state_vector
+
+    held = {"v": None}
+
     def env_state(d):
-        p = np.asarray(d.privileged["object_pos"], float) + noise_rng.normal(0, args.env_state_noise, 3)
-        yaw = float(d.privileged["object_yaw"])
-        return np.array([p[0], p[1], p[2], np.cos(yaw), np.sin(yaw)], np.float32)
+        # emulate the perception provider: (re)observe only when the gripper is open and the TCP is high,
+        # otherwise hold the last observation (object occluded / in hand)
+        obs = d.obs
+        may_observe = held["v"] is None or (obs.gripper < 0.3 and obs.tcp_pose[2] > 0.05)
+        if may_observe or d.step == 0:
+            p = np.asarray(d.privileged["object_pos"], float) + noise_rng.normal(0, args.env_state_noise, 3)
+            held["v"] = env_state_vector(p, float(d.privileged["object_yaw"]), float(d.privileged.get("object_yaw_period", np.pi / 2)))
+        return held["v"]
 
     rec = EpisodeRecorder(
         name=args.name,
@@ -69,6 +78,7 @@ def main() -> int:
     t0 = time.time()
     for i in range(args.episodes):
         seed = args.seed_start + i
+        held["v"] = None
         r = run_episode(env, adapter, policy, safety, seed=seed, image_size=image_size, with_depth=args.depth and not args.lowdim, step_callback=rec.on_step, force_images=not args.lowdim)
         rec.end_episode(r)
         results.append(r)

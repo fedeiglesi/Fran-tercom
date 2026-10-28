@@ -2,7 +2,8 @@
 
 SEE-on-demand: the object is (re-)detected from the full camera frame + depth whenever the gripper is open
 and the arm is above approach height (i.e. before an approach starts), and the last detection is held
-while a grasp is being executed (the object may be occluded by the gripper).
+while a grasp is being executed (the object may be occluded by the gripper). The SAME hold rule is applied
+when recording demonstrations (scripts/record_demos.py --lowdim) so training and deployment match.
 """
 from __future__ import annotations
 
@@ -49,4 +50,11 @@ class PerceptionEnvState:
         if self.detection is None:
             return np.zeros(5, np.float32)
         d = self.detection
-        return np.array([d.position_base[0], d.position_base[1], d.position_base[2], np.cos(d.yaw), np.sin(d.yaw)], np.float32)
+        return env_state_vector(d.position_base, d.yaw, d.yaw_period)
+
+
+def env_state_vector(position, yaw: float, yaw_period: float) -> np.ndarray:
+    """[x, y, z, cos(k*yaw), sin(k*yaw)] with k = 2*pi/period: invariant to the object's rotational symmetry
+    (k = 4 for a square top face), so a detector reporting yaw+90deg gives the same feature."""
+    k = float(np.round(2 * np.pi / max(yaw_period, 1e-6)))
+    return np.array([position[0], position[1], position[2], np.cos(k * yaw), np.sin(k * yaw)], np.float32)
