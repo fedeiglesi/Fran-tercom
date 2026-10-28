@@ -32,8 +32,10 @@ class ScriptedPickPlace(Policy):
         align_yaw: bool = True,
         rng: np.random.Generator | None = None,
         transport_gain: float = 0.6,
+        min_speed: float = 0.0,
     ):
         self.transport_gain = transport_gain
+        self.min_speed = min_speed
         self.max_dp = max_delta_pos
         self.max_dr = max_delta_rot
         self.approach_height = approach_height
@@ -71,6 +73,12 @@ class ScriptedPickPlace(Policy):
     def _move(self, tcp: np.ndarray, target: np.ndarray, gripper: float, yaw_target: float | None, R_cur: np.ndarray) -> Action:
         err = target - tcp
         dpos = np.clip(self.gain * err / self.max_dp, -1, 1)
+        # speed floor: keep a minimum commanded speed until close to the target so that a learned imitator
+        # does not learn to "creep" (vanishing actions near goals stall under small prediction errors)
+        n = np.linalg.norm(dpos)
+        dist = np.linalg.norm(err)
+        if self.min_speed > 0 and 0 < n < self.min_speed and dist > 0.004:
+            dpos = dpos / n * min(self.min_speed, dist / self.max_dp)
         drot = np.zeros(3)
         if yaw_target is not None and self.align_yaw:
             # rotate about world z so gripper x axis aligns with object yaw (mod 90 deg for a cube)
