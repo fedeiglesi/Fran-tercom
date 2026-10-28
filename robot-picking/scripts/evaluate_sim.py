@@ -43,7 +43,7 @@ def make_policy(args, cfg, safety: SafetyFilter):
     if args.policy == "act":
         from picking.policies.act_policy import ACTPolicyWrapper
 
-        return ACTPolicyWrapper(args.checkpoint, device=args.device)
+        return ACTPolicyWrapper(args.checkpoint, device=args.device, act_override=json.loads(args.act_override) if args.act_override else None)
     if args.policy == "remote":
         from picking.policies.remote import RemotePolicy
 
@@ -60,6 +60,7 @@ def main() -> int:
     ap.add_argument("--calibration", default=None, help="perception policy: calibration YAML (default: sim ground truth)")
     ap.add_argument("--color", default="red")
     ap.add_argument("--checkpoint", default=None)
+    ap.add_argument("--act-override", default=None, help='JSON of inference-time ACT config changes, e.g. {"n_action_steps": 5}')
     ap.add_argument("--server-url", default="ws://127.0.0.1:8765")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--episodes", type=int, default=100)

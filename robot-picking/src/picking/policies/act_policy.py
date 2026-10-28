@@ -63,11 +63,16 @@ class ACTPolicyWrapper(Policy):
     name = "act"
     needs_images = True
 
-    def __init__(self, checkpoint_dir: str | Path, device: str = "cpu"):
+    def __init__(self, checkpoint_dir: str | Path, device: str = "cpu", act_override: dict | None = None):
+        """act_override: inference-time ACT config changes (e.g. {"n_action_steps": 5} or
+        {"temporal_ensemble_coeff": 0.01, "n_action_steps": 1}); weights are unchanged."""
         self.ckpt = Path(checkpoint_dir)
         meta = json.load(open(self.ckpt / "picking_policy.json"))
         self.version = meta.get("version", self.ckpt.name)
-        self.cfg = meta["config"]
+        self.cfg = json.loads(json.dumps(meta["config"]))
+        if act_override:
+            self.cfg["act"].update(act_override)
+            self.version += "+" + ",".join(f"{k}={v}" for k, v in act_override.items())
         self.image_key = self.cfg["image_key"]
         self.state_key = self.cfg["state_key"]
         self.camera_name = self.image_key.split(".")[-1]
