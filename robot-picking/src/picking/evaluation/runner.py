@@ -160,7 +160,9 @@ def run_episode(
             step_callback(StepCallbackData(step, obs, action, safe, state_before, state_after, priv, {"contacts": contacts, "in_tray": env.object_in_tray(target)}))
         if evaluator.collision and cfg["sim"].get("stop_on_collision", True):
             break
-        if done_countdown is None and policy.done():
+        task_achieved = evaluator.grasped and env.object_in_tray(target) and state_after.gripper < 0.5 and not contacts.finger_object.get(target, 0)
+        if done_countdown is None and (policy.done() or task_achieved):
+            # learned policies never declare "done": end the episode once the object rests in the tray
             done_countdown = settle_steps_after_done
         if done_countdown is not None:
             done_countdown -= 1
