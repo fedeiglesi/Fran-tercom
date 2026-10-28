@@ -51,7 +51,7 @@ def main() -> int:
     image_size = tuple(cfg["camera"]["policy_image_size"])  # (w, h)
     noise_rng = np.random.default_rng(args.seed_start + 99)
 
-    from picking.perception.env_state import env_state_vector
+    from picking.perception.env_state import REDETECT_MIN_TCP_Z, env_state_vector
 
     held = {"v": None}
 
@@ -59,7 +59,7 @@ def main() -> int:
         # emulate the perception provider: (re)observe only when the gripper is open and the TCP is high,
         # otherwise hold the last observation (object occluded / in hand)
         obs = d.obs
-        may_observe = held["v"] is None or (obs.gripper < 0.3 and obs.tcp_pose[2] > 0.05)
+        may_observe = held["v"] is None or (obs.gripper < 0.3 and obs.tcp_pose[2] > REDETECT_MIN_TCP_Z)
         if may_observe or d.step == 0:
             p = np.asarray(d.privileged["object_pos"], float) + noise_rng.normal(0, args.env_state_noise, 3)
             held["v"] = env_state_vector(p, float(d.privileged["object_yaw"]), float(d.privileged.get("object_yaw_period", np.pi / 2)))

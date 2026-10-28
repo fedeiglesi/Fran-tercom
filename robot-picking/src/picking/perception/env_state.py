@@ -13,8 +13,13 @@ from picking.core.types import Observation
 from picking.perception.segmentation import ObjectDetection, detect_colored_object
 
 
+# Re-detect only when the gripper is open AND high enough not to occlude the object (home height is 0.118 m).
+# The SAME rule is used when recording low-dim demos, so training and deployment see identical features.
+REDETECT_MIN_TCP_Z = 0.10
+
+
 class PerceptionEnvState:
-    def __init__(self, camera: str, color: str, object_id: str, redetect_min_tcp_z: float = 0.05, roi=None):
+    def __init__(self, camera: str, color: str, object_id: str, redetect_min_tcp_z: float = REDETECT_MIN_TCP_Z, roi=None):
         self.camera = camera
         self.color = color
         self.object_id = object_id
