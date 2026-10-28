@@ -79,8 +79,8 @@ def robot_xml(cfg: dict, with_gripper: bool = True, kinematic_only: bool = False
     damping = cfg.get("joint_damping", 1.5)
     tcp = cfg.get("tcp_offset", [0, 0, 0.065])
     pad_fric = cfg.get("gripper_pad_friction", 2.0)
-    max_open = cfg.get("gripper_max_opening", 0.045)
-    half_open = max_open / 2
+    max_open = cfg.get("gripper_max_opening", 0.045)  # INNER opening between pad faces when fully open
+    half_open = max_open / 2 + 0.004  # finger joint value (pad centre); pads are 4 mm half-thick
     col = "" if kinematic_only else 'class="arm_col"'
     vis = 'class="arm_vis"'
 
@@ -138,7 +138,7 @@ def robot_xml(cfg: dict, with_gripper: bool = True, kinematic_only: bool = False
                 f'<geom {vis} type="box" size="0.004 0.008 0.02" pos="{-sign*0.0:.4f} 0 0.018" rgba="0.2 0.2 0.2 1"/>'
                 + (
                     f'<geom class="pad_col" name="pad_{side}" type="box" size="0.004 0.008 0.02" '
-                    f'pos="0 0 0.018" friction="{pad_fric} 0.01 0.0005"/>'
+                    f'pos="0 0 0.018" friction="{pad_fric} 0.02 0.001"/>'
                     if not kinematic_only
                     else ""
                 )
@@ -153,7 +153,7 @@ def robot_xml(cfg: dict, with_gripper: bool = True, kinematic_only: bool = False
     )
     if with_gripper:
         actuators += (
-            f'\n<position name="act_gripper" joint="finger_left" kp="150" ctrlrange="0.004 {half_open:.4f}" '
+            f'\n<position name="act_gripper" joint="finger_left" kp="{cfg.get("gripper_kp", 400.0)}" ctrlrange="0.004 {half_open:.4f}" '
             'forcerange="-8 8"/>'
         )
         equality = (
@@ -241,7 +241,7 @@ def scene_xml(cfg: dict, object_overrides: dict | None = None, camera_override: 
   <default>
     <default class="arm_vis"><geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.95 0.95 0.95 1"/></default>
     <default class="arm_col"><geom type="mesh" contype="1" conaffinity="1" group="3" rgba="0.5 0.5 1 0.3" margin="0.0005"/></default>
-    <default class="pad_col"><geom contype="1" conaffinity="1" group="3" condim="4" solimp="0.95 0.99 0.001" solref="0.004 1" margin="0.0005" priority="2"/></default>
+    <default class="pad_col"><geom contype="1" conaffinity="1" group="3" condim="6" solimp="0.95 0.99 0.001" solref="0.004 1" margin="0.0005" priority="2"/></default>
   </default>
   <asset>
     {mesh_assets()}

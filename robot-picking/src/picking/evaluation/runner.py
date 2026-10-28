@@ -51,7 +51,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         from picking.cameras.sim_camera import SimCamera
 
         i = env.camera_intrinsics()
-        extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": env.tray_center()}
+        extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": env.tray_center(), "tray_footprint": env.tray_footprint()}
     elif with_images:
         rgb = env.render_rgb()
         crop = env.cfg["camera"].get("policy_crop")
@@ -68,11 +68,21 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
             if image_size is not None:
                 d = cv2.resize(d, tuple(image_size), interpolation=cv2.INTER_NEAREST)
             depth[env.cam_name] = np.ascontiguousarray(d)
-    target = env.cfg["task"]["target_object"]
+    target = env.current_target
     T_obj = env.object_pose(target)
+    yaw = float(mat_to_euler_xyz(T_obj[:3, :3])[2])
+    spec = env.target_spec()
+    period = np.pi / 2
+    if spec.get("type") == "box":
+        sx, sy = spec["size"][0], spec["size"][1]
+        if sx > sy:
+            yaw += np.pi / 2  # grasp across the short side
+        if min(sx, sy) / max(sx, sy) < 0.8:
+            period = np.pi
     priv = {
         "object_pos": T_obj[:3, 3].copy(),
-        "object_yaw": float(mat_to_euler_xyz(T_obj[:3, :3])[2]),
+        "object_yaw": yaw,
+        "object_yaw_period": period,
         "tray_pos": env.tray_center(),
         "object_id": target,
     }
@@ -107,12 +117,13 @@ def run_episode(
 ) -> EpisodeResult:
     cfg = env.cfg
     task_cfg = cfg["task"]
-    instruction = instruction or task_cfg["instruction"]
-    target = task_cfg["target_object"]
     episode_id = episode_id or f"ep_{seed}_{uuid.uuid4().hex[:8]}"
     env.reset(seed=seed, randomize=randomize)
+    target = env.current_target
+    spec = env.target_spec()
+    instruction = instruction or env.instruction()
     adapter.reset_targets()
-    policy.reset(instruction, {"target_object": target})
+    policy.reset(instruction, {"target_object": target, "color": spec.get("color_name"), "name": spec.get("name", target), "half_height_m": env.object_half_extent_z(target)})
     safety.events.clear()
     safety.n_rejected = safety.n_clamped = 0
     evaluator = EpisodeEvaluator(target_object=target, lift_height=float(task_cfg["lift_height"]), max_steps=env.max_steps)

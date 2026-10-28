@@ -37,6 +37,9 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
 
     def reset(self, instruction: str = "", task_info: dict | None = None) -> None:
         super().reset(instruction, task_info)
+        if task_info:
+            self.color = task_info.get("color") or self.color
+            self.object_id = task_info.get("target_object") or self.object_id
         self.detection = None
         self.last_rgb = None
         self.n_detect_fail = 0
@@ -44,14 +47,14 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         self.pixel_before = None
 
     def needs_frame_now(self) -> bool:
-        return (self.grasp_target is None and self.phase == "approach") or self.phase == "verify"
+        return (self.grasp_target is None and self.phase == "approach") or self.phase in ("verify", "verify2")
 
     def _observe(self, obs: Observation) -> bool:
         rgb = obs.images[self.camera]
         depth = obs.depth.get(self.camera)
         if depth is None:
             return False
-        det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi)
+        det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"))
         if det is None:
             self.n_detect_fail += 1
             return False
@@ -71,6 +74,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         priv = {
             "object_pos": self.detection.position_base if self.detection is not None else np.zeros(3),
             "object_yaw": self.detection.yaw if self.detection is not None else 0.0,
+            "object_yaw_period": self.detection.yaw_period if self.detection is not None else np.pi / 2,
             "tray_pos": np.asarray(obs.extra["tray_pos"], float),
         }
         if self.phase == "verify":
@@ -81,6 +85,10 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
             priv["object_pos"] = np.array([*obs.tcp_pose[:2], (self.grasp_target[2] + 1.0) if vd.holding else self.grasp_target[2]])  # drive the base-class verify logic
         obs.extra["privileged"] = priv
         return super().act(obs)
+
+    def _still_holding(self, obs: Observation) -> bool:
+        opening = obs.extra.get("gripper_opening_m")
+        return bool(opening is None or opening > 0.015 * 0.5)
 
     def info(self) -> dict:
         d = super().info()

@@ -3,7 +3,7 @@
 workspace:
   x: [0.08, 0.30]
   y: [-0.22, 0.22]
-  z: [0.008, 0.22]          # TCP (grasp centre) height above the table top (0.22 = practical reach limit)
+  z: [0.004, 0.22]          # TCP (pad tips) may go down to 4 mm above the table (flat objects); 0.22 = reach limit
 orientation:
   max_tilt_from_down_deg: 35.0    # gripper z axis must stay within this cone around straight-down
 per_step:

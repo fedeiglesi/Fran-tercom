@@ -23,7 +23,8 @@ from picking.utils.gl import select_gl_backend  # noqa: E402,F401
 class ContactSummary:
     robot_table: bool = False
     robot_tray: bool = False
-    robot_object: bool = False  # non-finger robot part touching an object
+    robot_object: bool = False  # arm link (not gripper) touching an object
+    palm_object: bool = False  # grasped object pressing against the gripper body: normal, not a collision
     robot_self: bool = False
     finger_object: dict[str, int] = field(default_factory=dict)  # object id -> number of pads in contact
     finger_table: bool = False
@@ -68,8 +69,8 @@ class PickPlaceEnv:
         self.act_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{n}") for n in JOINT_NAMES]
         self.grip_act = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "act_gripper")
         self.finger_left_qadr = self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "finger_left")]
-        self.half_open = float(cfg["robot"]["gripper_max_opening"]) / 2
         self.min_open = 0.004  # pad half thickness: fingers touch at this joint value
+        self.half_open = float(cfg["robot"]["gripper_max_opening"]) / 2 + self.min_open  # joint value fully open
         self.tcp_site = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "tcp")
         self.tray_site = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "tray_center")
         self.object_ids = [o["id"] for o in cfg["scene"]["objects"]]
@@ -88,6 +89,7 @@ class PickPlaceEnv:
         self.geom_floor = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self.geom_tray = {mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n) for n in ["tray_floor", "tray_w0", "tray_w1", "tray_w2", "tray_w3"]}
         self.geom_pads = {mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n): n for n in ["pad_left", "pad_right"]}
+        self.geom_gripper_body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "gripper_col")
         self.geom_robot = set()
         for g in range(self.model.ngeom):
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
@@ -98,6 +100,12 @@ class PickPlaceEnv:
         self.gravity_comp = bool(cfg["robot"].get("gravity_compensation", True))
         self.rng = np.random.default_rng(0)
         self.episode_rand: EpisodeRandomization | None = None
+        self.one_object = bool(cfg["scene"].get("one_object_per_episode", False))
+        self.parking = np.asarray(cfg["scene"].get("parking_position", [-0.35, 0.0, 0.05]), float)
+        self.object_specs = {o["id"]: o for o in cfg["scene"]["objects"]}
+        self.current_target = cfg["task"].get("target_object", self.object_ids[0])
+        if self.current_target == "random":
+            self.current_target = self.object_ids[0]
         self.step_count = 0
         self.sim_time_at_reset = 0.0
         self.last_seed = 0
@@ -120,6 +128,14 @@ class PickPlaceEnv:
         self.model.cam_quat[:] = self._nominal["cam_quat"]
         self.episode_rand = sample_randomization(self.cfg, self.rng, enabled)
         er = self.episode_rand
+        if self.one_object:
+            # choose the episode's target; park the others out of sight (deterministic given the seed)
+            self.current_target = self.object_ids[int(self.rng.integers(len(self.object_ids)))]
+            for k, oid in enumerate(self.object_ids):
+                if oid != self.current_target:
+                    er.objects[oid]["position"] = self.parking + np.array([0.0, 0.05 * k - 0.2, 0.0])
+        elif self.cfg["task"].get("target_object", "random") != "random":
+            self.current_target = self.cfg["task"]["target_object"]
         for oid, spec in er.objects.items():
             self.model.body_mass[self.object_body[oid]] = spec["mass"]
             self.model.geom_friction[self.object_geom[oid], 0] = spec["friction"]
@@ -202,6 +218,8 @@ class PickPlaceEnv:
                 oid = self.geom_obj_to_id[og]
                 if is_pad:
                     s.finger_object[oid] = s.finger_object.get(oid, 0) | (1 if self.geom_pads[rg] == "pad_left" else 2)
+                elif rg == self.geom_gripper_body:
+                    s.palm_object = True
                 else:
                     s.robot_object = True
 
@@ -245,8 +263,23 @@ class PickPlaceEnv:
             return float(size[1] + (size[0] if t == self.mj.mjtGeom.mjGEOM_CAPSULE else 0))
         return float(size[0])
 
+    def target_spec(self) -> dict:
+        return self.object_specs[self.current_target]
+
+    def instruction(self) -> str:
+        t = self.cfg["task"]
+        if "instruction_template" in t:
+            return t["instruction_template"].format(name=self.target_spec().get("name", self.current_target))
+        return t["instruction"]
+
     def tray_center(self) -> np.ndarray:
         return self.data.site_xpos[self.tray_site].copy()
+
+    def tray_footprint(self) -> tuple[np.ndarray, np.ndarray]:
+        """(centre xy, half-size xy incl. walls) in the base frame, for perception masking."""
+        c = self.tray_center()
+        wt = self.cfg["scene"]["tray"]["wall_thickness"]
+        return c[:2].copy(), self.tray_inner_halfsize() + wt
 
     def tray_inner_halfsize(self) -> np.ndarray:
         iw, ih = self.cfg["scene"]["tray"]["inner_size"]

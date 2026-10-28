@@ -31,7 +31,9 @@ class ScriptedPickPlace(Policy):
         noise_std: float = 0.0,
         align_yaw: bool = True,
         rng: np.random.Generator | None = None,
+        transport_gain: float = 0.6,
     ):
+        self.transport_gain = transport_gain
         self.max_dp = max_delta_pos
         self.max_dr = max_delta_rot
         self.approach_height = approach_height
@@ -89,7 +91,8 @@ class ScriptedPickPlace(Policy):
         # choose grasp yaw closest to current gripper yaw (cube symmetric every 90 deg)
         if self.grasp_target is None:
             cur_yaw = np.arctan2(R_cur[1, 0], R_cur[0, 0])
-            cands = [obj_yaw + k * np.pi / 2 for k in range(-2, 3)]
+            period = float(priv.get("object_yaw_period", np.pi / 2))
+            cands = [obj_yaw + k * period for k in range(-2, 3)]
             self.grasp_yaw = min(cands, key=lambda y: abs(np.angle(np.exp(1j * (y - cur_yaw)))))
             self.grasp_target = obj.copy()
         ph = self.phase
@@ -141,13 +144,27 @@ class ScriptedPickPlace(Policy):
             return self._move(tcp, tcp, 1.0 if holding else 0.0, None, R_cur)
         if ph == "transport":
             tgt = np.array([tray[0], tray[1], base_z + self.lift_height])
-            a = self._move(tcp, tgt, 1.0, None, R_cur)
+            a = self._move(tcp, tgt, 1.0, 0.0, R_cur)  # yaw back to neutral: keeps IK well-conditioned near the tray
+            a.dpos *= self.transport_gain  # move slower while holding (less inertial load on the grasp)
             if np.linalg.norm(tgt[:2] - tcp[:2]) < 0.006:
-                self._next("lower")
+                self._next("verify2")
             return a
+        if ph == "verify2":
+            # VERIFY again after transport: object still held? else re-observe and retry (recovery)
+            holding = g_state < 0.97 and self._still_holding(obs)
+            if holding:
+                self._next("lower")
+            else:
+                self.retries += 1
+                if self.retries > self.max_retries:
+                    self._next("failed")
+                else:
+                    self.grasp_target = None
+                    self._next("approach")
+            return self._move(tcp, tcp, 1.0 if holding else 0.0, None, R_cur)
         if ph == "lower":
             tgt = np.array([tray[0], tray[1], tray[2] + self.place_height])
-            a = self._move(tcp, tgt, 1.0, None, R_cur)
+            a = self._move(tcp, tgt, 1.0, 0.0, R_cur)
             if np.linalg.norm(tgt - tcp) < 0.004:
                 self._next("release")
             return a
@@ -169,6 +186,11 @@ class ScriptedPickPlace(Policy):
             self._done = True
             return Action.zero(0.0)
         return Action.zero(0.0)
+
+    def _still_holding(self, obs: Observation) -> bool:
+        priv = obs.extra["privileged"]
+        obj = np.asarray(priv["object_pos"], float)
+        return bool(np.linalg.norm(obj[:2] - obs.tcp_pose[:2]) < 0.03 and obj[2] > self.grasp_target[2] + 0.03)
 
     def _next(self, phase: str) -> None:
         self.phase_log.append(phase)
