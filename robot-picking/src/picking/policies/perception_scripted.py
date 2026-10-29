@@ -11,7 +11,7 @@ import logging
 import numpy as np
 
 from picking.core.types import Action, Observation
-from picking.perception.segmentation import detect_colored_object
+from picking.perception.segmentation import detect_by_height, detect_colored_object
 from picking.perception.verification import verify_grasp
 from picking.policies.heuristic import ScriptedPickPlace
 
@@ -23,8 +23,9 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
     version = "1.0"
     needs_images = True
 
-    def __init__(self, *args, camera: str, color: str = "red", object_id: str = "red_cube", known_height_m: float | None = None, roi=None, **kw):
+    def __init__(self, *args, camera: str, color: str = "red", object_id: str = "red_cube", known_height_m: float | None = None, roi=None, detector: str = "color", **kw):
         self.camera = camera
+        self.detector = detector  # "color" | "height" (colour-agnostic: anything above the table)
         self.color = color
         self.object_id = object_id
         self.known_height = known_height_m
@@ -54,7 +55,10 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         depth = obs.depth.get(self.camera)
         if depth is None:
             return False
-        det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"))
+        if self.detector == "height":
+            det = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"), workspace_xy=((0.08, 0.30), (-0.22, 0.22)))
+        else:
+            det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"))
         if det is None:
             self.n_detect_fail += 1
             return False

@@ -134,3 +134,75 @@ def detect_colored_object(
         yaw_period = np.pi / 2
     conf = float(min(1.0, sel.sum() / 50.0))
     return ObjectDetection(object_id, np.asarray(cent, float), centre, top, yaw, height, int(sel.sum()), conf, yaw_period)
+
+
+def detect_by_height(
+    rgb: np.ndarray,
+    depth: np.ndarray,
+    intr: Intrinsics,
+    T_base_camera: np.ndarray,
+    object_id: str = "object",
+    table_z: float = 0.0,
+    min_height_m: float = 0.004,
+    max_height_m: float = 0.06,
+    roi: tuple[int, int, int, int] | None = None,
+    exclude_xy: tuple[np.ndarray, np.ndarray] | None = None,
+    workspace_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
+    stride: int = 2,
+    min_pixels: int = 15,
+) -> ObjectDetection | None:
+    """Colour-agnostic localisation: everything that rises above the table plane inside the workspace is an
+    object candidate (works for black / untextured parts as long as depth is valid). Returns the largest blob
+    not inside the excluded (tray) footprint. Same output type as detect_colored_object."""
+    h, w = depth.shape
+    ys, xs = np.mgrid[0:h:stride, 0:w:stride]
+    ys, xs = ys.ravel(), xs.ravel()
+    zs = depth[ys, xs]
+    ok = np.isfinite(zs) & (zs > 0.05)
+    if roi is not None:
+        x0, y0, x1, y1 = roi
+        ok &= (xs >= x0) & (xs < x1) & (ys >= y0) & (ys < y1)
+    u, v, z = xs[ok].astype(np.float64), ys[ok].astype(np.float64), zs[ok].astype(np.float64)
+    pts_cam = np.stack([(u - intr.cx) * z / intr.fx, (v - intr.cy) * z / intr.fy, z], axis=1)
+    pts = (T_base_camera[:3, :3] @ pts_cam.T).T + T_base_camera[:3, 3]
+    # height band: above the table but below the arm/gripper (which hovers at >= 0.10 m when observing)
+    above = (pts[:, 2] > table_z + min_height_m) & (pts[:, 2] < table_z + max_height_m)
+    if workspace_xy is not None:
+        (xa, xb), (ya, yb) = workspace_xy
+        above &= (pts[:, 0] >= xa) & (pts[:, 0] <= xb) & (pts[:, 1] >= ya) & (pts[:, 1] <= yb)
+    mask = np.zeros((h // stride + 1, w // stride + 1), np.uint8)
+    mask[(ys[ok][above] // stride), (xs[ok][above] // stride)] = 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    for blob, cent in blobs_by_size(mask, min_pixels=max(3, min_pixels // (stride * stride))):
+        by, bx = np.nonzero(blob)
+        sel_idx = np.zeros(len(pts), bool)
+        # map blob pixels back to point indices
+        key = set(zip((by * stride).tolist(), (bx * stride).tolist()))
+        for i, (yy, xx) in enumerate(zip(ys[ok], xs[ok])):
+            if (int(yy), int(xx)) in key:
+                sel_idx[i] = True
+        p = pts[sel_idx & above]
+        if len(p) < 5:
+            continue
+        z_max = float(np.percentile(p[:, 2], 90))
+        top = p[p[:, 2] > z_max - 0.003]
+        centre_xy = top[:, :2].mean(0)
+        if exclude_xy is not None:
+            c, hs = exclude_xy
+            if np.all(np.abs(centre_xy - c) <= hs + 0.01):
+                continue
+        height = max(z_max - table_z, 0.005)
+        centre = np.array([centre_xy[0], centre_xy[1], table_z + height / 2])
+        top_pt = np.array([centre_xy[0], centre_xy[1], z_max])
+        xy = top[:, :2]
+        yaw, period = 0.0, np.pi / 2
+        if len(xy) >= 5:
+            pts_mm = ((xy - xy.mean(0)) * 1000.0).astype(np.float32)
+            (_, _), (w_r, h_r), ang = cv2.minAreaRect(pts_mm)
+            yaw = float(np.deg2rad(ang))
+            if w_r > h_r:
+                yaw += np.pi / 2
+            yaw = float(np.angle(np.exp(1j * yaw)))
+            period = np.pi / 2 if min(w_r, h_r) / max(w_r, h_r, 1e-6) > 0.8 else np.pi
+        return ObjectDetection(object_id, np.asarray(cent, float) * stride, centre, top_pt, yaw, float(height), int(len(top)), 1.0, period)
+    return None

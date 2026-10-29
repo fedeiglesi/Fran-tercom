@@ -37,7 +37,7 @@ def make_policy(args, cfg, safety: SafetyFilter):
         from picking.policies.perception_scripted import PerceptionScriptedPickPlace
 
         T = load_calibration(args.calibration) if args.calibration else None
-        pol = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=cfg["camera"]["name"], color=args.color, object_id=cfg["task"]["target_object"], lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None)
+        pol = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=cfg["camera"]["name"], color=args.color, object_id=cfg["task"]["target_object"], lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None, detector=args.detector)
         pol.T_override = T
         return pol
     if args.policy == "act":
@@ -73,6 +73,7 @@ def main() -> int:
     ap.add_argument("--policy", default="heuristic", choices=["heuristic", "perception", "act", "remote"])
     ap.add_argument("--calibration", default=None, help="perception policy: calibration YAML (default: sim ground truth)")
     ap.add_argument("--color", default="red")
+    ap.add_argument("--detector", default="color", choices=["color", "height"], help="perception policy: colour blob or colour-agnostic height-above-table")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--act-override", default=None, help='JSON of inference-time ACT config changes, e.g. {"n_action_steps": 5}')
     ap.add_argument("--server-url", default="ws://127.0.0.1:8765")
