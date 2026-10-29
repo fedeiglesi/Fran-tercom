@@ -140,8 +140,8 @@ class ScriptedPickPlace(Policy):
             # decelerate in the last centimetres: with servo lag / latency a full-speed descent overshoots into
             # the table (the setpoint runs ahead of the measured pose). Proportional within `descend_slow_zone`.
             dz = tgt[2] - tcp[2]
-            if abs(dz) < self.descend_slow_zone:
-                a.dpos[2] = float(np.clip(dz / self.descend_slow_zone, -1, 1)) * a.dpos[2] / max(abs(a.dpos[2]), 1e-6) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed) if abs(a.dpos[2]) > 1e-6 else 0.0
+            if 1e-4 < abs(dz) < self.descend_slow_zone:
+                a.dpos[2] = float(np.sign(dz) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed))
             # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
             # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
