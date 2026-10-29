@@ -35,7 +35,11 @@ class ScriptedPickPlace(Policy):
         min_speed: float = 0.0,
         preshape_margin: float | None = None,
         gripper_max_opening: float = 0.045,
+        descend_slow_zone: float = 0.025,
+        descend_min_speed: float = 0.2,
     ):
+        self.descend_slow_zone = descend_slow_zone
+        self.descend_min_speed = descend_min_speed
         self.transport_gain = transport_gain
         self.min_speed = min_speed
         self.preshape_margin = preshape_margin  # None = approach fully open; else opening = object width + margin
@@ -133,6 +137,11 @@ class ScriptedPickPlace(Policy):
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])
             a = self._move(tcp, tgt, g_open, self.grasp_yaw, R_cur)
+            # decelerate in the last centimetres: with servo lag / latency a full-speed descent overshoots into
+            # the table (the setpoint runs ahead of the measured pose). Proportional within `descend_slow_zone`.
+            dz = tgt[2] - tcp[2]
+            if abs(dz) < self.descend_slow_zone:
+                a.dpos[2] = float(np.clip(dz / self.descend_slow_zone, -1, 1)) * a.dpos[2] / max(abs(a.dpos[2]), 1e-6) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed) if abs(a.dpos[2]) > 1e-6 else 0.0
             # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
             # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001

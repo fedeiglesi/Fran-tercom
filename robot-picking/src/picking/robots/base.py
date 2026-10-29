@@ -62,7 +62,7 @@ class RobotAdapter(abc.ABC):
     @abc.abstractmethod
     def home(self) -> None: ...
 
-    max_setpoint_lead: float = 0.03  # [m] if the commanded TCP is further than this from the measured one, re-anchor
+    max_setpoint_lead: float = 0.015  # [m] if the commanded TCP is further than this from the measured one, re-anchor
 
     def commanded_tcp(self) -> np.ndarray | None:
         """Last commanded TCP pose (4x4) if the adapter tracks setpoints, else None."""
