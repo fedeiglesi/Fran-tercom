@@ -76,7 +76,7 @@ class ACTPolicyWrapper(Policy):
         self.version = meta.get("version", self.ckpt.name)
         self.cfg = json.loads(json.dumps(meta["config"]))
         if act_override:
-            self.cfg["act"].update(act_override)
+            self.cfg["act"].update({k: v for k, v in act_override.items() if k != "gripper_discrete"})
             self.version += "+" + ",".join(f"{k}={v}" for k, v in act_override.items())
         self.image_key = self.cfg.get("image_key")
         self.env_state_key = self.cfg.get("env_state_key")
@@ -84,6 +84,8 @@ class ACTPolicyWrapper(Policy):
         self.camera_name = self.image_key.split(".")[-1] if self.image_key else None
         self.image_hw = tuple(meta["image_hw"]) if meta.get("image_hw") else (0, 0)
         self.env_state_provider = None  # callable(obs) -> np.ndarray, set by the runner/evaluation for ENV-state policies
+        self.gripper_discrete = bool((act_override or {}).get("gripper_discrete", False))
+        self._grip_state = 0.0
         stats = _stats_to_tensors(json.load(open(self.ckpt / "dataset_stats.json")))
         self.policy, self.pre, self.post, self.act_cfg = build_act_policy(self.cfg, stats, self.image_hw, meta["state_dim"], meta["action_dim"], device)
         sd = torch.load(self.ckpt / "model.pt", map_location=device)
@@ -96,6 +98,7 @@ class ACTPolicyWrapper(Policy):
     def reset(self, instruction: str = "", task_info: dict | None = None) -> None:
         self.policy.reset()
         self.instruction = instruction
+        self._grip_state = 0.0
 
     def act(self, obs: Observation) -> Action:
         t0 = time.perf_counter()
@@ -118,6 +121,14 @@ class ACTPolicyWrapper(Policy):
         self.latencies.append((time.perf_counter() - t0) * 1000)
         a[:6] = np.clip(a[:6], -1, 1)
         a[6] = float(np.clip(a[6], 0, 1))
+        if self.gripper_discrete:
+            # gripper as a discrete event with hysteresis: a regressed value near 0.5 would otherwise half-open
+            # the gripper mid-transport (observed cause of drops)
+            if self._grip_state < 0.5 and a[6] > 0.6:
+                self._grip_state = 1.0
+            elif self._grip_state > 0.5 and a[6] < 0.4:
+                self._grip_state = 0.0
+            a[6] = self._grip_state
         return Action.from_array(a)
 
     def info(self) -> dict:

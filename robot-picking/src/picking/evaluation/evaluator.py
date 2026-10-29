@@ -90,11 +90,13 @@ class EpisodeEvaluator:
     ) -> EpisodeResult:
         pads = self.steps[-1].pads_on_object if self.steps else 0
         place = self.place_success(final_in_tray, final_gripper, obj_vel, pads)
-        success = bool(self.grasped and place and not self.collision)
+        success = bool(self.grasped and place and not self.collision and not self.wrong_object_contact)
         ft = FailureType.NONE
         if not success:
             if self.collision:
                 ft = FailureType.COLLISION
+            elif self.wrong_object_contact:
+                ft = FailureType.WRONG_OBJECT
             elif (metadata or {}).get("policy_info", {}).get("bad_target") and not self.grasped:
                 ft = FailureType.BAD_TARGET
             elif timeout and not self.grasped:

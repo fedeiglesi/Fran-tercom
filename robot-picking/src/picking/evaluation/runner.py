@@ -129,7 +129,7 @@ def run_episode(
     evaluator = EpisodeEvaluator(target_object=target, lift_height=float(task_cfg["lift_height"]), max_steps=env.max_steps)
     dt = 1.0 / env.control_hz
     with_images = (policy.needs_images or force_images) and env.renderer is not None
-    other_objs = [o for o in env.object_ids if o != target]
+    other_objs = [o for o in getattr(env, "present_objects", env.object_ids) if o != target]
     other_init = {o: env.object_pose(o)[:3, 3].copy() for o in other_objs}
     t_start = time.time()
     latencies = []
@@ -153,7 +153,7 @@ def run_episode(
         state_after = adapter.get_state()
         contacts = adapter.last_contacts
         obj_pos = env.object_pose(target)[:3, 3]
-        moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o]) > 0.01 for o in other_objs)
+        moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o]) > 0.02 for o in other_objs)
         evaluator.update(env.sim_time(), state_after.tcp.position, obj_pos, state_after.gripper, contacts, env.object_in_tray(target), moved_other)
         n_steps = step + 1
         if step_callback is not None:
@@ -194,6 +194,8 @@ def run_episode(
             "policy_info": policy.info(),
             "final_tcp": final_state.tcp.position.tolist(),
             "final_object_pos": env.object_pose(target)[:3, 3].tolist(),
+            "distractors": other_objs,
+            "distractor_displacement_m": {o: float(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o])) for o in other_objs},
         },
     )
     return result

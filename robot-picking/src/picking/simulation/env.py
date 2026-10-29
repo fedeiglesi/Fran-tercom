@@ -106,6 +106,7 @@ class PickPlaceEnv:
         self.current_target = cfg["task"].get("target_object", self.object_ids[0])
         if self.current_target == "random":
             self.current_target = self.object_ids[0]
+        self.present_objects = list(self.object_ids)
         self.step_count = 0
         self.sim_time_at_reset = 0.0
         self.last_seed = 0
@@ -128,11 +129,37 @@ class PickPlaceEnv:
         self.model.cam_quat[:] = self._nominal["cam_quat"]
         self.episode_rand = sample_randomization(self.cfg, self.rng, enabled)
         er = self.episode_rand
-        if self.one_object:
-            # choose the episode's target; park the others out of sight (deterministic given the seed)
+        n_present = int(self.cfg["scene"].get("objects_per_episode", 1))
+        if self.one_object or n_present > 1:
+            # choose the episode's target (+ distractors with distinct colours); park the others out of sight
             self.current_target = self.object_ids[int(self.rng.integers(len(self.object_ids)))]
+            present = [self.current_target]
+            if n_present > 1:
+                used_colors = {self.object_specs[self.current_target].get("color_name")}
+                pool = [o for o in self.object_ids if o != self.current_target]
+                self.rng.shuffle(pool)
+                for o in pool:
+                    c = self.object_specs[o].get("color_name")
+                    if len(present) >= n_present:
+                        break
+                    if c in used_colors:
+                        continue  # colour-based perception needs unique colours per scene (level 5 start)
+                    used_colors.add(c)
+                    present.append(o)
+                # non-overlapping positions inside the pick area (away from the tray side)
+                area = self.cfg["scene"].get("multi_object_area", {"x": [0.14, 0.24], "y": [-0.02, 0.16]})
+                min_sep = float(self.cfg["scene"].get("multi_object_min_separation", 0.06))
+                placed = []
+                for o in present:
+                    for _ in range(200):
+                        pos = np.array([self.rng.uniform(*area["x"]), self.rng.uniform(*area["y"])])
+                        if all(np.linalg.norm(pos - q) >= min_sep for q in placed):
+                            break
+                    placed.append(pos)
+                    er.objects[o]["position"][:2] = pos
+            self.present_objects = present
             for k, oid in enumerate(self.object_ids):
-                if oid != self.current_target:
+                if oid not in present:
                     er.objects[oid]["position"] = self.parking + np.array([0.0, 0.05 * k - 0.2, 0.0])
         elif self.cfg["task"].get("target_object", "random") != "random":
             self.current_target = self.cfg["task"]["target_object"]
