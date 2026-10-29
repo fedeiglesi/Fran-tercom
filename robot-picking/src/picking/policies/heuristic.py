@@ -183,7 +183,12 @@ class ScriptedPickPlace(Policy):
             tgt = np.array([tray[0], tray[1], base_z + self.lift_height])
             a = self._move(tcp, tgt, 1.0, 0.0, R_cur)  # yaw back to neutral: keeps IK well-conditioned near the tray
             a.dpos *= self.transport_gain  # move slower while holding (less inertial load on the grasp)
-            if np.linalg.norm(tgt[:2] - tcp[:2]) < 0.006:
+            progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
+            self.stall = 0 if progress else self.stall + 1
+            self._last_tcp = tcp.copy()
+            exy = np.linalg.norm(tgt[:2] - tcp[:2])
+            if exy < 0.006 or (exy < 0.015 and self.stall >= 4):
+                self.stall = 0
                 self._next("verify2")
             return a
         if ph == "verify2":
@@ -202,7 +207,16 @@ class ScriptedPickPlace(Policy):
         if ph == "lower":
             tgt = np.array([tray[0], tray[1], tray[2] + self.place_height])
             a = self._move(tcp, tgt, 1.0, 0.0, R_cur)
-            if np.linalg.norm(tgt - tcp) < 0.004:
+            dz = tgt[2] - tcp[2]
+            if 1e-4 < abs(dz) < self.descend_slow_zone:
+                a.dpos[2] = float(np.sign(dz) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed))
+            # with servo lag the last millimetres may never be reached: release once close enough and stalled
+            progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
+            self.stall = 0 if progress else self.stall + 1
+            self._last_tcp = tcp.copy()
+            err = np.linalg.norm(tgt - tcp)
+            if err < 0.004 or (err < 0.012 and self.stall >= 4):
+                self.stall = 0
                 self._next("release")
             return a
         if ph == "release":
