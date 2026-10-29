@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from picking.perception.segmentation import color_mask, largest_blob
+from picking.perception.segmentation import COLOR_RANGES, color_mask, largest_blob
 
 
 @dataclass
@@ -34,7 +34,7 @@ def verify_grasp(
     else:
         g_sig = 0.3 < gripper_state < 0.97
     v_sig = None
-    if rgb_before is not None and rgb_after is not None and color is not None and pixel_before is not None:
+    if rgb_before is not None and rgb_after is not None and color in COLOR_RANGES and pixel_before is not None:
         blob, cent = largest_blob(color_mask(rgb_after, color))
         if blob is None:
             v_sig = True  # object not visible anymore where it was (occluded by gripper / lifted)

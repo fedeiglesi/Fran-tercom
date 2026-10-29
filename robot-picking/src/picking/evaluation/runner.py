@@ -82,8 +82,11 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     if "grasp_yaw_offset" in spec:  # compound parts declare how to grasp them (across the bar, etc.)
         yaw += float(spec["grasp_yaw_offset"])
         period = float(spec.get("yaw_period", period))
+    grasp_pos = T_obj[:3, 3].copy()
+    if spec.get("type") == "compound":
+        grasp_pos[:2] = env.object_com(target)[:2]  # grasp above the centre of mass (compound parts)
     priv = {
-        "object_pos": T_obj[:3, 3].copy(),
+        "object_pos": grasp_pos,
         "object_yaw": yaw,
         "object_yaw_period": period,
         "tray_pos": env.tray_center(),

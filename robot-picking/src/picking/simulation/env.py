@@ -285,6 +285,10 @@ class PickPlaceEnv:
         q = self.data.qpos[adr + 3 : adr + 7].copy()
         return make_T(p, R=quat_to_mat(q))
 
+    def object_com(self, oid: str) -> np.ndarray:
+        """Centre of mass of the object body in the base frame (= body origin for simple primitives)."""
+        return self.data.xipos[self.object_body[oid]].copy()
+
     def object_velocity(self, oid: str) -> np.ndarray:
         adr = self.object_vadr[oid]
         return self.data.qvel[adr : adr + 6].copy()
