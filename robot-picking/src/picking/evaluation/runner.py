@@ -79,6 +79,9 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
             yaw += np.pi / 2  # grasp across the short side
         if min(sx, sy) / max(sx, sy) < 0.8:
             period = np.pi
+    if "grasp_yaw_offset" in spec:  # compound parts declare how to grasp them (across the bar, etc.)
+        yaw += float(spec["grasp_yaw_offset"])
+        period = float(spec.get("yaw_period", period))
     priv = {
         "object_pos": T_obj[:3, 3].copy(),
         "object_yaw": yaw,

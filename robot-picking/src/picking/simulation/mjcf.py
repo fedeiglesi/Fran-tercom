@@ -214,7 +214,18 @@ def scene_xml(cfg: dict, object_overrides: dict | None = None, camera_override: 
         mass = ov.get("mass", o["mass"])
         fric = ov.get("friction", o.get("friction", 1.0))
         q = _q([0, 0, yaw])
-        if o["type"] == "box":
+        if o["type"] == "compound":
+            # several primitives rigidly attached (approximate motorcycle parts); each part: type,size,pos[,euler]
+            parts = []
+            for k, part in enumerate(o["parts"]):
+                pq = _q(part.get("euler", [0, 0, 0]))
+                psz = _v(part["size"])
+                parts.append(
+                    f'<geom name="{o["id"]}_geom{"" if k == 0 else k}" type="{part["type"]}" size="{psz}" pos="{_v(part.get("pos", [0, 0, 0]))}" '
+                    f'quat="{pq}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass / len(o["parts"]):.4f}"/>'
+                )
+            g = "".join(parts)
+        elif o["type"] == "box":
             g = f'<geom name="{o["id"]}_geom" type="box" size="{_v(o["size"])}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'
         elif o["type"] == "cylinder":
             g = f'<geom name="{o["id"]}_geom" type="cylinder" size="{_v(o["size"][:2])}" rgba="{rgba}" friction="{fric} 0.01 0.0005" mass="{mass}"/>'

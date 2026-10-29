@@ -96,6 +96,11 @@ class PickPlaceEnv:
             if name.endswith("_col") or name in ("pad_left", "pad_right"):
                 self.geom_robot.add(g)
         self.geom_obj_to_id = {g: o for o, g in self.object_geom.items()}
+        for g in range(self.model.ngeom):
+            b = self.model.geom_bodyid[g]
+            for o, bid in self.object_body.items():
+                if b == bid:
+                    self.geom_obj_to_id[g] = o
         self.home_q = np.deg2rad(np.asarray(cfg["robot"]["home_joints_deg"], dtype=float))
         self.gravity_comp = bool(cfg["robot"].get("gravity_compensation", True))
         self.rng = np.random.default_rng(0)
@@ -165,9 +170,13 @@ class PickPlaceEnv:
             self.current_target = self.cfg["task"]["target_object"]
         for oid, spec in er.objects.items():
             self.model.body_mass[self.object_body[oid]] = spec["mass"]
-            self.model.geom_friction[self.object_geom[oid], 0] = spec["friction"]
+            for g, o2 in self.geom_obj_to_id.items():
+                if o2 == oid:
+                    self.model.geom_friction[g, 0] = spec["friction"]
             if spec.get("color") is not None:
-                self.model.geom_rgba[self.object_geom[oid]] = spec["color"]
+                for g, o2 in self.geom_obj_to_id.items():
+                    if o2 == oid:
+                        self.model.geom_rgba[g] = spec["color"]
         mj.mj_setConst(self.model, self.data)  # recompute inertia after mass change (resets qpos -> do it first)
         for oid, spec in er.objects.items():
             adr = self.object_qadr[oid]
@@ -281,6 +290,9 @@ class PickPlaceEnv:
         return self.data.qvel[adr : adr + 6].copy()
 
     def object_half_extent_z(self, oid: str) -> float:
+        spec = self.object_specs.get(oid, {})
+        if spec.get("type") == "compound":
+            return float(spec.get("half_height", 0.01))
         g = self.object_geom[oid]
         t = self.model.geom_type[g]
         size = self.model.geom_size[g]
