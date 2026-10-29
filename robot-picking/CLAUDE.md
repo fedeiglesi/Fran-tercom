@@ -28,7 +28,8 @@ uv run python -m pytest -q tests
 - ACT de baja dimensión (`configs/policies/act_lowdim_level1.yaml`, features de percepción,
   `outputs/act_lowdim_smooth_floor_v001`, n_action_steps=5): 87.2 % en 1000 episodios. Frágil entre runs.
 - Nivel 4 (motopartes aproximadas): 93 % privilegiado, 82 % con detector por altura sin color (`detect_by_height`).
-  Nivel 5 (4 objetos simultáneos): 98 %. Niveles 6–7 (clutter, bin) pendientes.
+  Nivel 5 (4 objetos simultáneos): 98 %. Nivel 6 (clutter): 70 % (vecinos desplazados por el gripper al bajar;
+  próximo paso: elegir el yaw de agarre con más holgura respecto a los vecinos). Nivel 7 (bin) pendiente.
 - Robot real / OAK-D: código completo pero NUNCA probado físicamente (no había hardware). Empezar por
   `docs/REAL_ROBOT.md` Test 1. SmolVLA / π₀.₅: no se pudieron descargar (red bloqueada) → `docs/TRAINING.md`.
 

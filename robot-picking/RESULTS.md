@@ -16,6 +16,7 @@ Entorno de medición: contenedor Linux x86_64, 4 vCPU, sin GPU, MuJoCo 3.17, LeR
 | 4 (10 motopartes aproximadas, oscuras/metálicas) | Baseline 0 privilegiado | 100 | 93 % | — | 0.0 % | 2 % | 0 % | — | (n=100) |
 | 4 | Baseline 0 percepción por ALTURA (sin color) | 100 | 82 % | — | 0.0 % | 2 % | 0 % | — | (n=100) |
 | 5 (4 objetos simultáneos, objetivo por instrucción) | Baseline 0 percepción | 100 | 98 % | 99 % | 0.0 % | 0.0 % | 1 % | — | (n=100) |
+| 6 (clutter: 4 objetos casi en contacto) | Baseline 0 percepción + pre-conformado del gripper | 100 | 70 % | — | 3 % | 0.0 % | 0 % | — | no (17 % objeto equivocado desplazado) |
 | 1 (cubo) | ACT visual (LeRobot 0.6.1, ResNet18 desde cero, 128×128), 200 demos, ckpt 500/1000/2000 | 30 c/u | 53 % / 50 % / 53 % | 60 % | 0 % | 10 % | ~45 % | — | no |
 | 1 (cubo) | ACT visual, recorte ajustado 160×90 (cubo ≈15 px), con/sin desplazamiento aleatorio | 30 c/u | 50–57 % | 57 % | 7–17 % | 0 % | 27–37 % | — | no |
 | 1 (cubo) | ACT visual sin VAE | 30 | 3 % | 60 % | 27 % | 7 % | 67 % | — | no |
