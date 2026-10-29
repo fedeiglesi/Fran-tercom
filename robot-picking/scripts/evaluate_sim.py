@@ -74,6 +74,7 @@ def main() -> int:
     ap.add_argument("--calibration", default=None, help="perception policy: calibration YAML (default: sim ground truth)")
     ap.add_argument("--color", default="red")
     ap.add_argument("--detector", default="color", choices=["color", "height"], help="perception policy: colour blob or colour-agnostic height-above-table")
+    ap.add_argument("--orden", default=None, help="orden en español argentino; se traduce a la instrucción canónica en inglés y fija el objeto objetivo")
     ap.add_argument("--preshape", type=float, default=None, help="scripted policies: pre-shape gripper opening = object width + this margin [m] (clutter)")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--act-override", default=None, help='JSON of inference-time ACT config changes, e.g. {"n_action_steps": 5}')
@@ -93,6 +94,19 @@ def main() -> int:
     cfg = load_yaml(config_path(args.config))
     if args.override:
         cfg = deep_update(cfg, json.loads(args.override))
+    if args.orden:
+        from picking.language.orders import parse_order
+
+        order = parse_order(args.orden)
+        if not order.executable:
+            print("ORDEN NO EJECUTABLE:", order.notes)
+            return 2
+        cfg["task"]["target_object"] = order.object_id
+        cfg["task"]["instruction"] = order.instruction_en
+        cfg["task"].pop("instruction_template", None)
+        cfg["scene"]["one_object_per_episode"] = False if cfg["scene"].get("objects_per_episode", 1) > 1 else cfg["scene"].get("one_object_per_episode", False)
+        args.color = order.color or args.color
+        log.info("orden: %r -> %r (objeto %s, destino %s, backend %s)", args.orden, order.instruction_en, order.object_id, order.destination_id, order.backend)
     safety_cfg = load_yaml(config_path(args.safety))
     needs_render = args.policy != "heuristic"
     env = PickPlaceEnv(cfg, render=needs_render and not args.no_render)
@@ -116,6 +130,7 @@ def main() -> int:
             log.info("ep %d seed %d success=%s fail=%s steps=%d retries=%d | running success %.3f (%.1fs)", i + 1, seed, r.success, r.failure_type, r.n_steps, r.n_retries, sr, time.time() - t0)
     gate = {"initial": GATE_SIM_INITIAL, "target": GATE_SIM_TARGET, "none": {}}[args.gate]
     extra = {
+        "orden_es": args.orden,
         "policy": policy.name,
         "policy_version": policy.version,
         "checkpoint": args.checkpoint,

@@ -112,9 +112,9 @@ randomization:
   light_noise: 0.0
   color_noise: 0.0
   robot:
-    backlash_deg_max: 1.5
+    backlash_deg_max: 0.8
     latency_steps_max: 2
-    joint_noise_deg_max: 0.3
+    joint_noise_deg_max: 0.2
     kp_scale_range:
-    - 0.7
+    - 0.8
     - 1.2

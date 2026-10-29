@@ -146,7 +146,8 @@ class PickPlaceEnv:
         n_present = int(self.cfg["scene"].get("objects_per_episode", 1))
         if self.one_object or n_present > 1:
             # choose the episode's target (+ distractors with distinct colours); park the others out of sight
-            self.current_target = self.object_ids[int(self.rng.integers(len(self.object_ids)))]
+            fixed = self.cfg["task"].get("target_object", "random")
+            self.current_target = fixed if fixed in self.object_ids else self.object_ids[int(self.rng.integers(len(self.object_ids)))]
             present = [self.current_target]
             if n_present > 1:
                 used_colors = {self.object_specs[self.current_target].get("color_name")}
@@ -232,12 +233,14 @@ class PickPlaceEnv:
     def set_joint_targets(self, q: np.ndarray, gripper: float | None = None) -> None:
         q = np.asarray(q, dtype=np.float64).copy()
         if self._backlash is not None:
-            # servo backlash: the output lags the command by a dead band whose side depends on motion direction
-            if self._last_cmd is not None:
-                d = q - self._last_cmd
-                self._backlash_offset = np.where(d > 1e-6, -self._backlash, np.where(d < -1e-6, self._backlash, self._backlash_offset))
-            self._last_cmd = q.copy()
-            q = q + self._backlash_offset
+            # mechanical play (dead band of half-width b): the output y follows the command x only once x has
+            # moved past the band, i.e. y = x - b when pushing up, x + b when pushing down, unchanged otherwise
+            if self._last_cmd is None:
+                self._last_cmd = q.copy()
+            y = self._last_cmd
+            y = np.where(q - y > self._backlash, q - self._backlash, np.where(q - y < -self._backlash, q + self._backlash, y))
+            self._last_cmd = y
+            q = y
         if self._latency > 0:
             # command latency: the target takes effect `latency` control periods later (applied in advance())
             self._cmd_queue.append((self.step_count + self._latency, q))

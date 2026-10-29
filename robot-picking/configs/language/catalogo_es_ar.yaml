@@ -1,0 +1,30 @@
+# Catálogo de lenguaje: cómo se nombran los objetos y destinos en español argentino y su forma canónica
+# en inglés (lo que recibe el VLA / la percepción). Agregar alias y SKUs a medida que aparezcan.
+objects:
+  red_cube:        {en: "red cube",        color: red,    aliases: ["cubo rojo", "cubito rojo", "dado rojo", "el rojo"]}
+  green_cube:      {en: "green cube",      color: green,  aliases: ["cubo verde", "cubito verde", "el verde"]}
+  blue_cube:       {en: "blue cube",       color: blue,   aliases: ["cubo azul", "cubito azul", "el azul"]}
+  yellow_box:      {en: "yellow box",      color: yellow, aliases: ["caja amarilla", "cajita amarilla", "la amarilla"]}
+  red_flat_box:    {en: "red flat box",    color: red,    aliases: ["caja roja chata", "placa roja", "cajita roja"]}
+  green_cylinder:  {en: "green cylinder",  color: green,  aliases: ["cilindro verde", "tubo verde"]}
+  blue_cylinder:   {en: "blue cylinder",   color: blue,   aliases: ["cilindro azul", "tubo azul"]}
+  yellow_puck:     {en: "yellow puck",     color: yellow, aliases: ["disco amarillo", "ficha amarilla", "puck amarillo"]}
+  red_sphere:      {en: "red sphere",      color: red,    aliases: ["esfera roja", "bola roja", "pelota roja", "bolita roja"]}
+  green_tall_box:  {en: "green tall box",  color: green,  aliases: ["caja verde alta", "torre verde", "bloque verde"]}
+  brake_pad:       {en: "brake pad",       color: dark,   aliases: ["pastilla de freno", "pastilla", "pastillas de freno"], sku: ["18452"]}
+  bearing:         {en: "bearing",         color: metal,  aliases: ["rulemán", "ruleman", "rodamiento", "cojinete"], sku: ["20311"]}
+  spark_plug:      {en: "spark plug",      color: metal,  aliases: ["bujía", "bujia", "la bujía"], sku: ["30020"]}
+  relay:           {en: "relay",           color: dark,   aliases: ["relé", "rele", "relay", "el relé"], sku: ["41107"]}
+  brake_lever:     {en: "brake lever",     color: metal,  aliases: ["palanca de freno", "manija de freno", "manija", "palanca", "leva de freno"], sku: ["50088", "honda cg brake lever"]}
+  gear:            {en: "gear",            color: metal,  aliases: ["piñón", "pinon", "engranaje", "corona"], sku: ["60450"]}
+  grommet:         {en: "rubber grommet",  color: dark,   aliases: ["grommet", "goma", "pasacables", "arandela de goma"], sku: ["70001"]}
+  brass_nut:       {en: "brass nut",       color: brass,  aliases: ["tuerca", "tuerca de bronce", "tuerquita"], sku: ["70022"]}
+  mirror_stem:     {en: "mirror stem",     color: dark,   aliases: ["espejo", "espejito", "brazo del espejo", "retrovisor"], sku: ["80310"]}
+  red_cap:         {en: "red plastic cap", color: red,    aliases: ["tapa roja", "tapita roja", "tapón rojo", "tapon rojo"], sku: ["90005"]}
+destinations:
+  tray:   {en: "the blue tray", aliases: ["bandeja", "la bandeja", "bandeja azul", "bandeja a", "la bandeja a"]}
+  bin_1:  {en: "order bin 1",   aliases: ["bandeja 1", "bin 1", "cajón 1", "cajon 1", "pedido 1"]}
+  bin_2:  {en: "order bin 2",   aliases: ["bandeja 2", "bin 2", "cajón 2", "cajon 2", "pedido 2"]}
+  bin_3:  {en: "order bin 3",   aliases: ["bandeja 3", "bin 3", "cajón 3", "cajon 3", "pedido 3"]}
+verbs_pick:  ["agarrá", "agarra", "agarrar", "tomá", "toma", "levantá", "levanta", "sacá", "saca", "buscá", "busca", "traé", "trae", "pick"]
+verbs_place: ["ponela", "ponelo", "poné", "pone", "dejala", "dejalo", "dejá", "deja", "llevala", "llevalo", "llevá", "lleva", "metela", "metelo", "meté", "mete", "colocá", "coloca", "place"]

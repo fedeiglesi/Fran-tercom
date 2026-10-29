@@ -29,9 +29,19 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--name", default="real_eval")
     ap.add_argument("--instruction", default="Pick the red cube and place it in the blue tray.")
+    ap.add_argument("--orden", default=None, help="orden en español argentino (se traduce al inglés canónico para la policy)")
     ap.add_argument("--safety", default="safety/real_mycobot.yaml")
     args = ap.parse_args()
     setup_logging()
+    if args.orden:
+        from picking.language.orders import parse_order
+
+        order = parse_order(args.orden)
+        if not order.executable:
+            print("ORDEN NO EJECUTABLE:", order.notes)
+            return 2
+        args.instruction = order.instruction_en
+        print(f"orden: {args.orden!r} -> {order.instruction_en!r}")
     rcfg = load_yaml(config_path("real/mycobot_280.yaml"))["robot"]
     sf = SafetyFilter(load_yaml(config_path(args.safety)))
     if args.policy == "act":
