@@ -63,6 +63,7 @@ class RobotAdapter(abc.ABC):
     def home(self) -> None: ...
 
     max_setpoint_lead: float = 0.015  # [m] maximum distance between the commanded and the measured TCP
+    max_down_lead: float = 0.005  # [m] maximum commanded height below the measured TCP height
 
     def commanded_tcp(self) -> np.ndarray | None:
         """Last commanded TCP pose (4x4) if the adapter tracks setpoints, else None."""
@@ -89,6 +90,9 @@ class RobotAdapter(abc.ABC):
         n = float(np.linalg.norm(d))
         if n > self.max_setpoint_lead:
             T_target[:3, 3] = T_meas[:3, 3] + d / n * self.max_setpoint_lead
+        # downward lead is the dangerous one (table): keep the commanded height within `max_down_lead` of the
+        # measured height, without touching the lateral lead and without re-anchoring
+        T_target[2, 3] = max(T_target[2, 3], T_meas[2, 3] - self.max_down_lead)
         return self.set_tcp_target(T_target, g)
 
     def gripper_opening_m(self) -> float | None:
