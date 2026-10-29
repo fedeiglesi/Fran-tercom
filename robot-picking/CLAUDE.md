@@ -27,6 +27,8 @@ uv run python -m pytest -q tests
 - ACT visual (LeRobot 0.6.1, ResNet18 desde cero, CPU): 50–57 %. No aprende a leer la posición del objeto.
 - ACT de baja dimensión (`configs/policies/act_lowdim_level1.yaml`, features de percepción,
   `outputs/act_lowdim_smooth_floor_v001`, n_action_steps=5): 87.2 % en 1000 episodios. Frágil entre runs.
+- Nivel 4 (motopartes aproximadas): 93 % privilegiado, 82 % con detector por altura sin color (`detect_by_height`).
+  Nivel 5 (4 objetos simultáneos): 98 %. Niveles 6–7 (clutter, bin) pendientes.
 - Robot real / OAK-D: código completo pero NUNCA probado físicamente (no había hardware). Empezar por
   `docs/REAL_ROBOT.md` Test 1. SmolVLA / π₀.₅: no se pudieron descargar (red bloqueada) → `docs/TRAINING.md`.
 
@@ -46,7 +48,8 @@ uv run python -m pytest -q tests
    Tests 2–7, calibración (`./run_robot.sh calibrate`), 100 intentos reales con la policy de percepción.
 2. Policy aprendida: selección de checkpoint por evaluación, gripper como acción discreta, backbone
    preentrenado (con internet) y entrenamiento en MPS/GPU; después SmolVLA y π₀.₅ con el mismo benchmark.
-3. Nivel 4 (motopartes digitalizadas) sobre `configs/sim/level3_geometries.yaml`.
+3. Nivel 6 (clutter: objetos en contacto) y 7 (bin) sobre `level5_multi_object.yaml`; detector de vocabulario
+   abierto para piezas reales detrás de la interfaz `ObjectDetection`.
 
 ## Reglas del proyecto
 Nada se declara terminado sin métricas holdout; ninguna acción al robot sin `SafetyFilter`; registrar cada

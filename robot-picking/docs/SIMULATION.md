@@ -24,7 +24,9 @@ Control a 10 Hz, física a 500 Hz, timeout 150 pasos (15 s).
 | 1 | `level1_cube.yaml` | 1 cubo rojo 25 mm, ±15 mm, ±10° |
 | 2 | `level2_objects.yaml` | 10 objetos simples (cajas, cilindros, esfera), 4 colores, ±3 cm, ±45°, masa/fricción aleatorias, uno por episodio |
 | 3 | `level3_geometries.yaml` | 24 geometrías (cajas, cilindros, esferas, cápsulas, elipsoides) + ruido de cámara 3 mm/0.5°, luz ±30 %, color ±0.06, color de mesa |
-| 4–7 | pendientes | motopartes digitalizadas, varios objetos, clutter, bin |
+| 4 | `level4_motoparts.yaml` | 10 motopartes aproximadas por primitivas compuestas (pastilla de freno, rulemán, bujía, relé, palanca, piñón, grommet, tuerca, espejo, tapa), colores oscuros/metálicos; percepción por altura (`--detector height`) |
+| 5 | `level5_multi_object.yaml` | 4 objetos simultáneos de colores distintos, objetivo por instrucción, fallo WRONG_OBJECT si un distractor se mueve > 2 cm |
+| 6–7 | pendientes | clutter (objetos en contacto/apilados), bin |
 
 Resultados por nivel en RESULTS.md. Con `one_object_per_episode: true` el objetivo se elige por seed y los demás
 objetos se aparcan fuera de la vista; la instrucción se genera con `instruction_template`.

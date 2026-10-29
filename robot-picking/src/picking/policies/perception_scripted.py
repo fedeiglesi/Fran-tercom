@@ -26,6 +26,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
     def __init__(self, *args, camera: str, color: str = "red", object_id: str = "red_cube", known_height_m: float | None = None, roi=None, detector: str = "color", **kw):
         self.camera = camera
         self.detector = detector  # "color" | "height" (colour-agnostic: anything above the table)
+        self.height_stride = int(kw.pop("height_stride", 1))
         self.color = color
         self.object_id = object_id
         self.known_height = known_height_m
@@ -56,7 +57,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         if depth is None:
             return False
         if self.detector == "height":
-            det = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"), workspace_xy=((0.08, 0.30), (-0.22, 0.22)))
+            det = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"), workspace_xy=((0.08, 0.30), (-0.22, 0.22)), stride=self.height_stride)
         else:
             det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"))
         if det is None:
