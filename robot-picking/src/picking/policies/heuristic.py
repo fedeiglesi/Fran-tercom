@@ -120,6 +120,7 @@ class ScriptedPickPlace(Policy):
             # pre-shape the gripper to the object width + margin so the pads do not sweep neighbours (clutter)
             opening = min(self.gripper_max_opening, float(priv["object_width"]) + self.preshape_margin)
             g_open = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
+        self.phase_steps = getattr(self, "phase_steps", 0) + 1
         if ph == "approach":
             tgt = np.array([obj[0], obj[1], grasp_z + self.approach_height])
             a = self._move(tcp, tgt, g_open, self.grasp_yaw, R_cur)
@@ -187,7 +188,7 @@ class ScriptedPickPlace(Policy):
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
             exy = np.linalg.norm(tgt[:2] - tcp[:2])
-            if exy < 0.006 or (exy < 0.015 and self.stall >= 4):
+            if exy < 0.006 or (exy < 0.015 and (self.stall >= 4 or self.phase_steps > 40)):
                 self.stall = 0
                 self._next("verify2")
             return a
@@ -215,7 +216,8 @@ class ScriptedPickPlace(Policy):
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
             err = np.linalg.norm(tgt - tcp)
-            if err < 0.004 or (err < 0.012 and self.stall >= 4):
+            # 8 mm is enough to release over the tray; with lag/oscillation also give up after a step budget
+            if err < 0.008 or (err < 0.015 and (self.stall >= 4 or self.phase_steps > 25)):
                 self.stall = 0
                 self._next("release")
             return a
@@ -246,3 +248,4 @@ class ScriptedPickPlace(Policy):
     def _next(self, phase: str) -> None:
         self.phase_log.append(phase)
         self.phase = phase
+        self.phase_steps = 0
