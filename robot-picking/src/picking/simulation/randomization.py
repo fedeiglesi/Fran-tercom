@@ -13,6 +13,11 @@ class EpisodeRandomization:
     camera_lookat: np.ndarray | None = None
     light_scale: float | None = None
     table_color: np.ndarray | None = None
+    # robot (servo) imperfections, inspired by the Open Duck sim2real work: backlash, latency, sensing noise, stiffness
+    backlash_rad: np.ndarray | None = None  # per-joint dead band half-width
+    latency_steps: int = 0  # control-period delays before a commanded target takes effect
+    joint_noise_rad: float = 0.0  # gaussian noise on joint readings
+    kp_scale: float = 1.0  # actuator stiffness multiplier
 
     def to_dict(self) -> dict:
         return {
@@ -20,6 +25,10 @@ class EpisodeRandomization:
             "camera_position": None if self.camera_position is None else self.camera_position.tolist(),
             "light_scale": self.light_scale,
             "table_color": None if self.table_color is None else self.table_color.tolist(),
+            "backlash_deg": None if self.backlash_rad is None else np.rad2deg(self.backlash_rad).round(3).tolist(),
+            "latency_steps": self.latency_steps,
+            "joint_noise_deg": float(np.rad2deg(self.joint_noise_rad)),
+            "kp_scale": self.kp_scale,
         }
 
 
@@ -61,6 +70,17 @@ def sample_randomization(cfg: dict, rng: np.random.Generator, enabled: bool) -> 
         ln = rc.get("light_noise", 0.0)
         if ln > 0:
             er.light_scale = float(rng.uniform(1 - ln, 1 + ln))
+        rob = rc.get("robot", {})
+        if rob:
+            b = float(rob.get("backlash_deg_max", 0.0))
+            if b > 0:
+                er.backlash_rad = np.deg2rad(rng.uniform(0.0, b, 6))
+            lmax = int(rob.get("latency_steps_max", 0))
+            if lmax > 0:
+                er.latency_steps = int(rng.integers(0, lmax + 1))
+            er.joint_noise_rad = float(np.deg2rad(rng.uniform(0.0, float(rob.get("joint_noise_deg_max", 0.0)))))
+            k0, k1 = rob.get("kp_scale_range", [1.0, 1.0])
+            er.kp_scale = float(rng.uniform(k0, k1))
         tn = rc.get("table_color_noise", 0.0)
         if tn > 0:
             c = np.array(cfg["scene"]["table_color"], dtype=float)

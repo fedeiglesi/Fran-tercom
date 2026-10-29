@@ -43,6 +43,9 @@ Opciones: `--override '{"randomization":{"object_xy_range":[0.03,0.03]}}'` para 
 ## Randomización (`simulation/randomization.py`)
 
 Objeto: posición, yaw, masa, fricción, color. Cámara: posición y orientación. Mundo: luz, color de mesa.
+Robot (bloque `randomization.robot`, inspirado en el sim2real del Open Duck Mini): juego de servos
+`backlash_deg_max`, latencia de comando `latency_steps_max` (periodos de control), ruido de lectura de joints
+`joint_noise_deg_max` y rigidez `kp_scale_range`. Configs `level1_cube_servo.yaml` y `level2_objects_servo.yaml`.
 Rangos por nivel en el YAML (`randomization:`). Los valores muestreados se guardan en cada `EpisodeResult`.
 
 ## Checks previos a entrenar (todos automatizados en `tests/`)

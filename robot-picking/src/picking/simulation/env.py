@@ -53,7 +53,16 @@ class PickPlaceEnv:
             "light_diffuse": self.model.light_diffuse.copy(),
             "cam_pos": self.model.cam_pos.copy(),
             "cam_quat": self.model.cam_quat.copy(),
+            "actuator_gainprm": self.model.actuator_gainprm.copy(),
+            "actuator_biasprm": self.model.actuator_biasprm.copy(),
         }
+        self._backlash = None
+        self._backlash_offset = np.zeros(6)
+        self._last_cmd = None
+        self._cmd_queue: list[tuple[np.ndarray, float]] = []
+        self._latency = 0
+        self._joint_noise = 0.0
+        self._noise_rng = np.random.default_rng(0)
         self.cam_name = cfg["camera"]["name"]
         self.cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, self.cam_name)
         self.width, self.height = int(cfg["camera"]["width"]), int(cfg["camera"]["height"])
@@ -192,6 +201,20 @@ class PickPlaceEnv:
             self.model.light_diffuse[:] = self._nominal["light_diffuse"] * er.light_scale
         if er.table_color is not None:
             self.model.geom_rgba[self.geom_table] = er.table_color
+        # robot imperfections
+        self.model.actuator_gainprm[:] = self._nominal["actuator_gainprm"]
+        self.model.actuator_biasprm[:] = self._nominal["actuator_biasprm"]
+        if er.kp_scale != 1.0:
+            for a in self.act_ids:
+                self.model.actuator_gainprm[a, 0] *= er.kp_scale
+                self.model.actuator_biasprm[a, 1] *= er.kp_scale
+        self._backlash = er.backlash_rad
+        self._backlash_offset = np.zeros(6)
+        self._last_cmd = None
+        self._cmd_queue = []
+        self._latency = int(er.latency_steps)
+        self._joint_noise = float(er.joint_noise_rad)
+        self._noise_rng = np.random.default_rng(self.last_seed + 1234)
         # robot at home, gripper open
         for i, adr in enumerate(self.qpos_adr):
             self.data.qpos[adr] = self.home_q[i]
@@ -207,7 +230,19 @@ class PickPlaceEnv:
 
     # ------------------------------------------------------------------ control
     def set_joint_targets(self, q: np.ndarray, gripper: float | None = None) -> None:
-        self.data.ctrl[self.act_ids] = np.asarray(q, dtype=np.float64)
+        q = np.asarray(q, dtype=np.float64).copy()
+        if self._backlash is not None:
+            # servo backlash: the output lags the command by a dead band whose side depends on motion direction
+            if self._last_cmd is not None:
+                d = q - self._last_cmd
+                self._backlash_offset = np.where(d > 1e-6, -self._backlash, np.where(d < -1e-6, self._backlash, self._backlash_offset))
+            self._last_cmd = q.copy()
+            q = q + self._backlash_offset
+        if self._latency > 0:
+            # command latency: the target takes effect `latency` control periods later (applied in advance())
+            self._cmd_queue.append((self.step_count + self._latency, q))
+        else:
+            self.data.ctrl[self.act_ids] = q
         if gripper is not None:
             # gripper 0 = open, 1 = closed  -> finger_left target = half_open * (1 - g)
             self.data.ctrl[self.grip_act] = self.min_open + (self.half_open - self.min_open) * (1.0 - float(np.clip(gripper, 0, 1)))
@@ -216,6 +251,8 @@ class PickPlaceEnv:
         """Advance physics by one control period; returns aggregated contact information over the period."""
         n = self.substeps if n_substeps is None else n_substeps
         summary = ContactSummary()
+        while self._cmd_queue and self._cmd_queue[0][0] <= self.step_count:
+            self.data.ctrl[self.act_ids] = self._cmd_queue.pop(0)[1]
         for _ in range(n):
             if self.gravity_comp:
                 # emulate a well-tuned servo: cancel gravity/Coriolis on the arm joints so the
@@ -261,7 +298,10 @@ class PickPlaceEnv:
 
     # ------------------------------------------------------------------ state access
     def joint_positions(self) -> np.ndarray:
-        return np.array([self.data.qpos[a] for a in self.qpos_adr])
+        q = np.array([self.data.qpos[a] for a in self.qpos_adr])
+        if self._joint_noise > 0:
+            q = q + self._noise_rng.normal(0.0, self._joint_noise, 6)
+        return q
 
     def joint_velocities(self) -> np.ndarray:
         return np.array([self.data.qvel[a] for a in self.qvel_adr])

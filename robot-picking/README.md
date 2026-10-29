@@ -1,4 +1,4 @@
-# robot-picking — plataforma de picking robótico con aprendizaje (sim → myCobot 280 + OAK-D → motopartes → UR10e)
+# robot-picking — plataforma de picking robótico con aprendizaje para **Beto** (myCobot 280 M5 + OAK-D) → motopartes → UR10e
 
 Este directorio contiene un sistema completo para enseñar a un brazo robótico a tomar objetos y dejarlos en
 una bandeja a partir de una instrucción en texto, empezando en simulación y pasando luego al robot físico.

@@ -1,0 +1,120 @@
+name: level1_cube_servo
+sim:
+  timestep: 0.002
+  control_hz: 10
+  max_steps: 150
+  gl_backend: auto
+robot:
+  name: mycobot_280_m5
+  tcp_offset:
+  - 0.0
+  - 0.0
+  - 0.065
+  home_joints_deg:
+  - 21.0
+  - 0.2
+  - -96.8
+  - 6.7
+  - 0.0
+  - -69.0
+  gripper_max_opening: 0.045
+  gripper_pad_friction: 2.0
+  actuator_kp: 100.0
+  gravity_compensation: true
+  joint_damping: 1.5
+camera:
+  name: oakd_sim
+  width: 640
+  height: 480
+  fovy_deg: 55.0
+  position:
+  - 0.52
+  - 0.0
+  - 0.4
+  lookat:
+  - 0.18
+  - 0.0
+  - 0.02
+  policy_crop:
+  - 96
+  - 60
+  - 544
+  - 420
+  policy_image_size:
+  - 128
+  - 128
+scene:
+  table_size:
+  - 0.5
+  - 0.5
+  - 0.02
+  table_color:
+  - 0.85
+  - 0.85
+  - 0.82
+  - 1
+  tray:
+    position:
+    - 0.14
+    - -0.14
+    - 0.0
+    inner_size:
+    - 0.08
+    - 0.08
+    wall_height: 0.015
+    wall_thickness: 0.004
+    color:
+    - 0.2
+    - 0.3
+    - 0.8
+    - 1
+  objects:
+  - id: red_cube
+    type: box
+    size:
+    - 0.0125
+    - 0.0125
+    - 0.0125
+    mass: 0.03
+    color:
+    - 0.9
+    - 0.1
+    - 0.1
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.0125
+    yaw_deg: 0.0
+    friction: 1.0
+task:
+  instruction: Pick the red cube and place it in the blue tray.
+  target_object: red_cube
+  destination: tray
+  lift_height: 0.05
+randomization:
+  enabled: true
+  object_xy_range:
+  - 0.015
+  - 0.015
+  object_yaw_range_deg: 10.0
+  tray_xy_range:
+  - 0.0
+  - 0.0
+  object_mass_range:
+  - 0.03
+  - 0.03
+  object_friction_range:
+  - 1.0
+  - 1.0
+  camera_pos_noise: 0.0
+  camera_rot_noise_deg: 0.0
+  light_noise: 0.0
+  color_noise: 0.0
+  robot:
+    backlash_deg_max: 1.5
+    latency_steps_max: 2
+    joint_noise_deg_max: 0.3
+    kp_scale_range:
+    - 0.7
+    - 1.2

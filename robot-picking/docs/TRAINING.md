@@ -31,6 +31,16 @@ misma al grabar y al desplegar; el yaw debe codificarse invariante a la simetrí
 suave (ganancia 0.3) y con velocidad mínima (0.25) para evitar que la policy "se frene" cerca de la bandeja;
 ejecutar 5 acciones por chunk (más → suelta en el aire; menos → nunca cierra el gripper). DART empeoró dos veces.
 
+## Exportar a ONNX (inferencia liviana en Beto / Mac)
+
+```
+uv sync --extra export
+uv run python scripts/export_onnx.py --checkpoint outputs/act_lowdim_smooth_floor_v001
+```
+Genera `policy.onnx` (17 MB) y `onnx_io.json` (nombres de entradas/salidas, estadísticas de normalización,
+chunk y n_action_steps) y verifica la salida contra PyTorch (error < 1e-6). La policy de baja dimensión corre
+con `onnxruntime` sin PyTorch.
+
 ## SmolVLA y π₀.₅
 
 Ambos están en LeRobot 0.6.x (`lerobot.policies.smolvla`, `lerobot.policies.pi05`) y requieren descargar

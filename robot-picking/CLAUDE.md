@@ -5,7 +5,7 @@ construido en una sesión en la nube (octubre 2026) para que una sesión local e
 perder contexto. Fuentes de verdad: `EXPERIMENTS.md` (34 experimentos), `RESULTS.md`, `docs/`.
 
 ## Qué es
-Plataforma de picking robótico con aprendizaje (sim → myCobot 280 M5 + OAK-D → motopartes → UR10e).
+Plataforma de picking robótico con aprendizaje para **Beto**, el myCobot 280 M5 del laboratorio (sim → Beto + OAK-D → motopartes → UR10e).
 Arquitectura: percepción → policy → safety determinista → `RobotAdapter` → hardware. Ver `docs/ARCHITECTURE.md`.
 Acciones robot-agnósticas: `[dx, dy, dz, drx, dry, drz, gripper]` normalizadas (TCP, frame base).
 

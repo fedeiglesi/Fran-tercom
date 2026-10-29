@@ -5,7 +5,7 @@
 | Equipo | Rol | Conexión |
 |---|---|---|
 | Mac Studio (M3 Ultra, 90 GB) | PC principal: cámara, robot, dataset, entrenamiento ligero, cliente de inferencia | — |
-| myCobot 280 M5 | Brazo 6 DOF + gripper adaptativo | USB-C del M5 → Mac (USB serie, 115200 baud) + fuente 12 V del robot |
+| **Beto** (myCobot 280 M5) | Brazo 6 DOF + gripper adaptativo | USB-C del M5 → Mac (USB serie, 115200 baud) + fuente 12 V del robot |
 | OAK-D | Cámara RGB + estéreo (depth) | USB-C 3.0 → Mac. Fija en trípode mirando la mesa |
 | Servidor NVIDIA (opcional) | Entrenar/servir VLA (SmolVLA, π₀.₅) | LAN; `scripts/policy_server.py` |
 

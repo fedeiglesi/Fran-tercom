@@ -27,6 +27,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-timeout>=2.3", "ruff>=0.6"]
 real = ["pymycobot>=4.0", "depthai>=3.0", "pyserial>=3.5"]
 vla = ["lerobot[transformers-dep,accelerate-dep,peft-dep]>=0.6.1,<0.7"]
+export = ["onnx>=1.16", "onnxruntime>=1.18"]
 
 [tool.uv]
 default-groups = []
