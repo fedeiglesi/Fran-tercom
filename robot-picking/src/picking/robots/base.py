@@ -62,8 +62,7 @@ class RobotAdapter(abc.ABC):
     @abc.abstractmethod
     def home(self) -> None: ...
 
-    max_down_lead: float = 0.008  # [m] maximum commanded descent below the measured TCP height per step
-    max_setpoint_lead: float = 0.03  # [m] re-anchor to the measurement only when the setpoint runs this far ahead (1.5 cm caused hover: with 0.2 s latency the lead hits the cap while descending, re-anchoring behind the real command)
+    max_setpoint_lead: float = 0.015  # [m] maximum distance between the commanded and the measured TCP
 
     def commanded_tcp(self) -> np.ndarray | None:
         """Last commanded TCP pose (4x4) if the adapter tracks setpoints, else None."""
@@ -79,13 +78,17 @@ class RobotAdapter(abc.ABC):
         state = self.get_state()
         T_meas = state.tcp.as_matrix()
         T_ref = self.commanded_tcp()
-        if T_ref is None or np.linalg.norm(T_ref[:3, 3] - T_meas[:3, 3]) > self.max_setpoint_lead:
+        if T_ref is None:
             T_ref = T_meas
         dpos, drot, g = scale.denormalize(action)
         T_target = target_from_delta(T_ref, dpos, drot)
-        # anisotropic lead: never command the TCP more than `max_down_lead` BELOW the measured height, so a
-        # lagging servo cannot be driven into the table while descending (lateral lead stays free)
-        T_target[2, 3] = max(T_target[2, 3], T_meas[2, 3] - self.max_down_lead)
+        # Bound the setpoint lead by PROJECTING the target into a ball around the measurement (never by
+        # re-anchoring: a reset puts the new target behind the previous command and the robot oscillates/hovers).
+        # The lead cap keeps a lagging servo from being driven far past the measured pose (e.g. into the table).
+        d = T_target[:3, 3] - T_meas[:3, 3]
+        n = float(np.linalg.norm(d))
+        if n > self.max_setpoint_lead:
+            T_target[:3, 3] = T_meas[:3, 3] + d / n * self.max_setpoint_lead
         return self.set_tcp_target(T_target, g)
 
     def gripper_opening_m(self) -> float | None:
