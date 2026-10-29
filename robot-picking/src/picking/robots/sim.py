@@ -36,6 +36,9 @@ class SimRobotAdapter(RobotAdapter):
     def fk(self, q):
         return self.kin.fk(q)
 
+    def commanded_tcp(self):
+        return self.kin.fk(self._target_q)
+
     def get_state(self) -> RobotState:
         T = self.env.tcp_matrix()
         return RobotState(

@@ -62,11 +62,26 @@ class RobotAdapter(abc.ABC):
     @abc.abstractmethod
     def home(self) -> None: ...
 
+    max_setpoint_lead: float = 0.03  # [m] if the commanded TCP is further than this from the measured one, re-anchor
+
+    def commanded_tcp(self) -> np.ndarray | None:
+        """Last commanded TCP pose (4x4) if the adapter tracks setpoints, else None."""
+        return None
+
     def apply_action(self, action: Action, scale: ActionScale) -> bool:
-        """Convenience: delta action -> absolute target -> set_tcp_target."""
+        """Delta action -> absolute target -> set_tcp_target.
+
+        The delta is applied to the last COMMANDED pose (setpoint) when available, not to the measured pose:
+        with command latency or servo lag, deltas applied to a lagging measurement cancel out and the robot
+        stalls (observed with 0.2 s latency in simulation). If the setpoint has run away from the measured
+        pose (blocked motion, safety hold) the reference is re-anchored to the measurement."""
         state = self.get_state()
+        T_meas = state.tcp.as_matrix()
+        T_ref = self.commanded_tcp()
+        if T_ref is None or np.linalg.norm(T_ref[:3, 3] - T_meas[:3, 3]) > self.max_setpoint_lead:
+            T_ref = T_meas
         dpos, drot, g = scale.denormalize(action)
-        T_target = target_from_delta(state.tcp.as_matrix(), dpos, drot)
+        T_target = target_from_delta(T_ref, dpos, drot)
         return self.set_tcp_target(T_target, g)
 
     def gripper_opening_m(self) -> float | None:

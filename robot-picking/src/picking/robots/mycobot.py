@@ -54,6 +54,7 @@ class MyCobotAdapter(RobotAdapter):
         self.connected = False
         self._gripper_cmd = 0.0
         self._last_q = None
+        self._last_sent_q = None
         self.ik_failures = 0
         self.last_contacts = None
         self.log_rows: list[dict] = []
@@ -169,6 +170,7 @@ class MyCobotAdapter(RobotAdapter):
             log.error("robot not armed: refusing to move (call adapter.arm())")
             return False
         deg = [float(round(v, 2)) for v in self.model_to_deg(q)]
+        self._last_sent_q = np.asarray(q, float).copy()
         self.log_rows.append({"t": time.time(), "cmd": "send_angles", "deg": deg})
         if self.dry_run:
             log.info("[dry-run] send_angles(%s, %d)", deg, speed or self.speed)
@@ -198,8 +200,11 @@ class MyCobotAdapter(RobotAdapter):
         log.warning("move did not reach target within %.1fs", timeout)
         return False
 
+    def commanded_tcp(self):
+        return None if self._last_sent_q is None else self.kin.fk(self._last_sent_q)
+
     def set_tcp_target(self, T_target, gripper, blocking=True) -> bool:
-        q0 = self._last_q if self._last_q is not None else self.kin.home
+        q0 = self._last_sent_q if self._last_sent_q is not None else (self._last_q if self._last_q is not None else self.kin.home)
         q, ok, pe, re = self.kin.ik(T_target, q0)
         if not ok:
             self.ik_failures += 1
@@ -246,3 +251,4 @@ class MyCobotAdapter(RobotAdapter):
     def reset_targets(self) -> None:
         self.ik_failures = 0
         self._last_q = None
+        self._last_sent_q = None
