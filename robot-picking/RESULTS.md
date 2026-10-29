@@ -13,6 +13,8 @@ Entorno de medición: contenedor Linux x86_64, 4 vCPU, sin GPU, MuJoCo 3.17, LeR
 | 2 (10 objetos) | Baseline 0 percepción | 1000 | **100.0 %** | 100 % | 0.0 % | 0.0 % | 0.0 % | 7.9 / 8.5 | PASA |
 | 3 (24 geometrías + DR cámara/luz/color) | Baseline 0 percepción | 120 | 90.8 % | 92 % | 1.7 % | 0.0 % | 0.0 % | — | no (elipsoides que ruedan) |
 | 3 | Baseline 0 privilegiado | 120 | 92.5 % | — | 0.0 % | 0.0 % | 1.7 % | — | no |
+| 4 (10 motopartes aproximadas, oscuras/metálicas) | Baseline 0 privilegiado | 100 | 93 % | — | 0.0 % | 2 % | 0 % | — | (n=100) |
+| 4 | Baseline 0 percepción por ALTURA (sin color) | 100 | 82 % | — | 0.0 % | 2 % | 0 % | — | (n=100) |
 | 5 (4 objetos simultáneos, objetivo por instrucción) | Baseline 0 percepción | 100 | 98 % | 99 % | 0.0 % | 0.0 % | 1 % | — | (n=100) |
 | 1 (cubo) | ACT visual (LeRobot 0.6.1, ResNet18 desde cero, 128×128), 200 demos, ckpt 500/1000/2000 | 30 c/u | 53 % / 50 % / 53 % | 60 % | 0 % | 10 % | ~45 % | — | no |
 | 1 (cubo) | ACT visual, recorte ajustado 160×90 (cubo ≈15 px), con/sin desplazamiento aleatorio | 30 c/u | 50–57 % | 57 % | 7–17 % | 0 % | 27–37 % | — | no |
@@ -43,9 +45,12 @@ docs/REAL_ROBOT.md para la secuencia y los criterios (100 intentos ≥ 90 %, lue
 
 ## 3. Motopartes
 
-No iniciado (requiere objetos reales o digitalizados). El pipeline de nivel 3 (geometrías variadas + randomización)
-es el punto de partida; la percepción por color deberá sustituirse por un detector de vocabulario abierto
-detrás de la misma interfaz `ObjectDetection`.
+Sólo en simulación, con 10 piezas aproximadas por primitivas compuestas (`configs/sim/level4_motoparts.yaml`:
+pastilla de freno, rulemán, bujía, relé, palanca de freno, piñón, grommet, tuerca, espejo, tapa): 93 % con pose
+privilegiada y 82 % con el detector por altura sobre la mesa (sin color, `detect_by_height`). Fallo sistemático:
+palanca de freno (barra cilíndrica tumbada resbala entre almohadillas planas: límite del gripper). Benchmark con
+piezas reales: pendiente de hardware; la percepción deberá pasar a un detector de vocabulario abierto detrás de
+la misma interfaz `ObjectDetection`.
 
 ## 4. Arquitectura (evidencia por tests)
 
