@@ -62,6 +62,7 @@ class RobotAdapter(abc.ABC):
     @abc.abstractmethod
     def home(self) -> None: ...
 
+    max_down_lead: float = 0.008  # [m] maximum commanded descent below the measured TCP height per step
     max_setpoint_lead: float = 0.03  # [m] re-anchor to the measurement only when the setpoint runs this far ahead (1.5 cm caused hover: with 0.2 s latency the lead hits the cap while descending, re-anchoring behind the real command)
 
     def commanded_tcp(self) -> np.ndarray | None:
@@ -82,6 +83,9 @@ class RobotAdapter(abc.ABC):
             T_ref = T_meas
         dpos, drot, g = scale.denormalize(action)
         T_target = target_from_delta(T_ref, dpos, drot)
+        # anisotropic lead: never command the TCP more than `max_down_lead` BELOW the measured height, so a
+        # lagging servo cannot be driven into the table while descending (lateral lead stays free)
+        T_target[2, 3] = max(T_target[2, 3], T_meas[2, 3] - self.max_down_lead)
         return self.set_tcp_target(T_target, g)
 
     def gripper_opening_m(self) -> float | None:
