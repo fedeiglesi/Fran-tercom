@@ -63,7 +63,7 @@ class RobotAdapter(abc.ABC):
     def home(self) -> None: ...
 
     max_setpoint_lead: float = 0.015  # [m] maximum distance between the commanded and the measured TCP
-    max_down_lead: float = 0.005  # [m] maximum commanded height below the measured TCP height
+    max_down_lead: float = 0.015  # [m] maximum commanded height below the measured TCP height (5 mm made the lowering hover)
 
     def commanded_tcp(self) -> np.ndarray | None:
         """Last commanded TCP pose (4x4) if the adapter tracks setpoints, else None."""
