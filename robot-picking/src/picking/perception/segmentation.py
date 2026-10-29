@@ -24,6 +24,7 @@ class ObjectDetection:
     n_pixels: int
     confidence: float
     yaw_period: float = np.pi / 2  # symmetry of valid grasp yaws: pi/2 square/round, pi elongated
+    width_m: float | None = None  # top-face short side (grasp width) when known
 
 
 # HSV ranges (OpenCV H in [0,180]) for the simple coloured objects
@@ -129,11 +130,13 @@ def detect_colored_object(
         yaw = float(np.angle(np.exp(1j * yaw)))
         ratio = min(w_r, h_r) / max(w_r, h_r, 1e-6)
         yaw_period = np.pi / 2 if ratio > 0.8 else np.pi
+        width_m = float(min(w_r, h_r)) / 1000.0
     else:
         yaw = 0.0
         yaw_period = np.pi / 2
+        width_m = None
     conf = float(min(1.0, sel.sum() / 50.0))
-    return ObjectDetection(object_id, np.asarray(cent, float), centre, top, yaw, height, int(sel.sum()), conf, yaw_period)
+    return ObjectDetection(object_id, np.asarray(cent, float), centre, top, yaw, height, int(sel.sum()), conf, yaw_period, width_m)
 
 
 def detect_by_height(
@@ -195,7 +198,7 @@ def detect_by_height(
         centre = np.array([centre_xy[0], centre_xy[1], table_z + height / 2])
         top_pt = np.array([centre_xy[0], centre_xy[1], z_max])
         xy = top[:, :2]
-        yaw, period = 0.0, np.pi / 2
+        yaw, period, width_m = 0.0, np.pi / 2, None
         if len(xy) >= 5:
             pts_mm = ((xy - xy.mean(0)) * 1000.0).astype(np.float32)
             (_, _), (w_r, h_r), ang = cv2.minAreaRect(pts_mm)
@@ -204,5 +207,6 @@ def detect_by_height(
                 yaw += np.pi / 2
             yaw = float(np.angle(np.exp(1j * yaw)))
             period = np.pi / 2 if min(w_r, h_r) / max(w_r, h_r, 1e-6) > 0.8 else np.pi
-        return ObjectDetection(object_id, np.asarray(cent, float) * stride, centre, top_pt, yaw, float(height), int(len(top)), 1.0, period)
+            width_m = float(min(w_r, h_r)) / 1000.0
+        return ObjectDetection(object_id, np.asarray(cent, float) * stride, centre, top_pt, yaw, float(height), int(len(top)), 1.0, period, width_m)
     return None

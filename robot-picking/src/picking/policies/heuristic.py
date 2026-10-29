@@ -33,9 +33,13 @@ class ScriptedPickPlace(Policy):
         rng: np.random.Generator | None = None,
         transport_gain: float = 0.6,
         min_speed: float = 0.0,
+        preshape_margin: float | None = None,
+        gripper_max_opening: float = 0.045,
     ):
         self.transport_gain = transport_gain
         self.min_speed = min_speed
+        self.preshape_margin = preshape_margin  # None = approach fully open; else opening = object width + margin
+        self.gripper_max_opening = gripper_max_opening
         self.max_dp = max_delta_pos
         self.max_dr = max_delta_rot
         self.approach_height = approach_height
@@ -107,9 +111,14 @@ class ScriptedPickPlace(Policy):
             self.grasp_yaw = min(cands, key=lambda y: abs(np.angle(np.exp(1j * (y - cur_yaw)))))
             self.grasp_target = obj.copy()
         ph = self.phase
+        g_open = 0.0
+        if self.preshape_margin is not None and priv.get("object_width") is not None:
+            # pre-shape the gripper to the object width + margin so the pads do not sweep neighbours (clutter)
+            opening = min(self.gripper_max_opening, float(priv["object_width"]) + self.preshape_margin)
+            g_open = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
         if ph == "approach":
             tgt = np.array([obj[0], obj[1], grasp_z + self.approach_height])
-            a = self._move(tcp, tgt, 0.0, self.grasp_yaw, R_cur)
+            a = self._move(tcp, tgt, g_open, self.grasp_yaw, R_cur)
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.0015
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
@@ -123,7 +132,7 @@ class ScriptedPickPlace(Policy):
             return a
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])
-            a = self._move(tcp, tgt, 0.0, self.grasp_yaw, R_cur)
+            a = self._move(tcp, tgt, g_open, self.grasp_yaw, R_cur)
             # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
             # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001

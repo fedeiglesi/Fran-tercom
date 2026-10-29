@@ -85,8 +85,14 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     grasp_pos = T_obj[:3, 3].copy()
     if spec.get("type") == "compound":
         grasp_pos[:2] = env.object_com(target)[:2]  # grasp above the centre of mass (compound parts)
+    width = None
+    if spec.get("type") == "box":
+        width = 2 * min(spec["size"][0], spec["size"][1])
+    elif spec.get("type") in ("cylinder", "sphere", "capsule"):
+        width = 2 * spec["size"][0]
     priv = {
         "object_pos": grasp_pos,
+        "object_width": width,
         "object_yaw": yaw,
         "object_yaw_period": period,
         "tray_pos": env.tray_center(),
