@@ -55,9 +55,10 @@ class EpisodeEvaluator:
             self.collision_detail = (
                 "table" if contacts.robot_table else "self" if contacts.robot_self else "tray" if contacts.robot_tray else "object_with_arm"
             )
-        if contacts.finger_table and contacts.max_force > self.collision_force_threshold:
+        pad_wall_force = getattr(contacts, "finger_table_force", contacts.max_force)
+        if contacts.finger_table and pad_wall_force > self.collision_force_threshold:
             self.collision = True
-            self.collision_detail = f"finger_table_force_{contacts.max_force:.1f}N"
+            self.collision_detail = f"finger_table_force_{pad_wall_force:.1f}N"
         if other_objects_moved:
             self.wrong_object_contact = True
         self.max_obj_height = max(self.max_obj_height, float(obj_pos[2]))

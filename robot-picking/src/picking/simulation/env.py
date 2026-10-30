@@ -29,6 +29,7 @@ class ContactSummary:
     finger_object: dict[str, int] = field(default_factory=dict)  # object id -> number of pads in contact
     finger_table: bool = False
     max_force: float = 0.0
+    finger_table_force: float = 0.0  # largest pad-vs-wall/floor contact force (pad-object forces are not collisions)
 
 
 class PickPlaceEnv:
@@ -385,11 +386,13 @@ class PickPlaceEnv:
             if og == self.geom_table or og == self.geom_floor:
                 if is_pad:
                     s.finger_table = True
+                    s.finger_table_force = max(s.finger_table_force, force)
                 else:
                     s.robot_table = True
             elif og in self.geom_tray:
                 if is_pad:
                     s.finger_table = True  # compliant pad touching a wall/floor: collision only above the force threshold
+                    s.finger_table_force = max(s.finger_table_force, force)
                 else:
                     s.robot_tray = True
             elif og in self.geom_obj_to_id:

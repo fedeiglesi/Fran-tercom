@@ -73,7 +73,7 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
         attempt = 0
         while True:
             cb = (lambda d, _k=k, _a=attempt: step_callback(_k, _a, d)) if step_callback is not None else None
-            r = run_episode(env, adapter, policy, safety, seed=seed * 100 + k, image_size=image_size, full_frame=full_frame, env_reset=False, target_override=oid, episode_id=f"order{seed}_item{k}_{oid}", step_callback=cb)
+            r = run_episode(env, adapter, policy, safety, seed=seed * 100 + k, image_size=image_size, full_frame=full_frame, env_reset=False, target_override=oid, episode_id=f"order{seed}_item{k}_{oid}", step_callback=cb, settle_steps_after_done=30)
             labels = r.metadata.get("policy_info", {}).get("sku_labels", [])
             moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
             wrong_pick = (not r.success) and r.failure_type == "WRONG_OBJECT"

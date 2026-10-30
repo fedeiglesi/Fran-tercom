@@ -41,7 +41,9 @@ class ScriptedPickPlace(Policy):
         descend_tol_frac: float = 0.3,
         descend_max_speed: float = 1.0,
         release_margin: float = 0.008,
+        place_clearance: float = 0.012,
     ):
+        self.place_clearance = place_clearance  # release height above the container floor = object height / 2 + this
         self.release_margin = release_margin  # opening at release = width + 2 * this (4 mm wedged square parts between the pads; 8 mm = full open for parts >= 29 mm)
         self.descend_max_speed = descend_max_speed  # cap on the vertical descend speed (a fast descent drifts in xy)
         # grasp height = object centre + grasp_height_offset - grasp_depth_frac * object height: closing BELOW the
@@ -83,6 +85,7 @@ class ScriptedPickPlace(Policy):
         self.stall = 0
         self._last_tcp = None
         self.bad_target = False
+        self.yaw_retries = 0  # grasp yaws tried after an unreachable (IK-stalled) approach
 
     def done(self) -> bool:
         return self._done
@@ -156,9 +159,17 @@ class ScriptedPickPlace(Policy):
                 self.stall = 0
                 self._next("descend")
             elif self.stall >= 10:
-                # unreachable target (IK/workspace): give up instead of chasing it until the timeout
-                self.bad_target = True
-                self._next("failed")
+                # unreachable target (IK/workspace) with THIS wrist yaw: near the reach limit another grasp yaw of
+                # the same part is often reachable (the wrist offset moves the elbow); try the next candidate
+                # before giving up
+                period = float(priv.get("object_yaw_period", np.pi / 2))
+                if self.yaw_retries < 2:
+                    self.yaw_retries += 1
+                    self.grasp_yaw += period
+                    self.stall = 0
+                else:
+                    self.bad_target = True
+                    self._next("failed")
             return a
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])
@@ -244,7 +255,9 @@ class ScriptedPickPlace(Policy):
                     self._next("approach")
             return self._move(tcp, tcp, 1.0 if holding else 0.0, None, R_cur)
         if ph == "lower":
-            tgt = np.array([tray[0], tray[1], tray[2] + self.place_height])
+            # release height adapts to the part: half its height + clearance (a 12 mm grommet dropped from 3 cm
+            # bounces and rolls in the container; a 28 mm box needs the full height), capped at `place_height`
+            tgt = np.array([tray[0], tray[1], tray[2] + min(self.place_height, 0.5 * obj_h + self.place_clearance)])
             a = self._move(tcp, tgt, 1.0, 0.0, R_cur)
             dz = tgt[2] - tcp[2]
             if 1e-4 < abs(dz) < self.descend_slow_zone:
@@ -254,8 +267,9 @@ class ScriptedPickPlace(Policy):
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
             err = np.linalg.norm(tgt - tcp)
-            # 8 mm is enough to release over the tray; with lag/oscillation also give up after a step budget
-            if err < 0.008 or (err < 0.015 and (self.stall >= 4 or self.phase_steps > 25)):
+            # 8 mm is enough to release over the tray; with lag/oscillation also give up after a step budget; when
+            # the part comes to rest on top of other products (stacking) the target is never reached: release on stall
+            if err < 0.008 or (err < 0.015 and (self.stall >= 4 or self.phase_steps > 25)) or self.stall >= 8 or self.phase_steps > 60:
                 self.stall = 0
                 self._next("release")
             return a

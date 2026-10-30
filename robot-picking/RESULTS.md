@@ -62,16 +62,18 @@ pasos por fase; el ACT de baja dimensión (87 % nominal) cae a 0 % con servos im
 Escenario (`configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): caja origen (14×12 cm, la
 mayor que alcanza Beto) con 3 ítems de SKUs mezclados (en caja, en bolsa, sueltos), caja de pedido (11×10 cm) con
 1 producto previo, pedido de 2 SKUs; identificador de SKU = oráculo con ruido de 2 mm (placeholder del detector
-aprendido). **400 pedidos holdout** (seeds 100100–100499, E069):
+aprendido). Resultados holdout (E069):
 
-| Métrica | Valor |
-|---|---|
-| Pedidos completos (todos los ítems, previos intactos, sin colisión) | **90.0 %** (16 % en la primera versión E058; 58 % en E063) |
-| Ítems colocados | 92.7 % (sueltos 93 %, cajas 88 %, bolsas 97 %) |
-| SKU equivocado | 0.25 % de los pedidos (oráculo con ruido de posición; el error de etiqueta es configurable) |
-| Productos previos perturbados | 0.25 % |
-| Colisiones (pad-pared/piso > 5 N) | 7 % de los pedidos |
-| Peores SKUs | caja de cables 40×40 y filtro 44×32 (2.5–6 mm de holgura con la apertura máxima de 45 mm: cualquier error de detección > 3 mm apoya una almohadilla sobre la pieza) |
+| Métrica | 400 pedidos (seeds 100100–100499) | **1000 pedidos (seeds 100500–101499)** |
+|---|---|---|
+| Pedidos completos (todos los ítems, previos intactos, sin colisión) | 90.0 % | **91.1 %** (16 % en la primera versión E058; 58 % en E063) |
+| Ítems colocados | 92.7 % | **93.2 %** (sueltos 92 %, cajas 93 %, bolsas 96 %) |
+| SKU equivocado | 0.25 % | 0.1 % de los pedidos (oráculo con ruido de posición; el error de etiqueta es configurable) |
+| Productos previos perturbados | 0.25 % | 0 % |
+| Colisiones (pad-pared/piso > 5 N) | 7 % | 6.4 % de los pedidos |
+| Fallos por ítem (1000 pedidos) | — | 66 colisiones, 25 objetivo inalcanzable, 18 SLIP, 9 NO_GRASP, 8 PLACE_FAIL, 8 TIMEOUT, 4 DROP |
+| Peores SKUs | caja de cables 40×40 (82 %), rulemán y tapa (88 %) | holgura de 2.5–6 mm con la apertura máxima de 45 mm: un error de detección > 3 mm apoya una almohadilla sobre la pieza |
+| Tiempo mediano por pedido (2 ítems) | — | 17 s simulados |
 
 Qué hizo la diferencia (E058 → E069, ver EXPERIMENTS.md): anchos y huellas reales por SKU; base de datos de
 agarre por SKU (ancho, profundidad de pinzado bajo el ecuador para piezas redondas); generador de escenas
