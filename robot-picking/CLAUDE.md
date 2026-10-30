@@ -30,11 +30,11 @@ uv run python -m pytest -q tests
   servos imperfectos en 1000 episodios: pasa el gate**. Entrenado con demos nominales: 87 % y frágil. Regla:
   grabar las demos con `*_servo.yaml`.
 - Nivel 7 (pedidos: caja origen con SKUs mezclados en caja/bolsa/suelto → caja de pedido con productos previos,
-  `configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): objetivo final; **91.1 % de pedidos
-  completos / 93.2 % de ítems en 1000 pedidos holdout (E069b)**, 0.1 % SKU equivocado, 0 % previos perturbados,
-  6.4 % colisiones. Herramienta de traza reproducible por pedido: `run_order(step_callback=...)` (ver EXPERIMENTS
-  E064–E069). Siguiente: colisiones pad-pared al soltar en la caja de pedido, SLIP de la pastilla de freno,
-  encaje de piezas cuadradas al soltar, bolsas deformables, detector de SKU aprendido en lugar del oráculo.
+  `configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): objetivo final; **92.2 % de pedidos
+  completos / 94.7 % de ítems en 1000 pedidos holdout (E071b)**, 0.1 % SKU equivocado, 0 % previos perturbados,
+  6.8 % colisiones. Herramienta de traza reproducible por pedido: `run_order(step_callback=...)` (ver EXPERIMENTS
+  E064–E071). Siguiente: colisiones pad-pared tras un intento fallido que desplaza la pieza hacia la pared (67 % de
+  los fallos), bolsas deformables, detector de SKU aprendido en lugar del oráculo, policy aprendida sobre el experto.
 - Nivel 4 (motopartes aproximadas): 93 % privilegiado, 82 % con detector por altura sin color (`detect_by_height`).
   Nivel 5 (4 objetos simultáneos): 98 %. Nivel 6 (clutter): 70 % (vecinos desplazados por el gripper al bajar;
   próximo paso: elegir el yaw de agarre con más holgura respecto a los vecinos). Nivel 7 (bin) pendiente.
