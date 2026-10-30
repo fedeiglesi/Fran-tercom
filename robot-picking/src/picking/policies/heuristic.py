@@ -154,10 +154,12 @@ class ScriptedPickPlace(Policy):
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
-            err = np.linalg.norm(tgt - tcp)
-            # the pads are 40 mm tall: +-6 mm in height is fine. With lag the TCP oscillates around the target,
-            # so also close when it has been hovering within 1 cm for a while instead of hammering the object.
-            if err < 0.006 or self.stall >= 6 or (abs(dz) < 0.010 and self.phase_steps > 30):
+            err_xy = np.linalg.norm(tgt[:2] - tcp[:2])
+            # vertical tolerance scales with the object height: closing 3 mm too high on a 10 mm part means the
+            # pads slide over it. With lag the TCP oscillates, so also close after hovering within 1 cm for a while.
+            h = float(priv.get("object_height", 0.025) or 0.025)
+            tol_z = float(np.clip(0.3 * h, 0.002, 0.006))
+            if (err_xy < 0.006 and abs(dz) < tol_z) or self.stall >= 6 or (abs(dz) < 0.010 and self.phase_steps > 30):
                 self.stall = 0
                 self._next("close")
             return a

@@ -93,6 +93,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
             "object_yaw": self.detection.yaw if self.detection is not None else 0.0,
             "object_yaw_period": self.detection.yaw_period if self.detection is not None else np.pi / 2,
             "object_width": self.detection.width_m if self.detection is not None else None,
+            "object_height": self.detection.height_m if self.detection is not None else None,
             "tray_pos": np.asarray(obs.extra["tray_pos"], float),
         }
         if self.phase == "verify":

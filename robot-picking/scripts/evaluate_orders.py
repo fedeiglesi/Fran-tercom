@@ -33,6 +33,7 @@ def main() -> int:
     ap.add_argument("--seed-start", type=int, default=100000)
     ap.add_argument("--sku-error", type=float, default=0.0, help="SKU identifier error rate (placeholder for the learned detector)")
     ap.add_argument("--retries", type=int, default=1)
+    ap.add_argument("--grasp-offset", type=float, default=0.0)
     ap.add_argument("--tag", default="")
     ap.add_argument("--log-every", type=int, default=25)
     args = ap.parse_args()
@@ -43,7 +44,7 @@ def main() -> int:
     adapter = SimRobotAdapter(env)
     safety = SafetyFilter(load_yaml(config_path(args.safety)))
     ident = SkuIdentifierOracle(error_rate=args.sku_error, seed=args.seed_start)
-    policy = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=env.cam_name, detector="sku", sku_identifier=ident, lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"]["policy_crop"]), gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=0.002, preshape_margin=0.012)
+    policy = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=env.cam_name, detector="sku", sku_identifier=ident, lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"]["policy_crop"]), gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, preshape_margin=0.012)
     out = project_root() / "reports" / "orders" / f"{time.strftime('%Y%m%d_%H%M%S')}_{args.tag or 'orders'}"
     out.mkdir(parents=True, exist_ok=True)
     results = []

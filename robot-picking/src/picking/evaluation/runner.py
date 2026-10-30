@@ -98,6 +98,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     priv = {
         "object_pos": grasp_pos,
         "object_width": width,
+        "object_height": 2 * env.object_half_extent_z(target),
         "object_yaw": yaw,
         "object_yaw_period": period,
         "tray_pos": env.tray_center(),
