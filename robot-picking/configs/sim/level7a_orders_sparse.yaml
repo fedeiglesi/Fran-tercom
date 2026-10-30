@@ -111,6 +111,7 @@ scene:
       - 0.003
     packaging: loose
     sku: BRAKE_PAD
+    footprint_radius: 0.027  # circumscribed footprint for placement
     grasp_width: 0.032
   - id: bearing
     name: bearing
@@ -227,6 +228,8 @@ scene:
       - 7.0686
     packaging: loose
     sku: BEARING
+    footprint_radius: 0.019  # circumscribed footprint for placement
+    grasp_depth_frac: 0.3  # torus of capsules: pinch below the equator or it pops out
     grasp_width: 0.037  # outer diameter of the capsule ring (2*(0.013+0.005)); 0.032 made the pads land on the ring
   - id: spark_plug
     name: spark plug
@@ -278,6 +281,8 @@ scene:
     yaw_period: 3.14159
     packaging: loose
     sku: SPARK_PLUG
+    footprint_radius: 0.041  # circumscribed footprint for placement
+    grasp_depth_frac: 0.3  # lying cylinder: pinch below the equator
     grasp_width: 0.016
   - id: relay
     name: relay
@@ -312,6 +317,7 @@ scene:
       - -0.01
     packaging: loose
     sku: RELAY
+    footprint_radius: 0.021  # circumscribed footprint for placement
     grasp_width: 0.030  # true footprint 30x30 mm
   - id: gear
     name: gear
@@ -344,6 +350,7 @@ scene:
       - 0
     packaging: loose
     sku: GEAR
+    footprint_radius: 0.018  # circumscribed footprint for placement
     grasp_width: 0.036
   - id: grommet
     name: rubber grommet

@@ -99,6 +99,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         "object_pos": grasp_pos,
         "object_width": width,
         "object_height": 2 * env.object_half_extent_z(target),
+        "object_grasp_depth": spec.get("grasp_depth_frac"),
         "object_yaw": yaw,
         "object_yaw_period": period,
         "tray_pos": env.tray_center(),
@@ -138,7 +139,7 @@ def _object_truth(env, oid: str) -> dict:
     if spec.get("type") == "compound":
         pos[:2] = env.object_com(oid)[:2]
         width = float(spec.get("grasp_width", 0.02))
-    return {"pos": pos, "yaw": yaw, "yaw_period": period, "width": width if width is not None else 0.025, "height": 2 * env.object_half_extent_z(oid)}
+    return {"pos": pos, "yaw": yaw, "yaw_period": period, "width": width if width is not None else 0.025, "height": 2 * env.object_half_extent_z(oid), "grasp_depth_frac": spec.get("grasp_depth_frac")}
 
 
 def run_episode(

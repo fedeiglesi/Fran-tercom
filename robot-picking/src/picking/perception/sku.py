@@ -36,7 +36,7 @@ class SkuIdentifierOracle:
             p = np.asarray(o["pos"], float) + self.rng.normal(0, self.pos_noise_m, 3) * np.array([1, 1, 0.5])
             top = p.copy()
             top[2] = p[2] + o.get("height", 0.02) / 2
-            det = ObjectDetection(oid, np.zeros(2), p, top, float(o.get("yaw", 0.0)), float(o.get("height", 0.02)), 100, 1.0, float(o.get("yaw_period", np.pi / 2)), o.get("width"))
+            det = ObjectDetection(oid, np.zeros(2), p, top, float(o.get("yaw", 0.0)), float(o.get("height", 0.02)), 100, 1.0, float(o.get("yaw_period", np.pi / 2)), o.get("width"), o.get("grasp_depth_frac"))
             label = skus[oid]
             if self.error_rate > 0 and self.rng.random() < self.error_rate and len(present) > 1:
                 others = [skus[x] for x in present if skus[x] != label]

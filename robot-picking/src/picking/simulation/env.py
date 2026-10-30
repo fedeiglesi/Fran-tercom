@@ -260,30 +260,71 @@ class PickPlaceEnv:
         wall_margin = float(ot.get("wall_margin", 0.008))  # extra clearance between an item and the bin walls
         separation = float(ot.get("separation", 0.012))  # extra clearance between items
 
-        def place(bid, objs):
+        def footprint_radius(spec) -> float:
+            if "footprint_radius" in spec:
+                return float(spec["footprint_radius"])
+            if spec["type"] == "compound":
+                return 0.022
+            sx, sy = spec["size"][0], spec["size"][1]
+            return float(np.hypot(sx, sy)) if spec["type"] == "box" else float(max(sx, sy))  # circumscribed (any yaw)
+
+        def place(bid, objs) -> list[str]:
+            """Non-overlapping placement (circumscribed footprints + clearances). Returns the objects that could NOT be
+            placed: the generator never overlaps parts (physics would shove them against the walls, where no
+            top-down grasp exists) — a crowded bin drops distractors instead."""
             c, hs = self.bin_center_nominal(bid), self.bin_inner_halfsize(bid)
-            placed = []
+            placed, failed = [], []
             for o in objs:
                 spec = self.object_specs[o]
-                r = float(spec.get("footprint_radius", 0.022 if spec["type"] == "compound" else max(spec["size"][:2])))
-                pos = c[:2].copy()
+                r = footprint_radius(spec)
                 ok = False
                 for attempt in range(600):
-                    relax = 1.0 if attempt < 300 else 0.6  # if the bin is too crowded, accept tighter spacing
+                    relax = 1.0 if attempt < 300 else 0.6  # if the bin is crowded, accept tighter spacing
                     lo = np.array([c[0] - hs[0] + r + wall_margin * relax, c[1] - hs[1] + r + wall_margin * relax])
                     hi = np.array([c[0] + hs[0] - r - wall_margin * relax, c[1] + hs[1] - r - wall_margin * relax])
-                    pos = np.array([self.rng.uniform(min(lo[0], hi[0]), max(lo[0], hi[0])), self.rng.uniform(min(lo[1], hi[1]), max(lo[1], hi[1]))])
+                    if np.any(hi < lo):
+                        break  # the part does not fit this bin at all
+                    pos = np.array([self.rng.uniform(lo[0], hi[0]), self.rng.uniform(lo[1], hi[1])])
                     if all(np.linalg.norm(pos - q) >= r + rq + separation * relax for q, rq in placed):
                         ok = True
                         break
                 if not ok:
                     self.placement_failures = getattr(self, "placement_failures", 0) + 1
+                    failed.append(o)
+                    continue
                 placed.append((pos, r))
                 er.objects[o]["position"][:2] = pos
                 er.objects[o]["position"][2] = float(er.objects[o]["position"][2]) + 0.004  # on the bin floor
+            return failed
 
-        place(src, order + distractors)
-        place(dst, prefilled)
+        # order items first (they must be present); distractors fill the remaining room; a distractor that does
+        # not fit is simply absent (parked), which keeps every generated scene physically consistent
+        failed = place(src, order + distractors)
+        if failed and not any(o in order for o in failed):
+            # a distractor does not fit: substitute a smaller one from the pool (keeps the scene at n_source_items)
+            pool = [o for o in ids[n_src + n_pre :]]
+            for bad in list(failed):
+                for alt in pool:
+                    if alt in distractors or alt in failed:
+                        continue
+                    distractors = [alt if o == bad else o for o in distractors]
+                    if not place(src, order + distractors):
+                        failed.remove(bad)
+                        break
+                    distractors = [bad if o == alt else o for o in distractors]
+        if any(o in order for o in failed):
+            # an ORDER item does not fit next to the others: retry with a fresh draw (bounded)
+            for _ in range(10):
+                self.rng.shuffle(ids)
+                order, distractors, prefilled = ids[:n_order], ids[n_order:n_src], ids[n_src : n_src + n_pre]
+                failed = place(src, order + distractors)
+                if not any(o in order for o in failed):
+                    break
+            self.order = order
+            self.current_target = order[0]
+        failed += place(dst, prefilled)
+        self.placement_dropped = getattr(self, "placement_dropped", 0) + len(failed)
+        self.present_objects = [o for o in order + distractors + prefilled if o not in failed]
         for k, oid in enumerate(self.object_ids):
             if oid not in self.present_objects:
                 er.objects[oid]["position"] = self.parking + np.array([0.0, 0.05 * k - 0.3, 0.0])
@@ -448,14 +489,17 @@ class PickPlaceEnv:
                 out.append(o)
         return out
 
-    def free_slot(self, bid: str, grid: int = 2) -> np.ndarray:
-        """Place position inside `bid`: the grid cell farthest from the objects already inside."""
+    def free_slot(self, bid: str, grid: int = 2, inset: tuple[float, float] = (0.037, 0.016)) -> np.ndarray:
+        """Place position inside `bid`: the grid cell farthest from the objects already inside. `inset` keeps the
+        cells away from the walls so the OPEN gripper fits at release (pads along x: half opening + pad; along y:
+        half pad width), both plus a few mm of margin."""
         c, hs = self.bin_center(bid), self.bin_inner_halfsize(bid)
         occupied = [self.object_pose(o)[:3, 3][:2] for o in self.objects_in_bin(bid) if o != self.current_target]
         best, best_d = c[:2].copy(), -1.0
+        ex, ey = max(hs[0] - inset[0], 0.0), max(hs[1] - inset[1], 0.0)
         for i in range(grid):
             for j in range(grid):
-                cell = c[:2] + np.array([-hs[0] + hs[0] * (2 * i + 1) / grid, -hs[1] + hs[1] * (2 * j + 1) / grid])
+                cell = c[:2] + np.array([-ex + ex * (2 * i + 1) / grid, -ey + ey * (2 * j + 1) / grid])
                 d = min([np.linalg.norm(cell - q) for q in occupied], default=1.0)
                 if d > best_d:
                     best, best_d = cell, d

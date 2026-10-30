@@ -94,6 +94,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
             "object_yaw_period": self.detection.yaw_period if self.detection is not None else np.pi / 2,
             "object_width": self.detection.width_m if self.detection is not None else None,
             "object_height": self.detection.height_m if self.detection is not None else None,
+            "object_grasp_depth": self.detection.grasp_depth_frac if self.detection is not None else None,
             "tray_pos": np.asarray(obs.extra["tray_pos"], float),
         }
         if self.phase == "verify":
@@ -135,14 +136,14 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         def feasible(obj, yaw, opening):
             for sgn in (-1, 1):
                 for q in pad_corners(obj, yaw, opening, sgn):
-                    if abs(q[0] - c[0]) > hs[0] - 0.002 or abs(q[1] - c[1]) > hs[1] - 0.002:
+                    if abs(q[0] - c[0]) > hs[0] - 0.005 or abs(q[1] - c[1]) > hs[1] - 0.005:  # 5 mm: xy drift of the descent
                         return False
-                    if any(np.linalg.norm(q - o) < 0.015 for o in others if np.linalg.norm(o - obj[:2]) > 0.005):
+                    if any(np.linalg.norm(q - o) < 0.018 for o in others if np.linalg.norm(o - obj[:2]) > 0.005):
                         return False
             return True
 
         def limiter(obj, yaw, width):
-            # largest opening (1 mm steps) whose pads stay 2 mm clear of the walls and 15 mm from neighbour centres
+            # largest opening (1 mm steps) whose pads stay 5 mm clear of the walls and 18 mm from neighbour centres
             best = width + 0.002
             for opening in np.arange(width + 0.002, min(self.gripper_max_opening, width + margin) + 1e-9, 0.001):
                 if feasible(obj, yaw, opening):

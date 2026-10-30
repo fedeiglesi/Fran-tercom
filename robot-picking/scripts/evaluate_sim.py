@@ -31,13 +31,13 @@ def make_policy(args, cfg, safety: SafetyFilter):
     if args.policy == "heuristic":
         from picking.policies.heuristic import ScriptedPickPlace
 
-        return ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 7), preshape_margin=args.preshape, gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, grasp_depth_frac=args.grasp_depth, descend_tol_frac=args.tol_frac)
+        return ScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, lift_height=float(cfg["task"]["lift_height"]) + 0.03, noise_std=args.action_noise, rng=np.random.default_rng(args.seed_start + 7), preshape_margin=args.preshape, gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, grasp_depth_frac=args.grasp_depth, descend_tol_frac=args.tol_frac, descend_max_speed=args.descend_speed)
     if args.policy == "perception":
         from picking.calibration.extrinsics import load_calibration
         from picking.policies.perception_scripted import PerceptionScriptedPickPlace
 
         T = load_calibration(args.calibration) if args.calibration else None
-        pol = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=cfg["camera"]["name"], color=args.color, object_id=cfg["task"]["target_object"], lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None, detector=args.detector, preshape_margin=args.preshape, gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, grasp_depth_frac=args.grasp_depth, descend_tol_frac=args.tol_frac)
+        pol = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=cfg["camera"]["name"], color=args.color, object_id=cfg["task"]["target_object"], lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"].get("policy_crop")) if cfg["camera"].get("policy_crop") else None, detector=args.detector, preshape_margin=args.preshape, gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, grasp_depth_frac=args.grasp_depth, descend_tol_frac=args.tol_frac, descend_max_speed=args.descend_speed)
         pol.T_override = T
         return pol
     if args.policy == "act":
@@ -77,7 +77,8 @@ def main() -> int:
     ap.add_argument("--orden", default=None, help="orden en español argentino; se traduce a la instrucción canónica en inglés y fija el objeto objetivo")
     ap.add_argument("--grasp-offset", type=float, default=0.0, help="scripted policies: grasp height above the object centre [m]; 0 keeps flat objects graspable (level 2: +2 mm cost 5 %%), use 0.002 only with servo lag")
     ap.add_argument("--grasp-depth", type=float, default=0.0, help="scripted policies: close this fraction of the object height below its centre")
-    ap.add_argument("--xy-gate", type=float, default=0.0025, help="scripted policies: descend holds the height until the lateral error is below this [m] (0 disables)")
+    ap.add_argument("--descend-speed", type=float, default=1.0, help="scripted policies: cap on the vertical descend speed")
+    ap.add_argument("--xy-gate", type=float, default=0.0, help="scripted policies: descend holds the height until the lateral error is below this [m] (0 disables)")
     ap.add_argument("--tol-frac", type=float, default=0.3, help="scripted policies: vertical tolerance to start closing, fraction of the object height")
     ap.add_argument("--preshape", type=float, default=None, help="scripted policies: pre-shape gripper opening = object width + this margin [m] (clutter)")
     ap.add_argument("--checkpoint", default=None)

@@ -25,6 +25,7 @@ class ObjectDetection:
     confidence: float
     yaw_period: float = np.pi / 2  # symmetry of valid grasp yaws: pi/2 square/round, pi elongated
     width_m: float | None = None  # top-face short side (grasp width) when known
+    grasp_depth_frac: float | None = None  # SKU database: pinch this fraction of the height below the centre (rounded parts)
 
 
 # HSV ranges (OpenCV H in [0,180]) for the simple coloured objects

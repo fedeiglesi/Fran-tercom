@@ -39,7 +39,11 @@ class ScriptedPickPlace(Policy):
         descend_min_speed: float = 0.1,
         grasp_depth_frac: float = 0.0,
         descend_tol_frac: float = 0.3,
+        descend_max_speed: float = 1.0,
+        release_margin: float = 0.004,
     ):
+        self.release_margin = release_margin  # opening at release = width + 2 * this (just enough to let go: bins are tight)
+        self.descend_max_speed = descend_max_speed  # cap on the vertical descend speed (a fast descent drifts in xy)
         # grasp height = object centre + grasp_height_offset - grasp_depth_frac * object height: closing BELOW the
         # centre (equator) of rounded parts (rings, plugs) keeps them from being squeezed out from under the pads
         self.grasp_depth_frac = grasp_depth_frac
@@ -48,7 +52,7 @@ class ScriptedPickPlace(Policy):
         self.descend_min_speed = descend_min_speed
         self.yaw_scorer = None  # optional callable(obj_pos, yaw) -> clearance score (higher is better)
         self.opening_limiter = None  # optional callable(obj_pos, yaw, width) -> max pre-shaped opening clear of walls/neighbours
-        self.descend_xy_gate = 0.0025  # hold the height and re-centre when the lateral error exceeds this near the object
+        self.descend_xy_gate = 0.0  # optional: hold the height and re-centre when the lateral error exceeds this (off: hurts with servo lag)
         self.transport_gain = transport_gain
         self.min_speed = min_speed
         self.preshape_margin = preshape_margin  # None = approach fully open; else opening = object width + margin
@@ -116,7 +120,9 @@ class ScriptedPickPlace(Policy):
         tray = np.asarray(priv["tray_pos"], float)
         g_state = obs.gripper
         obj_h = float(priv.get("object_height", 0.025) or 0.025)
-        grasp_z = obj[2] + self.grasp_offset - self.grasp_depth_frac * obj_h
+        depth_frac = priv.get("object_grasp_depth")  # per-SKU override (rounded parts are pinched below their equator)
+        depth_frac = self.grasp_depth_frac if depth_frac is None else float(depth_frac)
+        grasp_z = obj[2] + self.grasp_offset - depth_frac * obj_h
         # choose grasp yaw closest to current gripper yaw (cube symmetric every 90 deg)
         if self.grasp_target is None:
             cur_yaw = np.arctan2(R_cur[1, 0], R_cur[0, 0])
@@ -163,11 +169,12 @@ class ScriptedPickPlace(Policy):
             dz = tgt[2] - tcp[2]
             if 1e-4 < abs(dz) < self.descend_slow_zone:
                 a.dpos[2] = float(np.sign(dz) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed))
+            a.dpos[2] = float(np.clip(a.dpos[2], -self.descend_max_speed, self.descend_max_speed))
             # lateral gate: the IK/servo lag of a fast descent leaves a few mm of xy error; with a pre-shaped
             # opening (4 mm clearance per side) that lands a pad ON the object. Above the object's top, hold the
             # height until re-centred (bounded by the step budget below, so a lagging servo cannot stall it).
             top_z = tgt[2] + 0.5 * h_obj
-            if self.descend_xy_gate > 0 and np.linalg.norm(tgt[:2] - tcp[:2]) > self.descend_xy_gate and tcp[2] < top_z + 0.02 and self.phase_steps < 40:
+            if self.descend_xy_gate > 0 and np.linalg.norm(tgt[:2] - tcp[:2]) > self.descend_xy_gate and self.phase_steps < 40:
                 a.dpos[2] = 0.0
             # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
             # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
@@ -256,7 +263,7 @@ class ScriptedPickPlace(Policy):
             self.wait += 1
             g_rel = 0.0
             if self.preshape_margin is not None and priv.get("object_width") is not None:
-                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.preshape_margin)
+                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.release_margin)
                 g_rel = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
             a = self._move(tcp, tcp, g_rel, None, R_cur)
             if self.wait >= 3:
@@ -267,7 +274,7 @@ class ScriptedPickPlace(Policy):
             tgt = np.array([tray[0], tray[1], tray[2] + self.place_height + 0.06])
             g_rel = 0.0
             if self.preshape_margin is not None and priv.get("object_width") is not None:
-                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.preshape_margin)
+                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.release_margin)
                 g_rel = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
             a = self._move(tcp, tgt, g_rel, None, R_cur)
             if abs(tgt[2] - tcp[2]) < 0.006:
