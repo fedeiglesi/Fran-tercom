@@ -42,6 +42,11 @@ uv run python -m pytest -q tests
   (regla compartida entre grabación y despliegue, `perception/env_state.py`).
 - Experto scripted para demos de policies: ganancia 0.3 + velocidad mínima 0.25 (acciones no saturadas);
   DART empeoró dos veces; replanificar cada paso impide que ACT cierre el gripper; nas > 5 suelta en el aire.
+- Robustez a servos (`configs/sim/*_servo.yaml`, benchmark de regresión obligatorio): los deltas se aplican al
+  setpoint comandado, con adelanto acotado por PROYECCIÓN (1.5 cm) y nunca re-anclando a la medición (re-anclar
+  hace oscilar/flotar); descenso con desaceleración (zona 2.5 cm, piso 0.1), tolerancia 6 mm y cierre por
+  presupuesto de pasos; bajada a bandeja con tolerancia 8 mm y presupuesto; agarre 2 mm sobre el centro.
+  Resultado: nivel 1 92.5 % con servos imperfectos, 100 % nominal. Órdenes en español: `picking/language`.
 - Seeds < 100000 entrenamiento; ≥ 100000 evaluación. Datasets y calibraciones nunca se sobrescriben.
 
 ## Próximos pasos sugeridos

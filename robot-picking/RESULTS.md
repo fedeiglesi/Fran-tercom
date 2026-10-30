@@ -37,6 +37,24 @@ Notas:
   (3) la policy aprendida es frágil: otro entrenamiento con 400 demos del mismo experto dio 17 % (E032), así que
   hace falta selección de checkpoint por evaluación y una acción de gripper discreta antes de confiar en ella.
 
+## 1b. Robustez a servos imperfectos (predicción de Beto real)
+
+Configs `level1_cube_servo.yaml` / `level2_objects_servo.yaml`: juego de servos hasta 0.8°, latencia de comando
+hasta 0.2 s, ruido de lectura 0.2°, rigidez ×0.8–1.2 (inspirado en el sim2real del Open Duck). Baseline por percepción,
+200 episodios holdout cada uno:
+
+| Iteración (EXPERIMENTS E044–E055) | Nivel 1 | Nivel 2 | Nominal nivel 1 |
+|---|---|---|---|
+| Inicial | 18 % | 18 % | 100 % |
+| Deltas sobre el setpoint comandado (no sobre la medición retrasada) | 37 % | — | 100 % |
+| + desaceleración del descenso, presupuesto por fase, proyección del setpoint | 55–86 % | 54–73 % | 100 % |
+| + tolerancia de descenso 6 mm, cierre por presupuesto, piso de velocidad 0.1 | 91.5 % | 86 % | 100 % |
+| + agarre 2 mm sobre el centro | **92.5 %** (col 4.5 %, timeout 3 %) | **83 %** | **100 %** |
+
+Reglas que salieron de aquí y aplican al robot real: aplicar los deltas al último setpoint comandado y acotar su
+adelanto por proyección (1.5 cm) sin re-anclar; desacelerar en los últimos 2.5 cm; tolerancias y presupuestos de
+pasos por fase; el ACT de baja dimensión (87 % nominal) cae a 0 % con servos imperfectos.
+
 ## 2. Robot real (myCobot 280 + OAK-D)
 
 **No ejecutado**: este repositorio se construyó en un contenedor sin acceso al hardware. Todo lo necesario está
