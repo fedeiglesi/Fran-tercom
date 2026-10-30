@@ -514,6 +514,19 @@ class PickPlaceEnv:
             return np.array([self.place_slot[0], self.place_slot[1], self.bin_center(self.dest_bin_id)[2]])
         return self.bin_center(self.dest_bin_id)
 
+    def place_support_z(self, radius: float = 0.03) -> float:
+        """Height of the surface under the place slot: the container floor or the top of products already there
+        whose footprint overlaps the slot (order bins stack items). The policy lowers to this + half the part."""
+        c = self.tray_center()
+        top = float(self.bin_center(self.dest_bin_id)[2])
+        for o in self.objects_in_bin(self.dest_bin_id):
+            if o == self.current_target:
+                continue
+            p = self.object_pose(o)[:3, 3]
+            if np.linalg.norm(p[:2] - c[:2]) < radius:
+                top = max(top, float(p[2] + self.object_half_extent_z(o)))
+        return top
+
     def tray_footprint(self) -> tuple[np.ndarray, np.ndarray]:
         """(centre xy, half-size xy incl. walls) of the current destination, for perception masking."""
         return self.bin_footprint(self.dest_bin_id)

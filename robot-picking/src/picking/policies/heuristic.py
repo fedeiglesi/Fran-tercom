@@ -233,6 +233,7 @@ class ScriptedPickPlace(Policy):
             tgt = np.array([tray[0], tray[1], base_z + self.lift_height])
             a = self._move(tcp, tgt, 1.0, 0.0, R_cur)  # yaw back to neutral: keeps IK well-conditioned near the tray
             a.dpos *= self.transport_gain  # move slower while holding (less inertial load on the grasp)
+            a.drot *= 0.35  # and rotate the wrist slowly: a fast yaw flicks small parts out of the pads (E070 traces)
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
             self.stall = 0 if progress else self.stall + 1
             self._last_tcp = tcp.copy()
@@ -269,7 +270,9 @@ class ScriptedPickPlace(Policy):
             err = np.linalg.norm(tgt - tcp)
             # 8 mm is enough to release over the tray; with lag/oscillation also give up after a step budget; when
             # the part comes to rest on top of other products (stacking) the target is never reached: release on stall
-            if err < 0.008 or (err < 0.015 and (self.stall >= 4 or self.phase_steps > 25)) or self.stall >= 8 or self.phase_steps > 60:
+            if self.stall >= 3:
+                a.dpos[2] = 0.0  # resting on something: stop pressing (the setpoint would keep integrating downward)
+            if err < 0.008 or (err < 0.015 and (self.stall >= 4 or self.phase_steps > 25)) or self.stall >= 6 or self.phase_steps > 60:
                 self.stall = 0
                 self._next("release")
             return a

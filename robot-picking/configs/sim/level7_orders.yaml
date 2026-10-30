@@ -352,6 +352,7 @@ scene:
       - 0
     packaging: loose
     sku: GEAR
+    grasp_depth_frac: 0.4  # pinch the 36 mm disc (the 16 mm hub on top offers 3 mm of pad overlap and slips)
     footprint_radius: 0.018  # circumscribed footprint for placement
     grasp_width: 0.036
   - id: grommet

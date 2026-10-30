@@ -51,7 +51,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         from picking.cameras.sim_camera import SimCamera
 
         i = env.camera_intrinsics()
-        extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": env.tray_center(), "tray_footprint": env.tray_footprint()}
+        extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": _place_target(env), "tray_footprint": env.tray_footprint()}
         if getattr(env, "order_task", None):
             src = env.order_task["source_bin"]
             extra_cam["source_bin_footprint"] = (env.bin_center(src)[:2].copy(), env.bin_inner_halfsize(src))
@@ -102,7 +102,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         "object_grasp_depth": spec.get("grasp_depth_frac"),
         "object_yaw": yaw,
         "object_yaw_period": period,
-        "tray_pos": env.tray_center(),
+        "tray_pos": _place_target(env),
         "object_id": target,
     }
     obs = Observation(
@@ -116,6 +116,14 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         extra={"privileged": priv, "sim_time": env.sim_time(), **extra_cam},
     )
     return obs, priv
+
+
+def _place_target(env) -> np.ndarray:
+    """Place position: slot xy, z = top of whatever is under the slot (floor or stacked products)."""
+    t = env.tray_center().copy()
+    if hasattr(env, "place_support_z"):
+        t[2] = env.place_support_z()
+    return t
 
 
 def _object_truth(env, oid: str) -> dict:
