@@ -109,6 +109,7 @@ scene:
       - 0
       - 0
       - 0.003
+    grasp_width: 0.032
   - id: bearing
     name: bearing
     color_name: metal
@@ -222,6 +223,7 @@ scene:
       - 0
       - 1.5708
       - 7.0686
+    grasp_width: 0.032
   - id: spark_plug
     name: spark plug
     color_name: metal
@@ -270,6 +272,7 @@ scene:
       - 0
     grasp_yaw_offset: 1.5708
     yaw_period: 3.14159
+    grasp_width: 0.016
   - id: relay
     name: relay
     color_name: dark
@@ -301,6 +304,7 @@ scene:
       - 0
       - 0
       - -0.01
+    grasp_width: 0.026
   - id: brake_lever
     name: brake lever
     color_name: metal
@@ -344,6 +348,7 @@ scene:
       - 0
     grasp_yaw_offset: 1.5708
     yaw_period: 3.14159
+    grasp_width: 0.012
   - id: gear
     name: gear
     color_name: metal
@@ -373,6 +378,7 @@ scene:
       - 0
       - 0
       - 0
+    grasp_width: 0.036
   - id: grommet
     name: rubber grommet
     color_name: dark
@@ -446,6 +452,7 @@ scene:
       - 0
     grasp_yaw_offset: 1.5708
     yaw_period: 3.14159
+    grasp_width: 0.028
   - id: red_cap
     name: red plastic cap
     color_name: red

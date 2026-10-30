@@ -57,6 +57,24 @@ Reglas que salieron de aquí y aplican al robot real: aplicar los deltas al últ
 adelanto por proyección (1.5 cm) sin re-anclar; desacelerar en los últimos 2.5 cm; tolerancias y presupuestos de
 pasos por fase; el ACT de baja dimensión (87 % nominal) cae a 0 % con servos imperfectos.
 
+## 1c. Nivel 7 — preparación de pedidos (objetivo final, en construcción)
+
+Escenario (`configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): caja origen con 3 ítems de
+SKUs mezclados (en caja, en bolsa, sueltos), caja de pedido con 1 producto previo, pedido de 2 SKUs; identificador
+de SKU = oráculo con ruido de 2 mm (placeholder del detector aprendido). 50 pedidos holdout (E059):
+
+| Métrica | Valor |
+|---|---|
+| Pedidos completos (todos los ítems, previos intactos, sin colisión) | 26 % |
+| Ítems colocados | 44.6 % (cajas 61 %, sueltos 42 %, bolsas 38 %) |
+| SKU equivocado | 2 % de los pedidos |
+| Productos previos perturbados | 0 % |
+| Colisiones (pad-pared/piso > 5 N) | 22 % |
+
+Limitaciones del modelado que condicionan estas cifras: bolsas rígidas (no deformables), rulemán aproximado por
+cápsulas, caja origen pequeña por el alcance de Beto (28 cm), ausencia de estrategia de re-agarre o empuje de
+vecinos. Es el escenario donde se concentra el trabajo siguiente.
+
 ## 2. Robot real (myCobot 280 + OAK-D)
 
 **No ejecutado**: este repositorio se construyó en un contenedor sin acceso al hardware. Todo lo necesario está

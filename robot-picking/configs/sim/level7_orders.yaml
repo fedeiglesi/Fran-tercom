@@ -111,6 +111,7 @@ scene:
       - 0.003
     packaging: loose
     sku: BRAKE_PAD
+    grasp_width: 0.032
   - id: bearing
     name: bearing
     color_name: metal
@@ -226,6 +227,7 @@ scene:
       - 7.0686
     packaging: loose
     sku: BEARING
+    grasp_width: 0.032
   - id: spark_plug
     name: spark plug
     color_name: metal
@@ -276,6 +278,7 @@ scene:
     yaw_period: 3.14159
     packaging: loose
     sku: SPARK_PLUG
+    grasp_width: 0.016
   - id: relay
     name: relay
     color_name: dark
@@ -309,6 +312,7 @@ scene:
       - -0.01
     packaging: loose
     sku: RELAY
+    grasp_width: 0.026
   - id: gear
     name: gear
     color_name: metal
@@ -340,6 +344,7 @@ scene:
       - 0
     packaging: loose
     sku: GEAR
+    grasp_width: 0.036
   - id: grommet
     name: rubber grommet
     color_name: dark
@@ -465,11 +470,11 @@ scene:
     sku: BG-2001
     packaging: bag
     color_name: bag
-    type: ellipsoid
+    type: box
     size:
     - 0.022
     - 0.016
-    - 0.006
+    - 0.007
     mass: 0.02
     color: &id004
     - 0.9
@@ -479,14 +484,14 @@ scene:
     position:
     - 0.2
     - 0.1
-    - 0.006
-    friction: 0.5
+    - 0.007
+    friction: 0.7
   - id: bag_screws
     name: screw bag
     sku: BG-2002
     packaging: bag
     color_name: bag
-    type: ellipsoid
+    type: box
     size:
     - 0.016
     - 0.013
@@ -501,24 +506,24 @@ scene:
     - 0.2
     - 0.1
     - 0.008
-    friction: 0.5
+    friction: 0.7
   - id: bag_oring
     name: o-ring bag
     sku: BG-2003
     packaging: bag
     color_name: bag
-    type: ellipsoid
+    type: box
     size:
     - 0.014
     - 0.014
-    - 0.005
+    - 0.007
     mass: 0.015
     color: *id004
     position:
     - 0.2
     - 0.1
-    - 0.005
-    friction: 0.5
+    - 0.007
+    friction: 0.7
   bins:
   - id: source_bin
     position:

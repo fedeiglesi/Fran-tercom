@@ -26,7 +26,8 @@ Control a 10 Hz, física a 500 Hz, timeout 150 pasos (15 s).
 | 3 | `level3_geometries.yaml` | 24 geometrías (cajas, cilindros, esferas, cápsulas, elipsoides) + ruido de cámara 3 mm/0.5°, luz ±30 %, color ±0.06, color de mesa |
 | 4 | `level4_motoparts.yaml` | 10 motopartes aproximadas por primitivas compuestas (pastilla de freno, rulemán, bujía, relé, palanca, piñón, grommet, tuerca, espejo, tapa), colores oscuros/metálicos; percepción por altura (`--detector height`) |
 | 5 | `level5_multi_object.yaml` | 4 objetos simultáneos de colores distintos, objetivo por instrucción, fallo WRONG_OBJECT si un distractor se mueve > 2 cm |
-| 6–7 | pendientes | clutter (objetos en contacto/apilados), bin |
+| 6 | `level6_clutter.yaml` | 4 objetos casi en contacto |
+| 7 | `level7_orders.yaml`, `level7a_orders_sparse.yaml` | **Objetivo final**: caja origen con SKUs mezclados (caja/bolsa/suelto) → caja de pedido con productos previos; identificador de SKU (oráculo con ruido, placeholder); `scripts/evaluate_orders.py` para miles de pedidos |
 
 Resultados por nivel en RESULTS.md. Con `one_object_per_episode: true` el objetivo se elige por seed y los demás
 objetos se aparcan fuera de la vista; la instrucción se genera con `instruction_template`.

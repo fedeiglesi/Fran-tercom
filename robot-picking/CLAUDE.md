@@ -30,7 +30,9 @@ uv run python -m pytest -q tests
   servos imperfectos en 1000 episodios: pasa el gate**. Entrenado con demos nominales: 87 % y frágil. Regla:
   grabar las demos con `*_servo.yaml`.
 - Nivel 7 (pedidos: caja origen con SKUs mezclados en caja/bolsa/suelto → caja de pedido con productos previos,
-  `configs/sim/level7_orders.yaml`, `scripts/evaluate_orders.py`): objetivo final; en construcción.
+  `configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): objetivo final; 26 % de pedidos
+  completos / 44.6 % de ítems en 50 pedidos (E059). Herramienta de traza por ítem: ver EXPERIMENTS E058–E059.
+  Siguiente: rulemán (5 %), SLIP de sueltos dentro de la caja, colisiones pad-pared, bolsas deformables.
 - Nivel 4 (motopartes aproximadas): 93 % privilegiado, 82 % con detector por altura sin color (`detect_by_height`).
   Nivel 5 (4 objetos simultáneos): 98 %. Nivel 6 (clutter): 70 % (vecinos desplazados por el gripper al bajar;
   próximo paso: elegir el yaw de agarre con más holgura respecto a los vecinos). Nivel 7 (bin) pendiente.
