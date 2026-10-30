@@ -127,6 +127,30 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
 
         self.yaw_scorer = scorer
 
+        def pad_corners(obj, yaw, opening, sgn):
+            ax = np.array([np.cos(yaw), np.sin(yaw)]); perp = np.array([-ax[1], ax[0]])
+            r_in, r_out = opening / 2, opening / 2 + 0.008  # pad thickness 8 mm, half width 8 mm
+            return [np.asarray(obj[:2]) + sgn * r * ax + e * 0.008 * perp for r in (r_in, r_out) for e in (-1, 1)]
+
+        def feasible(obj, yaw, opening):
+            for sgn in (-1, 1):
+                for q in pad_corners(obj, yaw, opening, sgn):
+                    if abs(q[0] - c[0]) > hs[0] - 0.002 or abs(q[1] - c[1]) > hs[1] - 0.002:
+                        return False
+                    if any(np.linalg.norm(q - o) < 0.015 for o in others if np.linalg.norm(o - obj[:2]) > 0.005):
+                        return False
+            return True
+
+        def limiter(obj, yaw, width):
+            # largest opening (1 mm steps) whose pads stay 2 mm clear of the walls and 15 mm from neighbour centres
+            best = width + 0.002
+            for opening in np.arange(width + 0.002, min(self.gripper_max_opening, width + margin) + 1e-9, 0.001):
+                if feasible(obj, yaw, opening):
+                    best = opening
+            return float(best)
+
+        self.opening_limiter = limiter if getattr(self, "use_opening_limiter", True) else None
+
     def _still_holding(self, obs: Observation) -> bool:
         opening = obs.extra.get("gripper_opening_m")
         return bool(opening is None or opening > 0.015 * 0.5)

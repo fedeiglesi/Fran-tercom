@@ -227,7 +227,7 @@ scene:
       - 7.0686
     packaging: loose
     sku: BEARING
-    grasp_width: 0.032
+    grasp_width: 0.037  # outer diameter of the capsule ring (2*(0.013+0.005)); 0.032 made the pads land on the ring
   - id: spark_plug
     name: spark plug
     color_name: metal
@@ -312,7 +312,7 @@ scene:
       - -0.01
     packaging: loose
     sku: RELAY
-    grasp_width: 0.026
+    grasp_width: 0.030  # true footprint 30x30 mm
   - id: gear
     name: gear
     color_name: metal

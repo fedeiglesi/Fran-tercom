@@ -37,10 +37,18 @@ class ScriptedPickPlace(Policy):
         gripper_max_opening: float = 0.045,
         descend_slow_zone: float = 0.025,
         descend_min_speed: float = 0.1,
+        grasp_depth_frac: float = 0.0,
+        descend_tol_frac: float = 0.3,
     ):
+        # grasp height = object centre + grasp_height_offset - grasp_depth_frac * object height: closing BELOW the
+        # centre (equator) of rounded parts (rings, plugs) keeps them from being squeezed out from under the pads
+        self.grasp_depth_frac = grasp_depth_frac
+        self.descend_tol_frac = descend_tol_frac  # vertical tolerance to start closing, as a fraction of the object height
         self.descend_slow_zone = descend_slow_zone
         self.descend_min_speed = descend_min_speed
         self.yaw_scorer = None  # optional callable(obj_pos, yaw) -> clearance score (higher is better)
+        self.opening_limiter = None  # optional callable(obj_pos, yaw, width) -> max pre-shaped opening clear of walls/neighbours
+        self.descend_xy_gate = 0.0025  # hold the height and re-centre when the lateral error exceeds this near the object
         self.transport_gain = transport_gain
         self.min_speed = min_speed
         self.preshape_margin = preshape_margin  # None = approach fully open; else opening = object width + margin
@@ -107,7 +115,8 @@ class ScriptedPickPlace(Policy):
         obj_yaw = float(priv.get("object_yaw", 0.0))
         tray = np.asarray(priv["tray_pos"], float)
         g_state = obs.gripper
-        grasp_z = obj[2] + self.grasp_offset
+        obj_h = float(priv.get("object_height", 0.025) or 0.025)
+        grasp_z = obj[2] + self.grasp_offset - self.grasp_depth_frac * obj_h
         # choose grasp yaw closest to current gripper yaw (cube symmetric every 90 deg)
         if self.grasp_target is None:
             cur_yaw = np.arctan2(R_cur[1, 0], R_cur[0, 0])
@@ -124,7 +133,11 @@ class ScriptedPickPlace(Policy):
         g_open = 0.0
         if self.preshape_margin is not None and priv.get("object_width") is not None:
             # pre-shape the gripper to the object width + margin so the pads do not sweep neighbours (clutter)
-            opening = min(self.gripper_max_opening, float(priv["object_width"]) + self.preshape_margin)
+            width = float(priv["object_width"])
+            opening = min(self.gripper_max_opening, width + self.preshape_margin)
+            if self.opening_limiter is not None and self.grasp_yaw is not None:
+                # bins: near a wall or a neighbour open only as much as the clearance allows (never below width + 2 mm)
+                opening = min(opening, max(width + 0.002, float(self.opening_limiter(obj, self.grasp_yaw, width))))
             g_open = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
         self.phase_steps = getattr(self, "phase_steps", 0) + 1
         if ph == "approach":
@@ -143,12 +156,19 @@ class ScriptedPickPlace(Policy):
             return a
         if ph == "descend":
             tgt = np.array([obj[0], obj[1], grasp_z])
+            h_obj = float(priv.get("object_height", 0.025) or 0.025)
             a = self._move(tcp, tgt, g_open, self.grasp_yaw, R_cur)
             # decelerate in the last centimetres: with servo lag / latency a full-speed descent overshoots into
             # the table (the setpoint runs ahead of the measured pose). Proportional within `descend_slow_zone`.
             dz = tgt[2] - tcp[2]
             if 1e-4 < abs(dz) < self.descend_slow_zone:
                 a.dpos[2] = float(np.sign(dz) * max(abs(dz) / self.descend_slow_zone, self.descend_min_speed))
+            # lateral gate: the IK/servo lag of a fast descent leaves a few mm of xy error; with a pre-shaped
+            # opening (4 mm clearance per side) that lands a pad ON the object. Above the object's top, hold the
+            # height until re-centred (bounded by the step budget below, so a lagging servo cannot stall it).
+            top_z = tgt[2] + 0.5 * h_obj
+            if self.descend_xy_gate > 0 and np.linalg.norm(tgt[:2] - tcp[:2]) > self.descend_xy_gate and tcp[2] < top_z + 0.02 and self.phase_steps < 40:
+                a.dpos[2] = 0.0
             # stall detection: if the gripper is blocked (e.g. resting on the object edge) attempt the grasp
             # anyway; VERIFY will catch a bad grasp and trigger re-observation + retry
             progress = self._last_tcp is None or np.linalg.norm(tcp - self._last_tcp) > 0.001
@@ -158,7 +178,7 @@ class ScriptedPickPlace(Policy):
             # vertical tolerance scales with the object height: closing 3 mm too high on a 10 mm part means the
             # pads slide over it. With lag the TCP oscillates, so also close after hovering within 1 cm for a while.
             h = float(priv.get("object_height", 0.025) or 0.025)
-            tol_z = float(np.clip(0.3 * h, 0.002, 0.006))
+            tol_z = float(np.clip(self.descend_tol_frac * h, 0.0015, 0.006))
             if (err_xy < 0.006 and abs(dz) < tol_z) or self.stall >= 6 or (abs(dz) < 0.010 and self.phase_steps > 30):
                 self.stall = 0
                 self._next("close")

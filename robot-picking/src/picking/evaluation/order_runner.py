@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from picking.core.types import Action
 from picking.evaluation.runner import run_episode
 
 
@@ -28,9 +29,28 @@ class OrderResult:
         return self.__dict__
 
 
-def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_frame: bool = True, max_retries_per_item: int = 1) -> OrderResult:
+def _recover_up(env, adapter, safety, z_safe: float = 0.10, max_steps: int = 40) -> None:
+    """RECOVER after a collision: raise the TCP (through the safety filter) until it is clear of the bin walls,
+    so the next item does not start in contact. Pure vertical retreat = the safest motion from any contact."""
+    dt = 1.0 / env.control_hz
+    for _ in range(max_steps):
+        st = adapter.get_state()
+        if st.tcp.position[2] >= z_safe:
+            break
+        a = Action(dpos=np.array([0.0, 0.0, 0.5]), drot=np.zeros(3), gripper=0.0)
+        safe = safety.filter(a, st, dt)
+        if safe is None:
+            adapter.stop()
+        else:
+            adapter.apply_action(safe, safety.scale)
+
+
+def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_frame: bool = True, max_retries_per_item: int = 1, step_callback=None, recover_after_collision: bool = True) -> OrderResult:
     env.reset(seed=seed)
     adapter.reset_targets()
+    ident = getattr(policy, "sku_identifier", None)
+    if ident is not None and hasattr(ident, "rng"):
+        ident.rng = np.random.default_rng(seed)  # per-order seeding: any order is reproducible on its own
     src, dst = env.order_task["source_bin"], env.order_task["order_bin"]
     prefilled = list(env.objects_in_bin(dst))
     pre_pos = {o: env.object_pose(o)[:3, 3].copy() for o in prefilled}
@@ -51,13 +71,16 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
         spec = env.object_specs[oid]
         attempt = 0
         while True:
-            r = run_episode(env, adapter, policy, safety, seed=seed * 100 + k, image_size=image_size, full_frame=full_frame, env_reset=False, target_override=oid, episode_id=f"order{seed}_item{k}_{oid}")
+            cb = (lambda d, _k=k, _a=attempt: step_callback(_k, _a, d)) if step_callback is not None else None
+            r = run_episode(env, adapter, policy, safety, seed=seed * 100 + k, image_size=image_size, full_frame=full_frame, env_reset=False, target_override=oid, episode_id=f"order{seed}_item{k}_{oid}", step_callback=cb)
             labels = r.metadata.get("policy_info", {}).get("sku_labels", [])
             moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
             wrong_pick = (not r.success) and r.failure_type == "WRONG_OBJECT"
             items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "collision_detail": r.metadata.get("collision_detail", ""), "sku_labels": labels[:6]})
             collision |= r.collision
             wrong += int(wrong_pick)
+            if r.collision and recover_after_collision:
+                _recover_up(env, adapter, safety)
             if r.success or r.collision or attempt >= max_retries_per_item:
                 break
             attempt += 1

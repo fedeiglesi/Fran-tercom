@@ -34,6 +34,10 @@ def main() -> int:
     ap.add_argument("--sku-error", type=float, default=0.0, help="SKU identifier error rate (placeholder for the learned detector)")
     ap.add_argument("--retries", type=int, default=1)
     ap.add_argument("--grasp-offset", type=float, default=0.0)
+    ap.add_argument("--grasp-depth", type=float, default=0.0, help="close this fraction of the object height BELOW its centre (rounded parts escape when pinched above the equator)")
+    ap.add_argument("--tol-frac", type=float, default=0.3, help="vertical tolerance to start closing, fraction of the object height")
+    ap.add_argument("--xy-gate", type=float, default=0.0025, help="descend: hold the height until the lateral error is below this [m] (0 disables)")
+    ap.add_argument("--no-opening-limiter", action="store_true", help="disable the wall/neighbour-aware pre-shaped opening")
     ap.add_argument("--preshape", type=float, default=0.008, help="pre-shaped opening margin [m] (8 mm: fits a 32 mm part in a bin corner)")
     ap.add_argument("--tag", default="")
     ap.add_argument("--log-every", type=int, default=25)
@@ -45,7 +49,9 @@ def main() -> int:
     adapter = SimRobotAdapter(env)
     safety = SafetyFilter(load_yaml(config_path(args.safety)))
     ident = SkuIdentifierOracle(error_rate=args.sku_error, seed=args.seed_start)
-    policy = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=env.cam_name, detector="sku", sku_identifier=ident, lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"]["policy_crop"]), gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, preshape_margin=args.preshape)
+    policy = PerceptionScriptedPickPlace(safety.scale.max_delta_pos, safety.scale.max_delta_rot, camera=env.cam_name, detector="sku", sku_identifier=ident, lift_height=float(cfg["task"]["lift_height"]) + 0.03, roi=tuple(cfg["camera"]["policy_crop"]), gripper_max_opening=float(cfg["robot"]["gripper_max_opening"]), grasp_height_offset=args.grasp_offset, preshape_margin=args.preshape, grasp_depth_frac=args.grasp_depth, descend_tol_frac=args.tol_frac)
+    policy.descend_xy_gate = args.xy_gate
+    policy.use_opening_limiter = not args.no_opening_limiter
     out = project_root() / "reports" / "orders" / f"{time.strftime('%Y%m%d_%H%M%S')}_{args.tag or 'orders'}"
     out.mkdir(parents=True, exist_ok=True)
     results = []
