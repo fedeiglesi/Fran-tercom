@@ -257,17 +257,27 @@ class PickPlaceEnv:
         self.current_target = order[0]
         self.present_objects = order + distractors + prefilled
 
+        wall_margin = float(ot.get("wall_margin", 0.008))  # extra clearance between an item and the bin walls
+        separation = float(ot.get("separation", 0.012))  # extra clearance between items
+
         def place(bid, objs):
             c, hs = self.bin_center_nominal(bid), self.bin_inner_halfsize(bid)
             placed = []
             for o in objs:
                 spec = self.object_specs[o]
-                r = 0.03 if spec["type"] == "compound" else float(max(spec["size"][:2]))
+                r = float(spec.get("footprint_radius", 0.022 if spec["type"] == "compound" else max(spec["size"][:2])))
                 pos = c[:2].copy()
-                for _ in range(300):
-                    pos = np.array([self.rng.uniform(c[0] - hs[0] + r + 0.008, c[0] + hs[0] - r - 0.008), self.rng.uniform(c[1] - hs[1] + r + 0.008, c[1] + hs[1] - r - 0.008)])
-                    if all(np.linalg.norm(pos - q) >= r + rq + 0.012 for q, rq in placed):
+                ok = False
+                for attempt in range(600):
+                    relax = 1.0 if attempt < 300 else 0.6  # if the bin is too crowded, accept tighter spacing
+                    lo = np.array([c[0] - hs[0] + r + wall_margin * relax, c[1] - hs[1] + r + wall_margin * relax])
+                    hi = np.array([c[0] + hs[0] - r - wall_margin * relax, c[1] + hs[1] - r - wall_margin * relax])
+                    pos = np.array([self.rng.uniform(min(lo[0], hi[0]), max(lo[0], hi[0])), self.rng.uniform(min(lo[1], hi[1]), max(lo[1], hi[1]))])
+                    if all(np.linalg.norm(pos - q) >= r + rq + separation * relax for q, rq in placed):
+                        ok = True
                         break
+                if not ok:
+                    self.placement_failures = getattr(self, "placement_failures", 0) + 1
                 placed.append((pos, r))
                 er.objects[o]["position"][:2] = pos
                 er.objects[o]["position"][2] = float(er.objects[o]["position"][2]) + 0.004  # on the bin floor
@@ -337,7 +347,10 @@ class PickPlaceEnv:
                 else:
                     s.robot_table = True
             elif og in self.geom_tray:
-                s.robot_tray = True
+                if is_pad:
+                    s.finger_table = True  # compliant pad touching a wall/floor: collision only above the force threshold
+                else:
+                    s.robot_tray = True
             elif og in self.geom_obj_to_id:
                 oid = self.geom_obj_to_id[og]
                 if is_pad:

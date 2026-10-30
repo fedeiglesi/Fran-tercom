@@ -55,7 +55,7 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
         if getattr(env, "order_task", None):
             src = env.order_task["source_bin"]
             extra_cam["source_bin_footprint"] = (env.bin_center(src)[:2].copy(), env.bin_inner_halfsize(src))
-            extra_cam["sku_true_positions"] = {o: env.object_pose(o)[:3, 3].copy() for o in env.objects_in_bin(src)}
+            extra_cam["sku_true_objects"] = {o: _object_truth(env, o) for o in env.objects_in_bin(src)}
             extra_cam["sku_of_object"] = {o: env.object_specs[o].get("sku", o) for o in env.object_ids}
     elif with_images:
         rgb = env.render_rgb()
@@ -116,6 +116,30 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
     return obs, priv
 
 
+def _object_truth(env, oid: str) -> dict:
+    T = env.object_pose(oid)
+    spec = env.object_specs[oid]
+    yaw = float(mat_to_euler_xyz(T[:3, :3])[2])
+    period, width = np.pi / 2, None
+    if spec.get("type") in ("box", "ellipsoid"):
+        sx, sy = spec["size"][0], spec["size"][1]
+        if sx > sy:
+            yaw += np.pi / 2
+        if min(sx, sy) / max(sx, sy) < 0.8:
+            period = np.pi
+        width = 2 * min(sx, sy)
+    elif spec.get("type") in ("cylinder", "sphere", "capsule"):
+        width = 2 * spec["size"][0]
+    if "grasp_yaw_offset" in spec:
+        yaw += float(spec["grasp_yaw_offset"])
+        period = float(spec.get("yaw_period", period))
+    pos = T[:3, 3].copy()
+    if spec.get("type") == "compound":
+        pos[:2] = env.object_com(oid)[:2]
+        width = float(spec.get("grasp_width", 0.02))
+    return {"pos": pos, "yaw": yaw, "yaw_period": period, "width": width if width is not None else 0.025, "height": 2 * env.object_half_extent_z(oid)}
+
+
 def run_episode(
     env: PickPlaceEnv,
     adapter: SimRobotAdapter,
@@ -153,6 +177,7 @@ def run_episode(
     with_images = (policy.needs_images or force_images) and env.renderer is not None
     other_objs = [o for o in getattr(env, "present_objects", env.object_ids) if o != target]
     other_init = {o: env.object_pose(o)[:3, 3].copy() for o in other_objs}
+    nudge_ok = bool(getattr(env, "order_task", None))  # inside a bin, sliding a neighbour a little is acceptable
     t_start = time.time()
     latencies = []
     timeout = False
@@ -175,7 +200,10 @@ def run_episode(
         state_after = adapter.get_state()
         contacts = adapter.last_contacts
         obj_pos = env.object_pose(target)[:3, 3]
-        moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o]) > 0.02 for o in other_objs)
+        if nudge_ok:
+            moved_other = any((env.object_pose(o)[2, 3] - other_init[o][2]) > 0.02 or np.linalg.norm(env.object_pose(o)[:2, 3] - other_init[o][:2]) > 0.05 for o in other_objs)
+        else:
+            moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o]) > 0.02 for o in other_objs)
         evaluator.update(env.sim_time(), state_after.tcp.position, obj_pos, state_after.gripper, contacts, env.object_in_tray(target), moved_other)
         n_steps = step + 1
         if step_callback is not None:

@@ -1,0 +1,56 @@
+{
+  "n_orders": 50,
+  "order_success_rate": 0.16,
+  "item_success_rate": 0.36879432624113473,
+  "item_failure_types": {
+    "DROP": 7,
+    "NO_GRASP": 9,
+    "SLIP": 53,
+    "BAD_TARGET": 3,
+    "COLLISION": 13,
+    "PLACE_FAIL": 4
+  },
+  "wrong_sku_rate": 0.0,
+  "prefilled_disturbed_rate": 0.0,
+  "collision_rate": 0.24,
+  "by_packaging": {
+    "loose": {
+      "n": 92,
+      "success_rate": 0.40217391304347827
+    },
+    "box": {
+      "n": 22,
+      "success_rate": 0.6363636363636364
+    },
+    "bag": {
+      "n": 27,
+      "success_rate": 0.037037037037037035
+    }
+  },
+  "by_sku": {
+    "BEARING": 0.0,
+    "BG-2001": 0.0,
+    "BG-2002": 0.09090909090909091,
+    "BG-2003": 0.0,
+    "BRAKE_PAD": 0.3333333333333333,
+    "BRASS_NUT": 0.4444444444444444,
+    "BX-1001": 0.5454545454545454,
+    "BX-1002": 0.7142857142857143,
+    "BX-1003": 0.75,
+    "GEAR": 0.7142857142857143,
+    "GROMMET": 0.7272727272727273,
+    "RED_CAP": 0.625,
+    "RELAY": 0.75,
+    "SPARK_PLUG": 0.4
+  },
+  "median_order_time_s": 21.549999999998768,
+  "sku_identifier": {
+    "name": "sku_oracle",
+    "error_rate": 0.0,
+    "n_corrupted": 0
+  },
+  "config": "sim/level7a_orders_sparse.yaml",
+  "seed_start": 100000,
+  "git_sha": "118be7d",
+  "wall_time_s": 257.2269947528839
+}

@@ -38,7 +38,15 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
     t0 = env.sim_time()
     collision = False
     wrong = 0
-    for k, oid in enumerate(env.order):
+    def clearance(oid):
+        c, hs = env.bin_center(src), env.bin_inner_halfsize(src)
+        p = env.object_pose(oid)[:3, 3][:2]
+        wall = float(min(hs[0] - abs(p[0] - c[0]), hs[1] - abs(p[1] - c[1])))
+        neigh = min([float(np.linalg.norm(env.object_pose(o)[:3, 3][:2] - p)) for o in env.objects_in_bin(src) if o != oid], default=1.0)
+        return min(wall, neigh)
+
+    sequence = sorted(env.order, key=lambda o: -clearance(o))  # most accessible first
+    for k, oid in enumerate(sequence):
         env.place_slot = env.free_slot(dst)[:2]
         spec = env.object_specs[oid]
         attempt = 0
@@ -47,7 +55,7 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
             labels = r.metadata.get("policy_info", {}).get("sku_labels", [])
             moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
             wrong_pick = (not r.success) and r.failure_type == "WRONG_OBJECT"
-            items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "sku_labels": labels[:6]})
+            items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "collision_detail": r.metadata.get("collision_detail", ""), "sku_labels": labels[:6]})
             collision |= r.collision
             wrong += int(wrong_pick)
             if r.success or r.collision or attempt >= max_retries_per_item:
@@ -57,4 +65,4 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
     placed_ok = [it["success"] for it in items]
     n_ok = sum(1 for oid in env.order if any(it["object"] == oid and it["success"] for it in items))
     success = n_ok == len(env.order) and not disturbed and not collision
-    return OrderResult(f"order_{seed}", seed, [env.object_specs[o].get("sku", o) for o in env.order], items, success, n_ok, wrong, disturbed, collision, env.sim_time() - t0, {"source_items": env.order_task["n_source_items"], "prefilled": prefilled})
+    return OrderResult(f"order_{seed}", seed, [env.object_specs[o].get("sku", o) for o in env.order], items, success, n_ok, wrong, disturbed, collision, env.sim_time() - t0, {"source_items": env.order_task["n_source_items"], "prefilled": prefilled, "sequence": sequence})

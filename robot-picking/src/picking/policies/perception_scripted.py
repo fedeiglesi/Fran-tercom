@@ -61,11 +61,10 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         if depth is None:
             return False
         if self.detector == "sku":
-            # order fulfilment: all blobs inside the source bin, labelled by the SKU identifier, pick the wanted SKU
-            src = obs.extra["source_bin_footprint"]
-            c, hs = src
-            dets = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, workspace_xy=((c[0] - hs[0], c[0] + hs[0]), (c[1] - hs[1], c[1] + hs[1])), stride=self.height_stride, return_all=True, max_height_m=0.055)
-            labelled = self.sku_identifier.label(dets, obs.extra["sku_true_positions"], obs.extra["sku_of_object"])
+            # order fulfilment: instance detections inside the source bin labelled by the SKU identifier
+            # (placeholder oracle for the learned detector, see perception/sku.py); pick the wanted SKU
+            labelled = self.sku_identifier.detect(obs.extra["sku_true_objects"], obs.extra["sku_of_object"])
+            self._install_yaw_scorer(obs, labelled)
             self.last_labels = [(l, d.position_base.round(3).tolist()) for d, l in labelled]
             wanted = [d for d, l in labelled if l == self.wanted_sku]
             det = wanted[0] if wanted else None
@@ -104,6 +103,28 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
             priv["object_pos"] = np.array([*obs.tcp_pose[:2], (self.grasp_target[2] + 1.0) if vd.holding else self.grasp_target[2]])  # drive the base-class verify logic
         obs.extra["privileged"] = priv
         return super().act(obs)
+
+    def _install_yaw_scorer(self, obs: Observation, labelled) -> None:
+        """Score a grasp yaw by the clearance of the two pads (at +-(width/2 + margin) along the closing axis)
+        from the source-bin walls and from the other detected objects."""
+        c, hs = obs.extra["source_bin_footprint"]
+        others = [d.position_base[:2] for d, _ in labelled]
+        pad_half_w = 0.008  # pad half width (along the closing axis footprint) incl. thickness
+        margin = (self.preshape_margin or 0.012)
+
+        def scorer(obj, yaw):
+            width = float(self.detection.width_m or 0.025) if self.detection is not None else 0.025
+            r = width / 2 + margin + pad_half_w
+            ax = np.array([np.cos(yaw), np.sin(yaw)])
+            score = 1.0
+            for sgn in (-1, 1):
+                pad = np.asarray(obj[:2]) + sgn * r * ax
+                wall = min(hs[0] - abs(pad[0] - c[0]), hs[1] - abs(pad[1] - c[1]))  # distance to the nearest wall
+                neigh = min([np.linalg.norm(pad - q) - 0.015 for q in others if np.linalg.norm(q - obj[:2]) > 0.005], default=1.0)
+                score = min(score, wall, neigh)
+            return float(score)
+
+        self.yaw_scorer = scorer
 
     def _still_holding(self, obs: Observation) -> bool:
         opening = obs.extra.get("gripper_opening_m")

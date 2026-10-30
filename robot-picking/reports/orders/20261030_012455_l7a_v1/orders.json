@@ -1,0 +1,9055 @@
+[
+  {
+    "order_id": "order_100000",
+    "seed": 100000,
+    "skus": [
+      "RELAY",
+      "GEAR"
+    ],
+    "items": [
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 90,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.162,
+              0.07,
+              0.019
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.212,
+              0.091,
+              0.021
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.166,
+              0.093,
+              0.026
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.169,
+              0.086,
+              0.029
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.203,
+              0.104,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.162,
+              0.067,
+              0.018
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.211,
+              0.094,
+              0.024
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.162,
+              0.088,
+              0.025
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.166,
+              0.088,
+              0.03
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.201,
+              0.107,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 34,
+        "collision": true,
+        "collision_detail": "finger_table_force_108.7N",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.157,
+              0.068,
+              0.019
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.215,
+              0.063,
+              0.008
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.173,
+              0.085,
+              0.027
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.177,
+              0.078,
+              0.031
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.204,
+              0.102,
+              0.008
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 20.69999999999924,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_screws",
+        "bag_oring"
+      ],
+      "sequence": [
+        "relay",
+        "gear"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100001",
+    "seed": 100001,
+    "skus": [
+      "BX-1002",
+      "SPARK_PLUG"
+    ],
+    "items": [
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 103,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.22,
+              0.133,
+              0.018
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.214,
+              0.106,
+              0.013
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.19,
+              0.096,
+              0.014
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.152,
+              0.122,
+              0.015
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.178,
+              0.107,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 87,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.222,
+              0.096,
+              0.011
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.199,
+              0.087,
+              0.012
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.152,
+              0.123,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.183,
+              0.108,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 128,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.155,
+              0.075,
+              0.026
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.161,
+              0.046,
+              0.036
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.149,
+              0.123,
+              0.015
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.191,
+              0.078,
+              0.003
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 2,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 31.799999999993265,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_gasket",
+        "gear"
+      ],
+      "sequence": [
+        "box_bulb",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100002",
+    "seed": 100002,
+    "skus": [
+      "BRAKE_PAD",
+      "RED_CAP"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 39,
+        "collision": true,
+        "collision_detail": "finger_table_force_14.0N",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.194,
+              0.104,
+              0.016
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.237,
+              0.078,
+              0.015
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.198,
+              0.087,
+              0.018
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.189,
+              0.097,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.22,
+              0.102,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 1,
+        "collision": true,
+        "collision_detail": "finger_table_force_7.3N",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.191,
+              0.102,
+              0.015
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.238,
+              0.074,
+              0.015
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.197,
+              0.089,
+              0.014
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.191,
+              0.096,
+              0.016
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.215,
+              0.097,
+              0.008
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 3.999999999999748,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "relay",
+        "grommet"
+      ],
+      "sequence": [
+        "red_cap",
+        "brake_pad"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100003",
+    "seed": 100003,
+    "skus": [
+      "BG-2002",
+      "BX-1002"
+    ],
+    "items": [
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 81,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.172,
+              0.104,
+              0.013
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.233,
+              0.11,
+              0.025
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.205,
+              0.098,
+              0.01
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.191,
+              0.09,
+              0.026
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.18,
+              0.092,
+              0.025
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 122,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.178,
+              0.131,
+              0.012
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.219,
+              0.103,
+              0.01
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.188,
+              0.087,
+              0.014
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.171,
+              0.088,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 7,
+        "collision": true,
+        "collision_detail": "finger_table_force_47.1N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.18,
+              0.133,
+              0.013
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.226,
+              0.098,
+              0.009
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.196,
+              0.083,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.184,
+              0.084,
+              0.016
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 20.999999999999073,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_filter",
+        "bearing"
+      ],
+      "sequence": [
+        "box_bulb",
+        "bag_screws"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100004",
+    "seed": 100004,
+    "skus": [
+      "GEAR",
+      "BX-1001"
+    ],
+    "items": [
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 161,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.196,
+              0.102,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.197,
+              0.059,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.167,
+              0.068,
+              0.013
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 54,
+        "collision": true,
+        "collision_detail": "finger_table_force_6.2N",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.162,
+              0.136,
+              0.013
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.196,
+              0.06,
+              0.017
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.16,
+              0.07,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 1,
+        "collision": true,
+        "collision_detail": "finger_table_force_6.0N",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.16,
+              0.132,
+              0.013
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.194,
+              0.06,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.157,
+              0.075,
+              0.012
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 21.59999999999874,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "brass_nut"
+      ],
+      "sequence": [
+        "gear",
+        "box_filter"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100005",
+    "seed": 100005,
+    "skus": [
+      "BX-1003",
+      "BRASS_NUT"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 88,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.216,
+              0.114,
+              0.024
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.165,
+              0.108,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.194,
+              0.121,
+              0.017
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.187,
+              0.079,
+              0.019
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.21,
+              0.098,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 91,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.226,
+              0.109,
+              0.019
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.164,
+              0.102,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.194,
+              0.131,
+              0.013
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.203,
+              0.102,
+              0.008
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 100,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.23,
+              0.108,
+              0.021
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.193,
+              0.133,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.205,
+              0.101,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.191,
+              0.133,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.205,
+              0.098,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 2,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 29.199999999994528,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "grommet"
+      ],
+      "sequence": [
+        "brass_nut",
+        "box_cable"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100006",
+    "seed": 100006,
+    "skus": [
+      "RED_CAP",
+      "GEAR"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 25,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.252,
+              0.134,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.201,
+              0.099,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.213,
+              0.099,
+              0.03
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.197,
+              0.094,
+              0.027
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.198,
+              0.104,
+              0.02
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 16,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.251,
+              0.138,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.202,
+              0.102,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.214,
+              0.104,
+              0.029
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.196,
+              0.095,
+              0.028
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.202,
+              0.105,
+              0.02
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.252,
+              0.138,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.206,
+              0.09,
+              0.017
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.186,
+              0.052,
+              0.037
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.18,
+              0.075,
+              0.025
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.205,
+              0.064,
+              0.019
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 100,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.251,
+              0.135,
+              0.012
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.23,
+              0.097,
+              0.014
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.16,
+              0.102,
+              0.012
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.192,
+              0.08,
+              0.023
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.208,
+              0.064,
+              0.016
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 2,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 22.49999999999824,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "grommet",
+        "bag_oring"
+      ],
+      "sequence": [
+        "red_cap",
+        "gear"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100007",
+    "seed": 100007,
+    "skus": [
+      "RELAY",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 73,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.199,
+              0.098,
+              0.029
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.201,
+              0.096,
+              0.023
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.203,
+              0.101,
+              0.012
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.188,
+              0.097,
+              0.032
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.215,
+              0.145,
+              0.042
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.197,
+              0.101,
+              0.011
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.159,
+              0.062,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.199,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.157,
+              0.06,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.2,
+              0.097,
+              0.01
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.158,
+              0.059,
+              0.014
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 11.200000000000509,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brass_nut",
+        "spark_plug"
+      ],
+      "sequence": [
+        "relay",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100008",
+    "seed": 100008,
+    "skus": [
+      "BRASS_NUT",
+      "SPARK_PLUG"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 129,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.206,
+              0.095,
+              0.015
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.205,
+              0.057,
+              0.038
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.181,
+              0.074,
+              0.01
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.202,
+              0.096,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.206,
+              0.056,
+              0.036
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.177,
+              0.07,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 104,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.186,
+              0.075,
+              0.02
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.183,
+              0.064,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 24.599999999997078,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_screws",
+        "brake_pad"
+      ],
+      "sequence": [
+        "brass_nut",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100009",
+    "seed": 100009,
+    "skus": [
+      "GEAR",
+      "RELAY"
+    ],
+    "items": [
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 85,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.202,
+              0.097,
+              0.011
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.201,
+              0.105,
+              0.031
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.191,
+              0.104,
+              0.019
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.184,
+              0.11,
+              0.022
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.174,
+              0.101,
+              0.024
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 75,
+        "collision": true,
+        "collision_detail": "finger_table_force_107.1N",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.158,
+              0.087,
+              0.011
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.165,
+              0.056,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 1,
+        "collision": true,
+        "collision_detail": "finger_table_force_16.6N",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.16,
+              0.088,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.172,
+              0.062,
+              0.012
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 16.10000000000179,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "box_filter"
+      ],
+      "sequence": [
+        "gear",
+        "relay"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100010",
+    "seed": 100010,
+    "skus": [
+      "GROMMET",
+      "RED_CAP"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 103,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.212,
+              0.083,
+              0.011
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.188,
+              0.13,
+              0.015
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.181,
+              0.089,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.196,
+              0.106,
+              0.018
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.241,
+              0.097,
+              0.022
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 102,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.208,
+              0.081,
+              0.011
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.178,
+              0.093,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.192,
+              0.099,
+              0.017
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.242,
+              0.085,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.206,
+              0.08,
+              0.009
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.171,
+              0.088,
+              0.008
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.162,
+              0.127,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.24,
+              0.09,
+              0.013
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 29.399999999994417,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "gear",
+        "spark_plug"
+      ],
+      "sequence": [
+        "red_cap",
+        "grommet"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100011",
+    "seed": 100011,
+    "skus": [
+      "BG-2002",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 18,
+        "collision": true,
+        "collision_detail": "finger_table_force_25.3N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.236,
+              0.133,
+              0.013
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.195,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.186,
+              0.095,
+              0.013
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.213,
+              0.096,
+              0.023
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.178,
+              0.13,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 59,
+        "collision": true,
+        "collision_detail": "finger_table_force_5.3N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.251,
+              0.103,
+              0.012
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.156,
+              0.071,
+              0.02
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.153,
+              0.071,
+              0.015
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.211,
+              0.084,
+              0.009
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.177,
+              0.13,
+              0.012
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 7.699999999999341,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "red_cap",
+        "grommet"
+      ],
+      "sequence": [
+        "bag_screws",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100012",
+    "seed": 100012,
+    "skus": [
+      "BX-1001",
+      "BRAKE_PAD"
+    ],
+    "items": [
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 82,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.203,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.197,
+              0.095,
+              0.014
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.225,
+              0.08,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.152,
+              0.122,
+              0.017
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 73,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.186,
+              0.076,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.193,
+              0.068,
+              0.011
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.226,
+              0.074,
+              0.011
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.156,
+              0.123,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.188,
+              0.075,
+              0.011
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.192,
+              0.067,
+              0.011
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.229,
+              0.077,
+              0.013
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.154,
+              0.123,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.188,
+              0.075,
+              0.012
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.187,
+              0.068,
+              0.011
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.229,
+              0.075,
+              0.012
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.154,
+              0.123,
+              0.018
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 18.10000000000068,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_gasket",
+        "spark_plug"
+      ],
+      "sequence": [
+        "brake_pad",
+        "box_filter"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100013",
+    "seed": 100013,
+    "skus": [
+      "BX-1003",
+      "SPARK_PLUG"
+    ],
+    "items": [
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 79,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.23,
+              0.057,
+              0.03
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.178,
+              0.076,
+              0.018
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.15,
+              0.131,
+              0.015
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.217,
+              0.111,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 72,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.234,
+              0.059,
+              0.032
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.166,
+              0.072,
+              0.014
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.147,
+              0.134,
+              0.013
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.219,
+              0.113,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.211,
+              0.062,
+              0.03
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.167,
+              0.071,
+              0.014
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.147,
+              0.135,
+              0.016
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.211,
+              0.111,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 1,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 122,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.186,
+              0.058,
+              0.033
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.167,
+              0.075,
+              0.011
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.148,
+              0.134,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.215,
+              0.11,
+              0.009
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 35.59999999999791,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bearing",
+        "box_filter"
+      ],
+      "sequence": [
+        "spark_plug",
+        "box_cable"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100014",
+    "seed": 100014,
+    "skus": [
+      "RELAY",
+      "BG-2003"
+    ],
+    "items": [
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 113,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.202,
+              0.13,
+              0.02
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.203,
+              0.09,
+              0.008
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.215,
+              0.102,
+              0.014
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.15,
+              0.088,
+              0.012
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.186,
+              0.1,
+              0.013
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 121,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.205,
+              0.087,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.216,
+              0.086,
+              0.018
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.152,
+              0.091,
+              0.013
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.182,
+              0.096,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 100,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.23,
+              0.098,
+              0.007
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.149,
+              0.09,
+              0.015
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.192,
+              0.098,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 33.399999999995224,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "bearing"
+      ],
+      "sequence": [
+        "relay",
+        "bag_oring"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100015",
+    "seed": 100015,
+    "skus": [
+      "BEARING",
+      "BX-1001"
+    ],
+    "items": [
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 98,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.197,
+              0.096,
+              0.009
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.164,
+              0.096,
+              0.03
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.23,
+              0.088,
+              0.008
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.203,
+              0.127,
+              0.031
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.2,
+              0.096,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 111,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.196,
+              0.09,
+              0.009
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.232,
+              0.093,
+              0.011
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.192,
+              0.129,
+              0.017
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.186,
+              0.089,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 79,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.211,
+              0.091,
+              0.011
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.243,
+              0.09,
+              0.01
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.2,
+              0.123,
+              0.018
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": true,
+    "n_ok": 2,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 28.79999999999475,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "grommet"
+      ],
+      "sequence": [
+        "box_filter",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100016",
+    "seed": 100016,
+    "skus": [
+      "GROMMET",
+      "BG-2002"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 88,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.193,
+              0.119,
+              0.015
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.207,
+              0.14,
+              0.011
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.189,
+              0.097,
+              0.011
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.146,
+              0.112,
+              0.051
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.169,
+              0.117,
+              0.024
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 70,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.247,
+              0.116,
+              0.015
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.21,
+              0.14,
+              0.012
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.195,
+              0.1,
+              0.008
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.164,
+              0.105,
+              0.025
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.167,
+              0.133,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 27,
+        "collision": true,
+        "collision_detail": "finger_table_force_30.8N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.21,
+              0.14,
+              0.012
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.196,
+              0.098,
+              0.01
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.165,
+              0.108,
+              0.025
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.17,
+              0.134,
+              0.02
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 18.50000000000046,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "brass_nut"
+      ],
+      "sequence": [
+        "grommet",
+        "bag_screws"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100017",
+    "seed": 100017,
+    "skus": [
+      "BEARING",
+      "BX-1003"
+    ],
+    "items": [
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "DROP",
+        "steps": 86,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.204,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.187,
+              0.1,
+              0.017
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.211,
+              0.092,
+              0.015
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.207,
+              0.101,
+              0.017
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.238,
+              0.124,
+              0.03
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.198,
+              0.093,
+              0.017
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.205,
+              0.077,
+              0.021
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.205,
+              0.084,
+              0.026
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.244,
+              0.128,
+              0.026
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 98,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.199,
+              0.089,
+              0.016
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.205,
+              0.073,
+              0.022
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.206,
+              0.084,
+              0.025
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.242,
+              0.129,
+              0.026
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.253,
+              0.059,
+              0.017
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.243,
+              0.126,
+              0.026
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 20.999999999999073,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "spark_plug"
+      ],
+      "sequence": [
+        "box_cable",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100018",
+    "seed": 100018,
+    "skus": [
+      "BG-2002",
+      "BX-1001"
+    ],
+    "items": [
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.15,
+              0.067,
+              0.013
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.166,
+              0.087,
+              0.029
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.228,
+              0.094,
+              0.012
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.2,
+              0.086,
+              0.01
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.197,
+              0.092,
+              0.023
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 1,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 61,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.149,
+              0.057,
+              0.014
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.166,
+              0.069,
+              0.028
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.231,
+              0.09,
+              0.011
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.207,
+              0.087,
+              0.009
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.199,
+              0.091,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 20,
+        "collision": true,
+        "collision_detail": "finger_table_force_29.2N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.151,
+              0.063,
+              0.014
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.23,
+              0.093,
+              0.011
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.199,
+              0.085,
+              0.009
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.198,
+              0.092,
+              0.022
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 16.400000000001622,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "bag_gasket"
+      ],
+      "sequence": [
+        "box_filter",
+        "bag_screws"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100019",
+    "seed": 100019,
+    "skus": [
+      "SPARK_PLUG",
+      "GROMMET"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.214,
+              0.087,
+              0.02
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.163,
+              0.118,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.159,
+              0.089,
+              0.02
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.23,
+              0.105,
+              0.024
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.198,
+              0.098,
+              0.008
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 101,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.222,
+              0.093,
+              0.02
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.16,
+              0.076,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.241,
+              0.11,
+              0.024
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.195,
+              0.101,
+              0.008
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.219,
+              0.096,
+              0.02
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.156,
+              0.077,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.24,
+              0.107,
+              0.023
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.194,
+              0.1,
+              0.008
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 26.79999999999586,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "gear",
+        "relay"
+      ],
+      "sequence": [
+        "grommet",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100020",
+    "seed": 100020,
+    "skus": [
+      "BEARING",
+      "GEAR"
+    ],
+    "items": [
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 139,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.216,
+              0.118,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.215,
+              0.114,
+              0.011
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.195,
+              0.068,
+              0.022
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.236,
+              0.085,
+              0.019
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.168,
+              0.11,
+              -0.744
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GEAR",
+            [
+              0.212,
+              0.116,
+              0.009
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.195,
+              0.06,
+              0.019
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.228,
+              0.081,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.166,
+              0.108,
+              -0.744
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": true,
+    "n_ok": 2,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 22.199999999998408,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "box_cable"
+      ],
+      "sequence": [
+        "bearing",
+        "gear"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100021",
+    "seed": 100021,
+    "skus": [
+      "BRAKE_PAD",
+      "SPARK_PLUG"
+    ],
+    "items": [
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 82,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.19,
+              0.104,
+              0.021
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.186,
+              0.133,
+              0.011
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.23,
+              0.103,
+              0.02
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.178,
+              0.103,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 14,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.19,
+              0.107,
+              0.023
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.192,
+              0.134,
+              0.013
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.226,
+              0.101,
+              0.02
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.177,
+              0.104,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 8,
+        "collision": true,
+        "collision_detail": "finger_table_force_36.0N",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.188,
+              0.106,
+              0.022
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.191,
+              0.129,
+              0.013
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.23,
+              0.102,
+              0.019
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.179,
+              0.103,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 10.400000000000242,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_screws",
+        "box_cable"
+      ],
+      "sequence": [
+        "brake_pad",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100022",
+    "seed": 100022,
+    "skus": [
+      "RELAY",
+      "BG-2003"
+    ],
+    "items": [
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 100,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.174,
+              0.124,
+              0.025
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.208,
+              0.111,
+              0.007
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.161,
+              0.12,
+              0.022
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.19,
+              0.088,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.205,
+              0.105,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 88,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.161,
+              0.126,
+              0.017
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.211,
+              0.114,
+              0.009
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.161,
+              0.095,
+              0.022
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.194,
+              0.089,
+              0.017
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.208,
+              0.113,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.151,
+              0.128,
+              0.018
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.204,
+              0.113,
+              0.009
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.161,
+              0.093,
+              0.024
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.197,
+              0.086,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.207,
+              0.116,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 99,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.155,
+              0.128,
+              0.018
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.208,
+              0.111,
+              0.009
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.161,
+              0.101,
+              0.026
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.189,
+              0.085,
+              0.014
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 37.099999999999746,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "grommet",
+        "bag_gasket"
+      ],
+      "sequence": [
+        "relay",
+        "bag_oring"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100023",
+    "seed": 100023,
+    "skus": [
+      "SPARK_PLUG",
+      "BG-2001"
+    ],
+    "items": [
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 87,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.222,
+              0.112,
+              0.032
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.205,
+              0.087,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.23,
+              0.107,
+              0.023
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.233,
+              0.104,
+              0.024
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.193,
+              0.099,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 83,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.219,
+              0.113,
+              0.032
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.204,
+              0.092,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.233,
+              0.108,
+              0.023
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.229,
+              0.111,
+              0.024
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.188,
+              0.089,
+              0.018
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 79,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.199,
+              0.091,
+              0.024
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.203,
+              0.084,
+              0.009
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.243,
+              0.119,
+              0.019
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.206,
+              0.129,
+              0.025
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.192,
+              0.065,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.199,
+              0.088,
+              0.024
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.205,
+              0.086,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.246,
+              0.109,
+              0.018
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.203,
+              0.11,
+              0.025
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.201,
+              0.066,
+              0.018
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 33.2999999999951,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_filter",
+        "bag_oring"
+      ],
+      "sequence": [
+        "bag_gasket",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100024",
+    "seed": 100024,
+    "skus": [
+      "BG-2003",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 86,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.181,
+              0.077,
+              0.01
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.211,
+              0.084,
+              0.016
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.231,
+              0.058,
+              0.013
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.233,
+              0.137,
+              0.027
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.22,
+              0.08,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 7,
+        "collision": true,
+        "collision_detail": "finger_table_force_11.6N",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.178,
+              0.076,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.214,
+              0.083,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.232,
+              0.063,
+              0.014
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.236,
+              0.133,
+              0.026
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.219,
+              0.086,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 96,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.18,
+              0.08,
+              0.007
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.215,
+              0.087,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.231,
+              0.065,
+              0.015
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.23,
+              0.138,
+              0.026
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.218,
+              0.085,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.185,
+              0.074,
+              0.01
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.205,
+              0.059,
+              0.015
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.234,
+              0.137,
+              0.025
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 20.199999999999516,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "relay",
+        "gear"
+      ],
+      "sequence": [
+        "bag_oring",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100025",
+    "seed": 100025,
+    "skus": [
+      "BX-1003",
+      "BG-2001"
+    ],
+    "items": [
+      {
+        "sku": "BX-1003",
+        "object": "box_cable",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 134,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.231,
+              0.078,
+              0.024
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.201,
+              0.098,
+              0.018
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.252,
+              0.138,
+              0.015
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.203,
+              0.104,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.225,
+              0.057,
+              0.017
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 92,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2001",
+            [
+              0.2,
+              0.098,
+              0.019
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.25,
+              0.134,
+              0.016
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.202,
+              0.107,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.245,
+              0.057,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 72,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2001",
+            [
+              0.196,
+              0.107,
+              0.02
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.251,
+              0.141,
+              0.017
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.199,
+              0.105,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.243,
+              0.061,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 29.799999999994196,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "brass_nut"
+      ],
+      "sequence": [
+        "box_cable",
+        "bag_gasket"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100026",
+    "seed": 100026,
+    "skus": [
+      "BG-2002",
+      "GROMMET"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 98,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.182,
+              0.08,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.184,
+              0.108,
+              0.01
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.202,
+              0.08,
+              0.017
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.235,
+              0.078,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.212,
+              0.105,
+              0.007
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 28,
+        "collision": true,
+        "collision_detail": "finger_table_force_67.7N",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.175,
+              0.084,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.19,
+              0.129,
+              0.01
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.211,
+              0.084,
+              0.014
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.234,
+              0.078,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.212,
+              0.107,
+              0.007
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.178,
+              0.086,
+              0.011
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.188,
+              0.13,
+              0.01
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.206,
+              0.08,
+              0.012
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.237,
+              0.077,
+              0.012
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.211,
+              0.109,
+              0.008
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 81,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.176,
+              0.09,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.183,
+              0.126,
+              0.008
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.208,
+              0.077,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.237,
+              0.077,
+              0.012
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.211,
+              0.105,
+              0.008
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 29.599999999994306,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "relay"
+      ],
+      "sequence": [
+        "grommet",
+        "bag_screws"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100027",
+    "seed": 100027,
+    "skus": [
+      "BX-1001",
+      "BRASS_NUT"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 14,
+        "collision": true,
+        "collision_detail": "finger_table_force_21.1N",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.207,
+              0.088,
+              0.043
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.148,
+              0.092,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.207,
+              0.096,
+              0.017
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.17,
+              0.109,
+              0.021
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.199,
+              0.105,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.244,
+              0.093,
+              0.02
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.149,
+              0.094,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.211,
+              0.088,
+              0.022
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.177,
+              0.113,
+              0.02
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.201,
+              0.106,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 85,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.248,
+              0.096,
+              0.02
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.148,
+              0.094,
+              0.012
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.217,
+              0.089,
+              0.023
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.177,
+              0.113,
+              0.02
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.196,
+              0.109,
+              0.014
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 18.800000000000292,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "red_cap",
+        "box_cable"
+      ],
+      "sequence": [
+        "brass_nut",
+        "box_filter"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100028",
+    "seed": 100028,
+    "skus": [
+      "SPARK_PLUG",
+      "BRAKE_PAD"
+    ],
+    "items": [
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 91,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.206,
+              0.109,
+              0.013
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.181,
+              0.101,
+              0.014
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.23,
+              0.084,
+              0.024
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.19,
+              0.112,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 79,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.197,
+              0.104,
+              0.011
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.18,
+              0.092,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.222,
+              0.093,
+              0.023
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.179,
+              0.104,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 75,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.19,
+              0.109,
+              0.014
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.175,
+              0.091,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.216,
+              0.096,
+              0.023
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.171,
+              0.104,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 79,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.175,
+              0.103,
+              0.015
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.166,
+              0.075,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.219,
+              0.092,
+              0.023
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.147,
+              0.087,
+              0.013
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 32.399999999994,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "relay"
+      ],
+      "sequence": [
+        "spark_plug",
+        "brake_pad"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100029",
+    "seed": 100029,
+    "skus": [
+      "SPARK_PLUG",
+      "GROMMET"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 75,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.207,
+              0.086,
+              0.023
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.168,
+              0.116,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.2,
+              0.097,
+              0.008
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.205,
+              0.102,
+              0.014
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.201,
+              0.089,
+              0.031
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.2,
+              0.073,
+              0.012
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.203,
+              0.101,
+              0.009
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.202,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.17,
+              0.076,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.194,
+              0.079,
+              0.016
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.199,
+              0.107,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.2,
+              0.107,
+              0.011
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.175,
+              0.079,
+              0.023
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 24.799999999996967,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "red_cap",
+        "bag_oring"
+      ],
+      "sequence": [
+        "grommet",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100030",
+    "seed": 100030,
+    "skus": [
+      "GROMMET",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 84,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.224,
+              0.082,
+              0.012
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.195,
+              0.099,
+              0.01
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.227,
+              0.115,
+              0.012
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.196,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.192,
+              0.111,
+              0.026
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 60,
+        "collision": true,
+        "collision_detail": "finger_table_force_69.9N",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.238,
+              0.087,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.193,
+              0.098,
+              0.015
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.238,
+              0.116,
+              0.011
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.212,
+              0.105,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.206,
+              0.11,
+              0.024
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 1,
+        "collision": true,
+        "collision_detail": "finger_table_force_6.8N",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.238,
+              0.088,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.193,
+              0.098,
+              0.016
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.237,
+              0.115,
+              0.009
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.211,
+              0.107,
+              0.012
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.204,
+              0.109,
+              0.025
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 14.500000000001611,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "bag_gasket"
+      ],
+      "sequence": [
+        "grommet",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100031",
+    "seed": 100031,
+    "skus": [
+      "GROMMET",
+      "BG-2002"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 148,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.216,
+              0.123,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.194,
+              0.115,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.199,
+              0.094,
+              0.025
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.209,
+              0.075,
+              0.018
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.248,
+              0.062,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.201,
+              0.121,
+              0.012
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.191,
+              0.092,
+              0.021
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.199,
+              0.076,
+              0.02
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.244,
+              0.058,
+              0.016
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 94,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.2,
+              0.12,
+              0.012
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.181,
+              0.088,
+              0.018
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.195,
+              0.073,
+              0.019
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.244,
+              0.062,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2002",
+        "object": "bag_screws",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 78,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2002",
+            [
+              0.195,
+              0.117,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.182,
+              0.086,
+              0.02
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.196,
+              0.073,
+              0.018
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.243,
+              0.06,
+              0.015
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 33.2999999999951,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "gear",
+        "brass_nut"
+      ],
+      "sequence": [
+        "grommet",
+        "bag_screws"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100032",
+    "seed": 100032,
+    "skus": [
+      "BG-2003",
+      "BX-1002"
+    ],
+    "items": [
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 38,
+        "collision": true,
+        "collision_detail": "finger_table_force_16.8N",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.179,
+              0.102,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.159,
+              0.075,
+              0.016
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.2,
+              0.105,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.186,
+              0.101,
+              0.026
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.173,
+              0.134,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 146,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.173,
+              0.099,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.178,
+              0.061,
+              0.029
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.194,
+              0.118,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.177,
+              0.102,
+              0.027
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.151,
+              0.128,
+              0.018
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 100,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.171,
+              0.089,
+              0.008
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.189,
+              0.065,
+              0.022
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.177,
+              0.117,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.149,
+              0.125,
+              0.014
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 28.39999999999497,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "grommet",
+        "brake_pad"
+      ],
+      "sequence": [
+        "box_bulb",
+        "bag_oring"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100033",
+    "seed": 100033,
+    "skus": [
+      "BX-1001",
+      "BG-2001"
+    ],
+    "items": [
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 16,
+        "collision": true,
+        "collision_detail": "finger_table_force_6.4N",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.153,
+              0.122,
+              0.017
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.2,
+              0.101,
+              0.025
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.203,
+              0.106,
+              0.009
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.201,
+              0.101,
+              0.012
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.2,
+              0.099,
+              0.008
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 76,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.154,
+              0.123,
+              0.018
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.191,
+              0.101,
+              0.024
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.203,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.201,
+              0.095,
+              0.014
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.201,
+              0.103,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2001",
+        "object": "bag_gasket",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 72,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.153,
+              0.124,
+              0.018
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.19,
+              0.105,
+              0.026
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.207,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.196,
+              0.096,
+              0.013
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.201,
+              0.103,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 16.400000000001622,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brass_nut",
+        "box_bulb"
+      ],
+      "sequence": [
+        "box_filter",
+        "bag_gasket"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100034",
+    "seed": 100034,
+    "skus": [
+      "SPARK_PLUG",
+      "RED_CAP"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 61,
+        "collision": true,
+        "collision_detail": "finger_table_force_47.8N",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.239,
+              0.114,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.152,
+              0.1,
+              0.013
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.241,
+              0.105,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.198,
+              0.105,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.197,
+              0.099,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 13,
+        "collision": true,
+        "collision_detail": "finger_table_force_37.8N",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.239,
+              0.113,
+              0.013
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.156,
+              0.092,
+              0.012
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.241,
+              0.104,
+              0.012
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.202,
+              0.103,
+              0.017
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.2,
+              0.097,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 7.399999999999374,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_filter",
+        "grommet"
+      ],
+      "sequence": [
+        "red_cap",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100035",
+    "seed": 100035,
+    "skus": [
+      "BEARING",
+      "RED_CAP"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 68,
+        "collision": true,
+        "collision_detail": "finger_table_force_45.7N",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.206,
+              0.104,
+              0.009
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.152,
+              0.107,
+              0.015
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.239,
+              0.105,
+              0.014
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.193,
+              0.089,
+              0.02
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.227,
+              0.143,
+              0.033
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 81,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.207,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.15,
+              0.109,
+              0.015
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.238,
+              0.1,
+              0.009
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.198,
+              0.093,
+              0.019
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.227,
+              0.139,
+              0.029
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 94,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.201,
+              0.118,
+              0.008
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.15,
+              0.11,
+              0.013
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.236,
+              0.111,
+              0.011
+            ]
+          ],
+          [
+            "SPARK_PLUG",
+            [
+              0.235,
+              0.139,
+              0.033
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 24.299999999997244,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "grommet"
+      ],
+      "sequence": [
+        "red_cap",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100036",
+    "seed": 100036,
+    "skus": [
+      "SPARK_PLUG",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 67,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.22,
+              0.077,
+              0.011
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.201,
+              0.099,
+              0.015
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.171,
+              0.125,
+              0.014
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.174,
+              0.1,
+              0.027
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.197,
+              0.088,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 87,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.202,
+              0.107,
+              0.014
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.168,
+              0.13,
+              0.011
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.156,
+              0.09,
+              0.012
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.192,
+              0.089,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 60,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.207,
+              0.119,
+              0.009
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.165,
+              0.131,
+              0.012
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.154,
+              0.09,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.195,
+              0.087,
+              0.008
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 21.39999999999885,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "relay",
+        "brake_pad"
+      ],
+      "sequence": [
+        "spark_plug",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100037",
+    "seed": 100037,
+    "skus": [
+      "GROMMET",
+      "GEAR"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 110,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.172,
+              0.094,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.2,
+              0.106,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.193,
+              0.08,
+              0.02
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.16,
+              0.104,
+              0.03
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.219,
+              0.093,
+              0.018
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 30,
+        "collision": true,
+        "collision_detail": "finger_table_force_9.3N",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.162,
+              0.059,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.204,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.196,
+              0.067,
+              0.011
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.167,
+              0.116,
+              0.026
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.224,
+              0.086,
+              0.019
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.167,
+              0.058,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.213,
+              0.103,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.198,
+              0.064,
+              0.009
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.165,
+              0.118,
+              0.021
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.227,
+              0.083,
+              0.019
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GEAR",
+        "object": "gear",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 71,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.164,
+              0.061,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.209,
+              0.087,
+              0.015
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.194,
+              0.064,
+              0.01
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.166,
+              0.12,
+              0.021
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.245,
+              0.071,
+              0.016
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 29.999999999994085,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "brake_pad"
+      ],
+      "sequence": [
+        "grommet",
+        "gear"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100038",
+    "seed": 100038,
+    "skus": [
+      "BX-1002",
+      "RED_CAP"
+    ],
+    "items": [
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 91,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.164,
+              0.067,
+              0.022
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.168,
+              0.096,
+              0.013
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.197,
+              0.103,
+              0.013
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.201,
+              0.105,
+              0.009
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.201,
+              0.11,
+              0.025
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 89,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.159,
+              0.072,
+              0.022
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.151,
+              0.094,
+              0.013
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.194,
+              0.106,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.196,
+              0.107,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.2,
+              0.109,
+              0.024
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 7,
+        "collision": true,
+        "collision_detail": "finger_table_force_25.7N",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.147,
+              0.083,
+              0.019
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.16,
+              0.106,
+              0.015
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.196,
+              0.106,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.196,
+              0.109,
+              0.01
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.195,
+              0.11,
+              0.024
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 18.700000000000347,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "relay"
+      ],
+      "sequence": [
+        "red_cap",
+        "box_bulb"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100039",
+    "seed": 100039,
+    "skus": [
+      "BX-1001",
+      "BRAKE_PAD"
+    ],
+    "items": [
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 98,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.201,
+              0.097,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.196,
+              0.093,
+              0.011
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.189,
+              0.134,
+              0.023
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.249,
+              0.076,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRAKE_PAD",
+        "object": "brake_pad",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 72,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.206,
+              0.095,
+              0.011
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.208,
+              0.087,
+              0.011
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.16,
+              0.137,
+              0.016
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.255,
+              0.075,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.204,
+              0.094,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.209,
+              0.087,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.16,
+              0.137,
+              0.016
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.25,
+              0.076,
+              0.013
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRAKE_PAD",
+            [
+              0.208,
+              0.088,
+              0.01
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.209,
+              0.087,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.156,
+              0.138,
+              0.018
+            ]
+          ],
+          [
+            "BG-2002",
+            [
+              0.249,
+              0.076,
+              0.013
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 19.59999999999985,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_gasket",
+        "bag_oring"
+      ],
+      "sequence": [
+        "brake_pad",
+        "box_filter"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100040",
+    "seed": 100040,
+    "skus": [
+      "RED_CAP",
+      "BX-1001"
+    ],
+    "items": [
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 69,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.209,
+              0.132,
+              0.023
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.172,
+              0.082,
+              0.027
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.202,
+              0.097,
+              0.009
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.197,
+              0.102,
+              0.016
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.202,
+              0.105,
+              0.021
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RED_CAP",
+        "object": "red_cap",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 54,
+        "collision": true,
+        "collision_detail": "finger_table_force_28.5N",
+        "sku_labels": [
+          [
+            "RED_CAP",
+            [
+              0.151,
+              0.134,
+              0.015
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.197,
+              0.098,
+              0.009
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.203,
+              0.1,
+              0.018
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.207,
+              0.104,
+              0.021
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 12.300000000000876,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_gasket",
+        "brass_nut"
+      ],
+      "sequence": [
+        "box_filter",
+        "red_cap"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100041",
+    "seed": 100041,
+    "skus": [
+      "BRASS_NUT",
+      "BG-2003"
+    ],
+    "items": [
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 90,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.193,
+              0.107,
+              0.02
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.216,
+              0.096,
+              0.01
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.213,
+              0.141,
+              0.009
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.197,
+              0.108,
+              0.021
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.21,
+              0.129,
+              0.018
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 86,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.172,
+              0.093,
+              0.012
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.234,
+              0.081,
+              0.009
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.214,
+              0.133,
+              0.012
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.168,
+              0.093,
+              0.013
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.192,
+              0.123,
+              0.015
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 18,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.17,
+              0.091,
+              0.012
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.235,
+              0.081,
+              0.008
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.21,
+              0.14,
+              0.008
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.172,
+              0.091,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.191,
+              0.119,
+              0.016
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "BAD_TARGET",
+        "steps": 14,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.169,
+              0.094,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.231,
+              0.084,
+              0.008
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.213,
+              0.134,
+              0.009
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.165,
+              0.089,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.196,
+              0.119,
+              0.015
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 20.799999999999184,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_bulb",
+        "box_filter"
+      ],
+      "sequence": [
+        "bag_oring",
+        "brass_nut"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100042",
+    "seed": 100042,
+    "skus": [
+      "BEARING",
+      "BRASS_NUT"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 81,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.21,
+              0.097,
+              0.023
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.209,
+              0.108,
+              0.018
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.199,
+              0.107,
+              0.007
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.207,
+              0.1,
+              0.014
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.217,
+              0.059,
+              0.031
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 97,
+        "collision": true,
+        "collision_detail": "finger_table_force_89.4N",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.149,
+              0.066,
+              0.021
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.146,
+              0.062,
+              0.015
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.204,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.209,
+              0.068,
+              0.023
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 39,
+        "collision": true,
+        "collision_detail": "finger_table_force_33.7N",
+        "sku_labels": [
+          [
+            "BEARING",
+            [
+              0.149,
+              0.06,
+              0.021
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.149,
+              0.065,
+              0.017
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.205,
+              0.098,
+              0.008
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.208,
+              0.065,
+              0.024
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 21.699999999998685,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "relay",
+        "red_cap"
+      ],
+      "sequence": [
+        "brass_nut",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100043",
+    "seed": 100043,
+    "skus": [
+      "GROMMET",
+      "BX-1001"
+    ],
+    "items": [
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 168,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.222,
+              0.089,
+              0.013
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.226,
+              0.11,
+              0.017
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.161,
+              0.091,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.198,
+              0.101,
+              0.013
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 14,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.165,
+              0.086,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.19,
+              0.1,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.16,
+              0.085,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.187,
+              0.1,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1001",
+        "object": "box_filter",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.16,
+              0.087,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.188,
+              0.099,
+              0.013
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 20.799999999999184,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_oring",
+        "spark_plug"
+      ],
+      "sequence": [
+        "grommet",
+        "box_filter"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100044",
+    "seed": 100044,
+    "skus": [
+      "GROMMET",
+      "BX-1002"
+    ],
+    "items": [
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 73,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.192,
+              0.103,
+              0.015
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.236,
+              0.102,
+              0.015
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.195,
+              0.131,
+              0.037
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.158,
+              0.088,
+              0.007
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.188,
+              0.098,
+              0.009
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 88,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "GROMMET",
+            [
+              0.192,
+              0.103,
+              0.017
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.154,
+              0.126,
+              0.031
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.159,
+              0.09,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.195,
+              0.107,
+              0.011
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "GROMMET",
+        "object": "grommet",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 22,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1003",
+            [
+              0.151,
+              0.123,
+              0.03
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.159,
+              0.094,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 18.30000000000057,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_filter",
+        "red_cap"
+      ],
+      "sequence": [
+        "box_bulb",
+        "grommet"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100045",
+    "seed": 100045,
+    "skus": [
+      "RELAY",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 81,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "RELAY",
+            [
+              0.204,
+              0.1,
+              0.028
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.197,
+              0.095,
+              0.023
+            ]
+          ],
+          [
+            "BX-1001",
+            [
+              0.186,
+              0.056,
+              0.033
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.181,
+              0.104,
+              0.029
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.196,
+              0.099,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.19,
+              0.062,
+              0.028
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.178,
+              0.143,
+              0.015
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.2,
+              0.097,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.188,
+              0.067,
+              0.03
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.179,
+              0.145,
+              0.017
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.2,
+              0.1,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1001",
+            [
+              0.197,
+              0.065,
+              0.031
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.185,
+              0.141,
+              0.017
+            ]
+          ],
+          [
+            "BRAKE_PAD",
+            [
+              0.198,
+              0.099,
+              0.01
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 12.000000000000776,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "box_cable",
+        "bag_oring"
+      ],
+      "sequence": [
+        "relay",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100046",
+    "seed": 100046,
+    "skus": [
+      "SPARK_PLUG",
+      "BRASS_NUT"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": true,
+        "failure_type": "NONE",
+        "steps": 64,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.24,
+              0.105,
+              0.027
+            ]
+          ],
+          [
+            "BRASS_NUT",
+            [
+              0.221,
+              0.064,
+              0.013
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.182,
+              0.112,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.201,
+              0.108,
+              0.012
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.215,
+              0.105,
+              0.01
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "DROP",
+        "steps": 91,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "SPARK_PLUG",
+            [
+              0.235,
+              0.11,
+              0.027
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.183,
+              0.111,
+              0.008
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.207,
+              0.103,
+              0.017
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.207,
+              0.106,
+              0.012
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "SPARK_PLUG",
+        "object": "spark_plug",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.185,
+              0.108,
+              0.009
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.211,
+              0.108,
+              0.016
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.21,
+              0.102,
+              0.012
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 1,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 16.8000000000014,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_screws",
+        "brake_pad"
+      ],
+      "sequence": [
+        "brass_nut",
+        "spark_plug"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100047",
+    "seed": 100047,
+    "skus": [
+      "BX-1002",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "TIMEOUT",
+        "steps": 200,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.248,
+              0.118,
+              0.026
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.198,
+              0.105,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.196,
+              0.104,
+              0.01
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.201,
+              0.141,
+              0.015
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.151,
+              0.142,
+              0.016
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BX-1002",
+        "object": "box_bulb",
+        "packaging": "box",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 9,
+        "collision": true,
+        "collision_detail": "finger_table_force_13.7N",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.24,
+              0.128,
+              0.02
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.199,
+              0.105,
+              0.015
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.195,
+              0.104,
+              0.011
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.214,
+              0.132,
+              0.017
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.153,
+              0.139,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 75,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.238,
+              0.131,
+              0.021
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.195,
+              0.104,
+              0.016
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.195,
+              0.104,
+              0.011
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.211,
+              0.133,
+              0.015
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.149,
+              0.141,
+              0.014
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "SLIP",
+        "steps": 72,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BX-1002",
+            [
+              0.24,
+              0.13,
+              0.021
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.197,
+              0.101,
+              0.014
+            ]
+          ],
+          [
+            "GEAR",
+            [
+              0.195,
+              0.101,
+              0.01
+            ]
+          ],
+          [
+            "GROMMET",
+            [
+              0.209,
+              0.131,
+              0.017
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.151,
+              0.14,
+              0.015
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 35.59999999999791,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brake_pad",
+        "bag_oring"
+      ],
+      "sequence": [
+        "box_bulb",
+        "bearing"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100048",
+    "seed": 100048,
+    "skus": [
+      "BRASS_NUT",
+      "RELAY"
+    ],
+    "items": [
+      {
+        "sku": "BRASS_NUT",
+        "object": "brass_nut",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 73,
+        "collision": true,
+        "collision_detail": "finger_table_force_99.9N",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.153,
+              0.124,
+              0.01
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.218,
+              0.068,
+              0.021
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.184,
+              0.071,
+              0.008
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.221,
+              0.097,
+              0.009
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.174,
+              0.101,
+              0.019
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "RELAY",
+        "object": "relay",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "COLLISION",
+        "steps": 1,
+        "collision": true,
+        "collision_detail": "finger_table_force_7.7N",
+        "sku_labels": [
+          [
+            "BRASS_NUT",
+            [
+              0.155,
+              0.126,
+              0.009
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.211,
+              0.066,
+              0.021
+            ]
+          ],
+          [
+            "BG-2003",
+            [
+              0.186,
+              0.074,
+              0.006
+            ]
+          ],
+          [
+            "BG-2001",
+            [
+              0.227,
+              0.097,
+              0.01
+            ]
+          ],
+          [
+            "BX-1002",
+            [
+              0.174,
+              0.095,
+              0.02
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 0,
+    "prefilled_disturbed": false,
+    "collision": true,
+    "cycle_time_s": 7.399999999999374,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "bag_screws",
+        "box_cable"
+      ],
+      "sequence": [
+        "brass_nut",
+        "relay"
+      ]
+    }
+  },
+  {
+    "order_id": "order_100049",
+    "seed": 100049,
+    "skus": [
+      "BG-2003",
+      "BEARING"
+    ],
+    "items": [
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 96,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.205,
+              0.098,
+              0.008
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.192,
+              0.096,
+              0.013
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.167,
+              0.072,
+              0.017
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.253,
+              0.124,
+              0.015
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.161,
+              0.07,
+              0.025
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BG-2003",
+        "object": "bag_oring",
+        "packaging": "bag",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "WRONG_OBJECT",
+        "steps": 142,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.19,
+              0.102,
+              0.008
+            ]
+          ],
+          [
+            "BEARING",
+            [
+              0.179,
+              0.094,
+              0.025
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.165,
+              0.068,
+              0.019
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.247,
+              0.123,
+              0.016
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.164,
+              0.074,
+              0.026
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 0,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.211,
+              0.099,
+              -0.002
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.172,
+              0.092,
+              0.012
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.236,
+              0.128,
+              0.015
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.172,
+              0.09,
+              0.02
+            ]
+          ]
+        ]
+      },
+      {
+        "sku": "BEARING",
+        "object": "bearing",
+        "packaging": "loose",
+        "attempt": 1,
+        "success": false,
+        "failure_type": "NO_GRASP",
+        "steps": 13,
+        "collision": false,
+        "collision_detail": "",
+        "sku_labels": [
+          [
+            "BG-2003",
+            [
+              0.209,
+              0.099,
+              0.006
+            ]
+          ],
+          [
+            "BX-1003",
+            [
+              0.168,
+              0.09,
+              0.011
+            ]
+          ],
+          [
+            "RED_CAP",
+            [
+              0.237,
+              0.13,
+              0.016
+            ]
+          ],
+          [
+            "RELAY",
+            [
+              0.17,
+              0.094,
+              0.019
+            ]
+          ]
+        ]
+      }
+    ],
+    "success": false,
+    "n_ok": 0,
+    "wrong_sku": 1,
+    "prefilled_disturbed": false,
+    "collision": false,
+    "cycle_time_s": 26.39999999999608,
+    "metadata": {
+      "source_items": 5,
+      "prefilled": [
+        "brass_nut",
+        "bag_gasket"
+      ],
+      "sequence": [
+        "bag_oring",
+        "bearing"
+      ]
+    }
+  }
+]

@@ -40,6 +40,7 @@ class ScriptedPickPlace(Policy):
     ):
         self.descend_slow_zone = descend_slow_zone
         self.descend_min_speed = descend_min_speed
+        self.yaw_scorer = None  # optional callable(obj_pos, yaw) -> clearance score (higher is better)
         self.transport_gain = transport_gain
         self.min_speed = min_speed
         self.preshape_margin = preshape_margin  # None = approach fully open; else opening = object width + margin
@@ -112,7 +113,12 @@ class ScriptedPickPlace(Policy):
             cur_yaw = np.arctan2(R_cur[1, 0], R_cur[0, 0])
             period = float(priv.get("object_yaw_period", np.pi / 2))
             cands = [obj_yaw + k * period for k in range(-2, 3)]
-            self.grasp_yaw = min(cands, key=lambda y: abs(np.angle(np.exp(1j * (y - cur_yaw)))))
+            cands = [y for y in cands if abs(np.angle(np.exp(1j * (y - cur_yaw)))) <= np.pi / 2 + 1e-6] or cands
+            if self.yaw_scorer is not None:
+                # clutter / bins: prefer the grasp yaw whose pads stay clear of walls and neighbours
+                self.grasp_yaw = max(cands, key=lambda y: (round(self.yaw_scorer(obj, y), 3), -abs(np.angle(np.exp(1j * (y - cur_yaw))))))
+            else:
+                self.grasp_yaw = min(cands, key=lambda y: abs(np.angle(np.exp(1j * (y - cur_yaw)))))
             self.grasp_target = obj.copy()
         ph = self.phase
         g_open = 0.0
@@ -226,14 +232,22 @@ class ScriptedPickPlace(Policy):
             return a
         if ph == "release":
             self.wait += 1
-            a = self._move(tcp, tcp, 0.0, None, R_cur)
+            g_rel = 0.0
+            if self.preshape_margin is not None and priv.get("object_width") is not None:
+                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.preshape_margin)
+                g_rel = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
+            a = self._move(tcp, tcp, g_rel, None, R_cur)
             if self.wait >= 3:
                 self.wait = 0
                 self._next("retreat")
             return a
         if ph == "retreat":
             tgt = np.array([tray[0], tray[1], tray[2] + self.place_height + 0.06])
-            a = self._move(tcp, tgt, 0.0, None, R_cur)
+            g_rel = 0.0
+            if self.preshape_margin is not None and priv.get("object_width") is not None:
+                opening = min(self.gripper_max_opening, float(priv["object_width"]) + 2 * self.preshape_margin)
+                g_rel = float(np.clip(1.0 - opening / self.gripper_max_opening, 0.0, 0.8))
+            a = self._move(tcp, tgt, g_rel, None, R_cur)
             if abs(tgt[2] - tcp[2]) < 0.006:
                 self._next("done")
                 self._done = True
