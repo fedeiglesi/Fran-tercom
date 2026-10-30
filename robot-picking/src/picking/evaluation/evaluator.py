@@ -71,7 +71,9 @@ class EpisodeEvaluator:
 
     def place_success(self, final_in_tray: bool, final_gripper: float, obj_vel: np.ndarray, pads: int) -> bool:
         stable = float(np.linalg.norm(obj_vel[:3])) < 0.02
-        released = pads == 0 and final_gripper < 0.5
+        # released = gripper open and the object not pinched by BOTH pads (a single open pad brushing a part that
+        # already rests in the container, e.g. during the retreat, is not a failed placement)
+        released = pads != 3 and final_gripper < 0.5
         return bool(final_in_tray and stable and released)
 
     def result(

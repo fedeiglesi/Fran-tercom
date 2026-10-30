@@ -40,9 +40,9 @@ class ScriptedPickPlace(Policy):
         grasp_depth_frac: float = 0.0,
         descend_tol_frac: float = 0.3,
         descend_max_speed: float = 1.0,
-        release_margin: float = 0.004,
+        release_margin: float = 0.008,
     ):
-        self.release_margin = release_margin  # opening at release = width + 2 * this (just enough to let go: bins are tight)
+        self.release_margin = release_margin  # opening at release = width + 2 * this (4 mm wedged square parts between the pads; 8 mm = full open for parts >= 29 mm)
         self.descend_max_speed = descend_max_speed  # cap on the vertical descend speed (a fast descent drifts in xy)
         # grasp height = object centre + grasp_height_offset - grasp_depth_frac * object height: closing BELOW the
         # centre (equator) of rounded parts (rings, plugs) keeps them from being squeezed out from under the pads

@@ -246,6 +246,7 @@ def run_episode(
             "policy_info": policy.info(),
             "final_tcp": final_state.tcp.position.tolist(),
             "final_object_pos": env.object_pose(target)[:3, 3].tolist(),
+            "place": {"in_tray": bool(env.object_in_tray(target)), "stable": bool(np.linalg.norm(env.object_velocity(target)[:3]) < 0.02), "released": bool(final_state.gripper < 0.5), "pads_on_object": int(evaluator.steps[-1].pads_on_object) if evaluator.steps else 0},
             "distractors": other_objs,
             "distractor_displacement_m": {o: float(np.linalg.norm(env.object_pose(o)[:3, 3] - other_init[o])) for o in other_objs},
         },

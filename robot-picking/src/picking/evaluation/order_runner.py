@@ -76,7 +76,7 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
             labels = r.metadata.get("policy_info", {}).get("sku_labels", [])
             moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
             wrong_pick = (not r.success) and r.failure_type == "WRONG_OBJECT"
-            items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "collision_detail": r.metadata.get("collision_detail", ""), "sku_labels": labels[:6]})
+            items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "collision_detail": r.metadata.get("collision_detail", ""), "sku_labels": labels[:6], "final_object_pos": r.metadata.get("final_object_pos"), "place": r.metadata.get("place")})
             collision |= r.collision
             wrong += int(wrong_pick)
             if r.collision and recover_after_collision:

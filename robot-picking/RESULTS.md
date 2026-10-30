@@ -59,21 +59,32 @@ pasos por fase; el ACT de baja dimensión (87 % nominal) cae a 0 % con servos im
 
 ## 1c. Nivel 7 — preparación de pedidos (objetivo final, en construcción)
 
-Escenario (`configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): caja origen con 3 ítems de
-SKUs mezclados (en caja, en bolsa, sueltos), caja de pedido con 1 producto previo, pedido de 2 SKUs; identificador
-de SKU = oráculo con ruido de 2 mm (placeholder del detector aprendido). 50 pedidos holdout (E059):
+Escenario (`configs/sim/level7a_orders_sparse.yaml`, `scripts/evaluate_orders.py`): caja origen (14×12 cm, la
+mayor que alcanza Beto) con 3 ítems de SKUs mezclados (en caja, en bolsa, sueltos), caja de pedido (11×10 cm) con
+1 producto previo, pedido de 2 SKUs; identificador de SKU = oráculo con ruido de 2 mm (placeholder del detector
+aprendido). **400 pedidos holdout** (seeds 100100–100499, E067):
 
 | Métrica | Valor |
 |---|---|
-| Pedidos completos (todos los ítems, previos intactos, sin colisión) | 66 % (E063; 26 % en la primera versión) |
-| Ítems colocados | 74.5 % (cajas 80 %, bolsas 87 %, sueltos 71 %) |
-| SKU equivocado | 0–2 % de los pedidos |
+| Pedidos completos (todos los ítems, previos intactos, sin colisión) | **89.3 %** (16 % en la primera versión E058; 58 % en E063) |
+| Ítems colocados | 92.3 % (sueltos 92 %, cajas 90 %, bolsas 97 %) |
+| SKU equivocado | 0 % de los pedidos |
 | Productos previos perturbados | 0 % |
-| Colisiones (pad-pared/piso > 5 N) | 24 % |
+| Colisiones (pad-pared/piso > 5 N) | 7.5–8 % de los pedidos |
+| Peores SKUs | pastilla de freno (SLIP al cerrar sobre el borde), caja de cables 40×40 (encaje al soltar) |
 
-Limitaciones del modelado que condicionan estas cifras: bolsas rígidas (no deformables), rulemán aproximado por
-cápsulas, caja origen pequeña por el alcance de Beto (28 cm), ausencia de estrategia de re-agarre o empuje de
-vecinos. Es el escenario donde se concentra el trabajo siguiente.
+Qué hizo la diferencia (E058 → E067, ver EXPERIMENTS.md): anchos y huellas reales por SKU; base de datos de
+agarre por SKU (ancho, profundidad de pinzado bajo el ecuador para piezas redondas); generador de escenas
+físicamente consistente (nunca superponer piezas: la física las empujaba contra la pared y quedaban sin agarre);
+ranuras de colocación alejadas de las paredes según la apertura del gripper; yaw de agarre y apertura
+pre-conformada por holgura a paredes y vecinos; descenso a velocidad acotada (la deriva xy del descenso rápido
+hacía aterrizar una almohadilla sobre la pieza); recuperación (subir) tras colisión; criterio de colocación que
+tolera un roce al retirar. Trazas reproducibles por pedido con pares de contacto (`run_order(step_callback=...)`).
+
+Limitaciones del modelado que condicionan estas cifras: bolsas rígidas (bultos planos), rulemán aproximado por
+cápsulas, caja origen pequeña por el alcance de Beto (28 cm; en el 13 % de las escenas sólo entran 2 ítems),
+ausencia de estrategia de empuje para piezas pegadas a una pared. Regresiones obligatorias que se mantienen:
+nivel 1 y 2 nominales 100 %, con servos imperfectos 95 % / 88 %.
 
 ## 2. Robot real (myCobot 280 + OAK-D)
 
