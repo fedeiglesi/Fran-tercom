@@ -65,11 +65,11 @@ de SKU = oráculo con ruido de 2 mm (placeholder del detector aprendido). 50 ped
 
 | Métrica | Valor |
 |---|---|
-| Pedidos completos (todos los ítems, previos intactos, sin colisión) | 26 % |
-| Ítems colocados | 44.6 % (cajas 61 %, sueltos 42 %, bolsas 38 %) |
-| SKU equivocado | 2 % de los pedidos |
+| Pedidos completos (todos los ítems, previos intactos, sin colisión) | 66 % (E063; 26 % en la primera versión) |
+| Ítems colocados | 74.5 % (cajas 80 %, bolsas 87 %, sueltos 71 %) |
+| SKU equivocado | 0–2 % de los pedidos |
 | Productos previos perturbados | 0 % |
-| Colisiones (pad-pared/piso > 5 N) | 22 % |
+| Colisiones (pad-pared/piso > 5 N) | 24 % |
 
 Limitaciones del modelado que condicionan estas cifras: bolsas rígidas (no deformables), rulemán aproximado por
 cápsulas, caja origen pequeña por el alcance de Beto (28 cm), ausencia de estrategia de re-agarre o empuje de
