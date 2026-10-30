@@ -67,6 +67,7 @@ def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_fra
 
     sequence = sorted(env.order, key=lambda o: -clearance(o))  # most accessible first
     for k, oid in enumerate(sequence):
+        env.current_target = oid  # free_slot ignores the current target: it must be THIS item, not the previous one
         env.place_slot = env.free_slot(dst)[:2]
         spec = env.object_specs[oid]
         attempt = 0

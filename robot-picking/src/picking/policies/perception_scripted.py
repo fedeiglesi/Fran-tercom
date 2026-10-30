@@ -107,49 +107,49 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         return super().act(obs)
 
     def _install_yaw_scorer(self, obs: Observation, labelled) -> None:
-        """Score a grasp yaw by the clearance of the two pads (at +-(width/2 + margin) along the closing axis)
-        from the source-bin walls and from the other detected objects."""
+        """One geometric model for the grasp yaw choice and the pre-shaped opening: the two pads are 8 mm thick
+        boxes, 16 mm wide, at +-(opening/2 .. opening/2 + 8 mm) along the closing axis. `clearance(obj, yaw,
+        opening)` = the smallest distance of any pad corner to the bin walls (inside) and to the other detected
+        objects (minus 18 mm). The yaw scorer rates each candidate at the MINIMUM opening (width + 2 mm); the
+        limiter then opens as far as a 5 mm clearance allows."""
         c, hs = obs.extra["source_bin_footprint"]
         others = [d.position_base[:2] for d, _ in labelled]
-        pad_half_w = 0.008  # pad half width (along the closing axis footprint) incl. thickness
         margin = (self.preshape_margin or 0.012)
-
-        def scorer(obj, yaw):
-            width = float(self.detection.width_m or 0.025) if self.detection is not None else 0.025
-            r = width / 2 + margin + pad_half_w
-            ax = np.array([np.cos(yaw), np.sin(yaw)])
-            score = 1.0
-            for sgn in (-1, 1):
-                pad = np.asarray(obj[:2]) + sgn * r * ax
-                wall = min(hs[0] - abs(pad[0] - c[0]), hs[1] - abs(pad[1] - c[1]))  # distance to the nearest wall
-                neigh = min([np.linalg.norm(pad - q) - 0.015 for q in others if np.linalg.norm(q - obj[:2]) > 0.005], default=1.0)
-                score = min(score, wall, neigh)
-            return float(score)
-
-        self.yaw_scorer = scorer
 
         def pad_corners(obj, yaw, opening, sgn):
             ax = np.array([np.cos(yaw), np.sin(yaw)]); perp = np.array([-ax[1], ax[0]])
             r_in, r_out = opening / 2, opening / 2 + 0.008  # pad thickness 8 mm, half width 8 mm
             return [np.asarray(obj[:2]) + sgn * r * ax + e * 0.008 * perp for r in (r_in, r_out) for e in (-1, 1)]
 
-        def feasible(obj, yaw, opening):
+        def clearance(obj, yaw, opening):
+            worst = 1.0
             for sgn in (-1, 1):
                 for q in pad_corners(obj, yaw, opening, sgn):
-                    if abs(q[0] - c[0]) > hs[0] - 0.005 or abs(q[1] - c[1]) > hs[1] - 0.005:  # 5 mm: xy drift of the descent
-                        return False
-                    if any(np.linalg.norm(q - o) < 0.018 for o in others if np.linalg.norm(o - obj[:2]) > 0.005):
-                        return False
-            return True
+                    worst = min(worst, hs[0] - abs(q[0] - c[0]), hs[1] - abs(q[1] - c[1]))
+                    for o in others:
+                        if np.linalg.norm(o - obj[:2]) > 0.005:
+                            worst = min(worst, float(np.linalg.norm(q - o)) - 0.018)
+            return float(worst)
+
+        def width_of():
+            return float(self.detection.width_m or 0.025) if self.detection is not None else 0.025
+
+        def scorer(obj, yaw):
+            # prefer a yaw whose FULL pre-shaped opening is clear; otherwise rank by the clearance of the tightest
+            # opening (penalised, so any yaw that fits comfortably wins)
+            w = width_of()
+            full = clearance(obj, yaw, min(self.gripper_max_opening, w + margin))
+            return full if full >= 0.005 else clearance(obj, yaw, w + 0.002) - 0.1
 
         def limiter(obj, yaw, width):
             # largest opening (1 mm steps) whose pads stay 5 mm clear of the walls and 18 mm from neighbour centres
             best = width + 0.002
             for opening in np.arange(width + 0.002, min(self.gripper_max_opening, width + margin) + 1e-9, 0.001):
-                if feasible(obj, yaw, opening):
+                if clearance(obj, yaw, opening) >= 0.005:
                     best = opening
             return float(best)
 
+        self.yaw_scorer = scorer
         self.opening_limiter = limiter if getattr(self, "use_opening_limiter", True) else None
 
     def _still_holding(self, obs: Observation) -> bool:

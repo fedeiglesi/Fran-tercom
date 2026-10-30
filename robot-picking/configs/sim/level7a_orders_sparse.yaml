@@ -111,6 +111,8 @@ scene:
       - 0.003
     packaging: loose
     sku: BRAKE_PAD
+    grasp_yaw_offset: 1.5708  # close across the 32 mm side (parts are long along their x axis)
+    yaw_period: 3.14159  # 44x32 mm: only the short side fits across the pads
     footprint_radius: 0.027  # circumscribed footprint for placement
     grasp_width: 0.032
   - id: bearing
