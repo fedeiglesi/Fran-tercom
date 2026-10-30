@@ -126,6 +126,7 @@ class ScriptedPickPlace(Policy):
         depth_frac = priv.get("object_grasp_depth")  # per-SKU override (rounded parts are pinched below their equator)
         depth_frac = self.grasp_depth_frac if depth_frac is None else float(depth_frac)
         grasp_z = obj[2] + self.grasp_offset - depth_frac * obj_h
+        grasp_z = max(grasp_z, obj[2] - 0.5 * obj_h + 0.003)  # pad tips never below 3 mm above the part's bottom (floor)
         # choose grasp yaw closest to current gripper yaw (cube symmetric every 90 deg)
         if self.grasp_target is None:
             cur_yaw = np.arctan2(R_cur[1, 0], R_cur[0, 0])
