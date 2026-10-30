@@ -480,7 +480,8 @@ class PickPlaceEnv:
         c = self.bin_center(self.dest_bin_id)
         hs = self.tray_inner_halfsize()
         inside_xy = np.all(np.abs(p[:2] - c[:2]) <= hs - margin)
-        z_ok = (p[2] - self.object_half_extent_z(oid)) < c[2] + 0.02 and p[2] > c[2] - 0.01
+        # resting on the floor OR on top of other products already in the container (order bins stack items)
+        z_ok = (p[2] - self.object_half_extent_z(oid)) < c[2] + 0.05 and p[2] > c[2] - 0.01
         return bool(inside_xy and z_ok)
 
     def camera_pose(self) -> np.ndarray:
