@@ -153,7 +153,8 @@ def detect_by_height(
     workspace_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
     stride: int = 2,
     min_pixels: int = 15,
-) -> ObjectDetection | None:
+    return_all: bool = False,
+) -> ObjectDetection | None | list:
     """Colour-agnostic localisation: everything that rises above the table plane inside the workspace is an
     object candidate (works for black / untextured parts as long as depth is valid). Returns the largest blob
     not inside the excluded (tray) footprint. Same output type as detect_colored_object."""
@@ -176,6 +177,7 @@ def detect_by_height(
     mask = np.zeros((h // stride + 1, w // stride + 1), np.uint8)
     mask[(ys[ok][above] // stride), (xs[ok][above] // stride)] = 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    results: list[ObjectDetection] = []
     for blob, cent in blobs_by_size(mask, min_pixels=max(3, min_pixels // (stride * stride))):
         by, bx = np.nonzero(blob)
         sel_idx = np.zeros(len(pts), bool)
@@ -208,5 +210,10 @@ def detect_by_height(
             yaw = float(np.angle(np.exp(1j * yaw)))
             period = np.pi / 2 if min(w_r, h_r) / max(w_r, h_r, 1e-6) > 0.8 else np.pi
             width_m = float(min(w_r, h_r)) / 1000.0
-        return ObjectDetection(object_id, np.asarray(cent, float) * stride, centre, top_pt, yaw, float(height), int(len(top)), 1.0, period, width_m)
+        det = ObjectDetection(object_id, np.asarray(cent, float) * stride, centre, top_pt, yaw, float(height), int(len(top)), 1.0, period, width_m)
+        if not return_all:
+            return det
+        results.append(det)
+    if return_all:
+        return results
     return None

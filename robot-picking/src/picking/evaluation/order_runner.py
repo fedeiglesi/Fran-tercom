@@ -1,0 +1,60 @@
+"""Level 7: fulfil an ORDER = sequence of SKUs picked from the source bin into the order bin (which already
+holds other products). One env reset per order; one pick-place cycle per item with the same policy."""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from picking.evaluation.runner import run_episode
+
+
+@dataclass
+class OrderResult:
+    order_id: str
+    seed: int
+    skus: list[str]
+    items: list[dict]
+    success: bool  # every item placed, nothing else disturbed, no collision
+    n_ok: int
+    wrong_sku: int
+    prefilled_disturbed: bool
+    collision: bool
+    cycle_time_s: float
+    metadata: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return self.__dict__
+
+
+def run_order(env, adapter, policy, safety, seed: int, image_size=None, full_frame: bool = True, max_retries_per_item: int = 1) -> OrderResult:
+    env.reset(seed=seed)
+    adapter.reset_targets()
+    src, dst = env.order_task["source_bin"], env.order_task["order_bin"]
+    prefilled = list(env.objects_in_bin(dst))
+    pre_pos = {o: env.object_pose(o)[:3, 3].copy() for o in prefilled}
+    items = []
+    t0 = env.sim_time()
+    collision = False
+    wrong = 0
+    for k, oid in enumerate(env.order):
+        env.place_slot = env.free_slot(dst)[:2]
+        spec = env.object_specs[oid]
+        attempt = 0
+        while True:
+            r = run_episode(env, adapter, policy, safety, seed=seed * 100 + k, image_size=image_size, full_frame=full_frame, env_reset=False, target_override=oid, episode_id=f"order{seed}_item{k}_{oid}")
+            labels = r.metadata.get("policy_info", {}).get("sku_labels", [])
+            moved_other = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
+            wrong_pick = (not r.success) and r.failure_type == "WRONG_OBJECT"
+            items.append({"sku": spec.get("sku", oid), "object": oid, "packaging": spec.get("packaging", "loose"), "attempt": attempt, "success": r.success, "failure_type": r.failure_type, "steps": r.n_steps, "collision": r.collision, "sku_labels": labels[:6]})
+            collision |= r.collision
+            wrong += int(wrong_pick)
+            if r.success or r.collision or attempt >= max_retries_per_item:
+                break
+            attempt += 1
+    disturbed = any(np.linalg.norm(env.object_pose(o)[:3, 3] - pre_pos[o]) > 0.02 for o in prefilled)
+    placed_ok = [it["success"] for it in items]
+    n_ok = sum(1 for oid in env.order if any(it["object"] == oid and it["success"] for it in items))
+    success = n_ok == len(env.order) and not disturbed and not collision
+    return OrderResult(f"order_{seed}", seed, [env.object_specs[o].get("sku", o) for o in env.order], items, success, n_ok, wrong, disturbed, collision, env.sim_time() - t0, {"source_items": env.order_task["n_source_items"], "prefilled": prefilled})

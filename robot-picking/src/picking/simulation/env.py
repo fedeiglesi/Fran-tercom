@@ -97,6 +97,15 @@ class PickPlaceEnv:
         self.geom_table = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "table")
         self.geom_floor = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self.geom_tray = {mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n) for n in ["tray_floor", "tray_w0", "tray_w1", "tray_w2", "tray_w3"]}
+        self.bins = {b["id"]: b for b in cfg["scene"].get("bins", [])}
+        for bid in self.bins:
+            for suffix in ("_floor", "_w0", "_w1", "_w2", "_w3"):
+                self.geom_tray.add(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, bid + suffix))  # walls count as "tray" for collisions
+        self.bin_site = {bid: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, bid + "_center") for bid in self.bins}
+        self.dest_bin_id = "tray"  # where the current item must be placed (tray or a bin id)
+        self.place_slot = None  # explicit place position (x, y) inside the destination, if chosen
+        self.order: list[str] = []  # level 7: SKUs to pick in sequence
+        self.order_task = cfg["scene"].get("order_task")
         self.geom_pads = {mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, n): n for n in ["pad_left", "pad_right"]}
         self.geom_gripper_body = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "gripper_col")
         self.geom_robot = set()
@@ -144,7 +153,10 @@ class PickPlaceEnv:
         self.episode_rand = sample_randomization(self.cfg, self.rng, enabled)
         er = self.episode_rand
         n_present = int(self.cfg["scene"].get("objects_per_episode", 1))
-        if self.one_object or n_present > 1:
+        self.place_slot = None
+        if self.order_task:
+            self._reset_order_task(er)
+        elif self.one_object or n_present > 1:
             # choose the episode's target (+ distractors with distinct colours); park the others out of sight
             fixed = self.cfg["task"].get("target_object", "random")
             self.current_target = fixed if fixed in self.object_ids else self.object_ids[int(self.rng.integers(len(self.object_ids)))]
@@ -230,6 +242,42 @@ class PickPlaceEnv:
         self.sim_time_at_reset = self.data.time
 
     # ------------------------------------------------------------------ control
+    def _reset_order_task(self, er) -> None:
+        """Level 7: fill the source bin with order items + distractors, pre-fill the order bin, define the order."""
+        ot = self.order_task
+        src, dst = ot["source_bin"], ot["order_bin"]
+        self.dest_bin_id = dst
+        n_src, n_pre, n_order = int(ot.get("n_source_items", 5)), int(ot.get("n_prefilled", 2)), int(ot.get("order_size", 2))
+        ids = list(self.object_ids)
+        self.rng.shuffle(ids)
+        order = ids[:n_order]
+        distractors = ids[n_order:n_src]
+        prefilled = ids[n_src : n_src + n_pre]
+        self.order = order
+        self.current_target = order[0]
+        self.present_objects = order + distractors + prefilled
+
+        def place(bid, objs):
+            c, hs = self.bin_center_nominal(bid), self.bin_inner_halfsize(bid)
+            placed = []
+            for o in objs:
+                spec = self.object_specs[o]
+                r = 0.03 if spec["type"] == "compound" else float(max(spec["size"][:2]))
+                pos = c[:2].copy()
+                for _ in range(300):
+                    pos = np.array([self.rng.uniform(c[0] - hs[0] + r + 0.008, c[0] + hs[0] - r - 0.008), self.rng.uniform(c[1] - hs[1] + r + 0.008, c[1] + hs[1] - r - 0.008)])
+                    if all(np.linalg.norm(pos - q) >= r + rq + 0.012 for q, rq in placed):
+                        break
+                placed.append((pos, r))
+                er.objects[o]["position"][:2] = pos
+                er.objects[o]["position"][2] = float(er.objects[o]["position"][2]) + 0.004  # on the bin floor
+
+        place(src, order + distractors)
+        place(dst, prefilled)
+        for k, oid in enumerate(self.object_ids):
+            if oid not in self.present_objects:
+                er.objects[oid]["position"] = self.parking + np.array([0.0, 0.05 * k - 0.3, 0.0])
+
     def set_joint_targets(self, q: np.ndarray, gripper: float | None = None) -> None:
         q = np.asarray(q, dtype=np.float64).copy()
         if self._backlash is not None:
@@ -360,22 +408,63 @@ class PickPlaceEnv:
             return t["instruction_template"].format(name=self.target_spec().get("name", self.current_target))
         return t["instruction"]
 
-    def tray_center(self) -> np.ndarray:
-        return self.data.site_xpos[self.tray_site].copy()
+    def bin_center(self, bid: str) -> np.ndarray:
+        if bid == "tray":
+            return self.data.site_xpos[self.tray_site].copy()
+        return self.data.site_xpos[self.bin_site[bid]].copy()
 
-    def tray_footprint(self) -> tuple[np.ndarray, np.ndarray]:
-        """(centre xy, half-size xy incl. walls) in the base frame, for perception masking."""
-        c = self.tray_center()
-        wt = self.cfg["scene"]["tray"]["wall_thickness"]
-        return c[:2].copy(), self.tray_inner_halfsize() + wt
+    def bin_center_nominal(self, bid: str) -> np.ndarray:
+        spec = self.cfg["scene"]["tray"] if bid == "tray" else self.bins[bid]
+        return np.asarray(spec["position"], float)
 
-    def tray_inner_halfsize(self) -> np.ndarray:
-        iw, ih = self.cfg["scene"]["tray"]["inner_size"]
+    def bin_inner_halfsize(self, bid: str) -> np.ndarray:
+        spec = self.cfg["scene"]["tray"] if bid == "tray" else self.bins[bid]
+        iw, ih = spec["inner_size"]
         return np.array([iw / 2, ih / 2])
 
+    def bin_footprint(self, bid: str) -> tuple[np.ndarray, np.ndarray]:
+        spec = self.cfg["scene"]["tray"] if bid == "tray" else self.bins[bid]
+        return self.bin_center(bid)[:2].copy(), self.bin_inner_halfsize(bid) + spec.get("wall_thickness", 0.004)
+
+    def objects_in_bin(self, bid: str) -> list[str]:
+        c, hs = self.bin_center(bid), self.bin_inner_halfsize(bid)
+        out = []
+        for o in getattr(self, "present_objects", self.object_ids):
+            p = self.object_pose(o)[:3, 3]
+            if np.all(np.abs(p[:2] - c[:2]) <= hs) and p[2] < c[2] + 0.08:
+                out.append(o)
+        return out
+
+    def free_slot(self, bid: str, grid: int = 2) -> np.ndarray:
+        """Place position inside `bid`: the grid cell farthest from the objects already inside."""
+        c, hs = self.bin_center(bid), self.bin_inner_halfsize(bid)
+        occupied = [self.object_pose(o)[:3, 3][:2] for o in self.objects_in_bin(bid) if o != self.current_target]
+        best, best_d = c[:2].copy(), -1.0
+        for i in range(grid):
+            for j in range(grid):
+                cell = c[:2] + np.array([-hs[0] + hs[0] * (2 * i + 1) / grid, -hs[1] + hs[1] * (2 * j + 1) / grid])
+                d = min([np.linalg.norm(cell - q) for q in occupied], default=1.0)
+                if d > best_d:
+                    best, best_d = cell, d
+        return np.array([best[0], best[1], c[2]])
+
+    def tray_center(self) -> np.ndarray:
+        """Centre of the CURRENT destination (tray or order bin), or the explicit place slot if one was chosen."""
+        if self.place_slot is not None:
+            return np.array([self.place_slot[0], self.place_slot[1], self.bin_center(self.dest_bin_id)[2]])
+        return self.bin_center(self.dest_bin_id)
+
+    def tray_footprint(self) -> tuple[np.ndarray, np.ndarray]:
+        """(centre xy, half-size xy incl. walls) of the current destination, for perception masking."""
+        return self.bin_footprint(self.dest_bin_id)
+
+    def tray_inner_halfsize(self) -> np.ndarray:
+        return self.bin_inner_halfsize(self.dest_bin_id)
+
     def object_in_tray(self, oid: str, margin: float = 0.0) -> bool:
+        """Object rests inside the CURRENT destination container (tray or order bin)."""
         p = self.object_pose(oid)[:3, 3]
-        c = self.tray_center()
+        c = self.bin_center(self.dest_bin_id)
         hs = self.tray_inner_halfsize()
         inside_xy = np.all(np.abs(p[:2] - c[:2]) <= hs - margin)
         z_ok = (p[2] - self.object_half_extent_z(oid)) < c[2] + 0.02 and p[2] > c[2] - 0.01

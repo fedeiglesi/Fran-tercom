@@ -1,0 +1,581 @@
+name: level7_orders
+sim:
+  timestep: 0.002
+  control_hz: 10
+  max_steps: 200
+  gl_backend: auto
+robot:
+  name: mycobot_280_m5
+  tcp_offset:
+  - 0.0
+  - 0.0
+  - 0.065
+  home_joints_deg:
+  - 21.0
+  - 0.2
+  - -96.8
+  - 6.7
+  - 0.0
+  - -69.0
+  gripper_max_opening: 0.045
+  gripper_pad_friction: 2.0
+  actuator_kp: 100.0
+  gravity_compensation: true
+  joint_damping: 1.5
+camera:
+  name: oakd_sim
+  width: 640
+  height: 480
+  fovy_deg: 55.0
+  position:
+  - 0.52
+  - 0.0
+  - 0.4
+  lookat:
+  - 0.18
+  - 0.0
+  - 0.02
+  policy_crop:
+  - 96
+  - 60
+  - 544
+  - 420
+  policy_image_size:
+  - 128
+  - 128
+scene:
+  table_size:
+  - 0.5
+  - 0.5
+  - 0.02
+  table_color:
+  - 0.85
+  - 0.85
+  - 0.82
+  - 1
+  one_object_per_episode: false
+  parking_position:
+  - -0.35
+  - 0.0
+  - 0.05
+  tray:
+    position:
+    - 0.14
+    - -0.14
+    - 0.0
+    inner_size:
+    - 0.08
+    - 0.08
+    wall_height: 0.015
+    wall_thickness: 0.004
+    color:
+    - 0.2
+    - 0.3
+    - 0.8
+    - 1
+  objects:
+  - id: brake_pad
+    name: brake pad
+    color_name: dark
+    type: compound
+    half_height: 0.007
+    mass: 0.06
+    color: &id002
+    - 0.12
+    - 0.12
+    - 0.13
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.0072
+    friction: 0.9
+    parts:
+    - type: box
+      size:
+      - 0.022
+      - 0.016
+      - 0.003
+      pos:
+      - 0
+      - 0
+      - -0.004
+    - type: box
+      size:
+      - 0.02
+      - 0.014
+      - 0.004
+      pos:
+      - 0
+      - 0
+      - 0.003
+    packaging: loose
+    sku: BRAKE_PAD
+  - id: bearing
+    name: bearing
+    color_name: metal
+    type: compound
+    half_height: 0.005
+    mass: 0.04
+    color: &id001
+    - 0.55
+    - 0.56
+    - 0.58
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.0052
+    friction: 0.6
+    parts:
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - 0.013
+      - 0.0
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 1.5708
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - 0.009192371272646072
+      - 0.009192405038173156
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 2.3562
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - -4.775166634350546e-08
+      - 0.012999999999912299
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 3.1416
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - -0.009192438803576211
+      - 0.00919233750699496
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 3.9269999999999996
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - -0.012999999999649197
+      - -9.550333268636663e-08
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 4.7124
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - -0.009192303741219819
+      - -0.00919247256885524
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 5.4978
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - 1.4325499902505263e-07
+      - -0.012999999999210692
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 6.2832
+    - type: capsule
+      size:
+      - 0.005
+      - 0.006
+      pos:
+      - 0.00919250633401024
+      - -0.009192269975320657
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 7.0686
+    packaging: loose
+    sku: BEARING
+  - id: spark_plug
+    name: spark plug
+    color_name: metal
+    type: compound
+    half_height: 0.008
+    mass: 0.05
+    color: *id001
+    position:
+    - 0.18
+    - 0.09
+    - 0.0082
+    friction: 0.7
+    parts:
+    - type: cylinder
+      size:
+      - 0.006
+      - 0.018
+      pos:
+      - -0.012
+      - 0
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 0
+    - type: box
+      size:
+      - 0.008
+      - 0.008
+      - 0.008
+      pos:
+      - 0.012
+      - 0
+      - 0
+    - type: cylinder
+      size:
+      - 0.005
+      - 0.01
+      pos:
+      - 0.03
+      - 0
+      - 0
+      euler:
+      - 0
+      - 1.5708
+      - 0
+    grasp_yaw_offset: 1.5708
+    yaw_period: 3.14159
+    packaging: loose
+    sku: SPARK_PLUG
+  - id: relay
+    name: relay
+    color_name: dark
+    type: compound
+    half_height: 0.012
+    mass: 0.03
+    color: *id002
+    position:
+    - 0.18
+    - 0.09
+    - 0.0122
+    friction: 1.0
+    parts:
+    - type: box
+      size:
+      - 0.013
+      - 0.013
+      - 0.012
+      pos:
+      - 0
+      - 0
+      - 0
+    - type: box
+      size:
+      - 0.015
+      - 0.015
+      - 0.002
+      pos:
+      - 0
+      - 0
+      - -0.01
+    packaging: loose
+    sku: RELAY
+  - id: gear
+    name: gear
+    color_name: metal
+    type: compound
+    half_height: 0.006
+    mass: 0.06
+    color: *id001
+    position:
+    - 0.18
+    - 0.09
+    - 0.0062
+    friction: 0.6
+    parts:
+    - type: cylinder
+      size:
+      - 0.018
+      - 0.003
+      pos:
+      - 0
+      - 0
+      - -0.003
+    - type: cylinder
+      size:
+      - 0.008
+      - 0.006
+      pos:
+      - 0
+      - 0
+      - 0
+    packaging: loose
+    sku: GEAR
+  - id: grommet
+    name: rubber grommet
+    color_name: dark
+    type: cylinder
+    size:
+    - 0.012
+    - 0.006
+    mass: 0.02
+    color:
+    - 0.08
+    - 0.08
+    - 0.08
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.006
+    friction: 1.3
+    packaging: loose
+    sku: GROMMET
+  - id: brass_nut
+    name: brass nut
+    color_name: brass
+    type: box
+    size:
+    - 0.009
+    - 0.009
+    - 0.007
+    mass: 0.03
+    color:
+    - 0.7
+    - 0.6
+    - 0.3
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.007
+    friction: 0.7
+    packaging: loose
+    sku: BRASS_NUT
+  - id: red_cap
+    name: red plastic cap
+    color_name: red
+    type: cylinder
+    size:
+    - 0.011
+    - 0.009
+    mass: 0.015
+    color:
+    - 0.8
+    - 0.1
+    - 0.1
+    - 1
+    position:
+    - 0.18
+    - 0.09
+    - 0.009
+    friction: 1.0
+    packaging: loose
+    sku: RED_CAP
+  - id: box_filter
+    name: oil filter box
+    sku: BX-1001
+    packaging: box
+    color_name: cardboard
+    type: box
+    size:
+    - 0.022
+    - 0.016
+    - 0.014
+    mass: 0.06
+    color: &id003
+    - 0.78
+    - 0.62
+    - 0.42
+    - 1
+    position:
+    - 0.2
+    - 0.1
+    - 0.014
+    friction: 0.9
+  - id: box_bulb
+    name: headlight bulb box
+    sku: BX-1002
+    packaging: box
+    color_name: cardboard
+    type: box
+    size:
+    - 0.018
+    - 0.012
+    - 0.012
+    mass: 0.03
+    color:
+    - 0.85
+    - 0.8
+    - 0.7
+    - 1
+    position:
+    - 0.2
+    - 0.1
+    - 0.012
+    friction: 0.9
+  - id: box_cable
+    name: cable box
+    sku: BX-1003
+    packaging: box
+    color_name: cardboard
+    type: box
+    size:
+    - 0.02
+    - 0.02
+    - 0.009
+    mass: 0.05
+    color: *id003
+    position:
+    - 0.2
+    - 0.1
+    - 0.009
+    friction: 0.9
+  - id: bag_gasket
+    name: gasket bag
+    sku: BG-2001
+    packaging: bag
+    color_name: bag
+    type: ellipsoid
+    size:
+    - 0.022
+    - 0.016
+    - 0.006
+    mass: 0.02
+    color: &id004
+    - 0.9
+    - 0.9
+    - 0.92
+    - 1
+    position:
+    - 0.2
+    - 0.1
+    - 0.006
+    friction: 0.5
+  - id: bag_screws
+    name: screw bag
+    sku: BG-2002
+    packaging: bag
+    color_name: bag
+    type: ellipsoid
+    size:
+    - 0.016
+    - 0.013
+    - 0.008
+    mass: 0.04
+    color:
+    - 0.75
+    - 0.78
+    - 0.8
+    - 1
+    position:
+    - 0.2
+    - 0.1
+    - 0.008
+    friction: 0.5
+  - id: bag_oring
+    name: o-ring bag
+    sku: BG-2003
+    packaging: bag
+    color_name: bag
+    type: ellipsoid
+    size:
+    - 0.014
+    - 0.014
+    - 0.005
+    mass: 0.015
+    color: *id004
+    position:
+    - 0.2
+    - 0.1
+    - 0.005
+    friction: 0.5
+  bins:
+  - id: source_bin
+    position:
+    - 0.2
+    - 0.1
+    - 0.0
+    inner_size:
+    - 0.13
+    - 0.11
+    wall_height: 0.03
+    wall_thickness: 0.004
+    color:
+    - 0.55
+    - 0.4
+    - 0.28
+    - 1
+  - id: order_bin
+    position:
+    - 0.15
+    - -0.13
+    - 0.0
+    inner_size:
+    - 0.11
+    - 0.1
+    wall_height: 0.03
+    wall_thickness: 0.004
+    color:
+    - 0.35
+    - 0.3
+    - 0.25
+    - 1
+  order_task:
+    source_bin: source_bin
+    order_bin: order_bin
+    n_source_items: 5
+    n_prefilled: 2
+    order_size: 2
+task:
+  instruction_template: Pick the {name} and place it in the order bin.
+  instruction: Fulfil the order.
+  target_object: random
+  destination: order_bin
+  lift_height: 0.05
+randomization:
+  enabled: true
+  object_xy_range:
+  - 0.0
+  - 0.0
+  object_yaw_range_deg: 90.0
+  object_mass_range:
+  - 0.015
+  - 0.07
+  object_friction_range:
+  - 0.5
+  - 1.2
+  camera_pos_noise: 0.003
+  camera_rot_noise_deg: 0.5
+  light_noise: 0.3
+  color_noise: 0.03
+  table_color_noise: 0.08

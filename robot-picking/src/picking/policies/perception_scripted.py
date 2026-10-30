@@ -27,6 +27,9 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         self.camera = camera
         self.detector = detector  # "color" | "height" (colour-agnostic: anything above the table)
         self.height_stride = int(kw.pop("height_stride", 1))
+        self.sku_identifier = kw.pop("sku_identifier", None)
+        self.wanted_sku = None
+        self.last_labels = []
         self.color = color
         self.object_id = object_id
         self.known_height = known_height_m
@@ -42,6 +45,7 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         if task_info:
             self.color = task_info.get("color") or self.color
             self.object_id = task_info.get("target_object") or self.object_id
+            self.wanted_sku = task_info.get("sku")
         self.detection = None
         self.last_rgb = None
         self.n_detect_fail = 0
@@ -56,7 +60,16 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
         depth = obs.depth.get(self.camera)
         if depth is None:
             return False
-        if self.detector == "height":
+        if self.detector == "sku":
+            # order fulfilment: all blobs inside the source bin, labelled by the SKU identifier, pick the wanted SKU
+            src = obs.extra["source_bin_footprint"]
+            c, hs = src
+            dets = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, workspace_xy=((c[0] - hs[0], c[0] + hs[0]), (c[1] - hs[1], c[1] + hs[1])), stride=self.height_stride, return_all=True, max_height_m=0.055)
+            labelled = self.sku_identifier.label(dets, obs.extra["sku_true_positions"], obs.extra["sku_of_object"])
+            self.last_labels = [(l, d.position_base.round(3).tolist()) for d, l in labelled]
+            wanted = [d for d, l in labelled if l == self.wanted_sku]
+            det = wanted[0] if wanted else None
+        elif self.detector == "height":
             det = detect_by_height(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.object_id, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"), workspace_xy=((0.08, 0.30), (-0.22, 0.22)), stride=self.height_stride)
         else:
             det = detect_colored_object(rgb, depth, obs.extra["camera_intrinsics"], obs.extra["T_base_camera"], self.color, self.object_id, known_height_m=self.known_height, roi=self.roi, exclude_xy=obs.extra.get("tray_footprint"))
@@ -98,5 +111,5 @@ class PerceptionScriptedPickPlace(ScriptedPickPlace):
 
     def info(self) -> dict:
         d = super().info()
-        d.update({"n_detect_fail": self.n_detect_fail, "verdicts": self.verdicts[-5:], "last_detection": None if self.detection is None else {"pos": self.detection.position_base.tolist(), "yaw": self.detection.yaw, "n_px": self.detection.n_pixels}})
+        d.update({"n_detect_fail": self.n_detect_fail, "verdicts": self.verdicts[-5:], "last_detection": None if self.detection is None else {"pos": self.detection.position_base.tolist(), "yaw": self.detection.yaw, "n_px": self.detection.n_pixels}, "sku_labels": self.last_labels[:6]})
         return d

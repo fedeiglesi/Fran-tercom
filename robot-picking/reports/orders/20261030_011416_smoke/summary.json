@@ -1,0 +1,51 @@
+{
+  "n_orders": 10,
+  "order_success_rate": 0.0,
+  "item_success_rate": 0.0,
+  "item_failure_types": {
+    "NO_GRASP": 29,
+    "WRONG_OBJECT": 5,
+    "COLLISION": 1,
+    "SLIP": 4
+  },
+  "wrong_sku_rate": 0.4,
+  "prefilled_disturbed_rate": 0.1,
+  "collision_rate": 0.1,
+  "by_packaging": {
+    "loose": {
+      "n": 29,
+      "success_rate": 0.0
+    },
+    "box": {
+      "n": 8,
+      "success_rate": 0.0
+    },
+    "bag": {
+      "n": 2,
+      "success_rate": 0.0
+    }
+  },
+  "by_sku": {
+    "BEARING": 0.0,
+    "BG-2002": 0.0,
+    "BRAKE_PAD": 0.0,
+    "BRASS_NUT": 0.0,
+    "BX-1001": 0.0,
+    "BX-1002": 0.0,
+    "BX-1003": 0.0,
+    "GEAR": 0.0,
+    "RED_CAP": 0.0,
+    "RELAY": 0.0,
+    "SPARK_PLUG": 0.0
+  },
+  "median_order_time_s": 9.950000000000092,
+  "sku_identifier": {
+    "name": "sku_oracle",
+    "error_rate": 0.0,
+    "n_corrupted": 0
+  },
+  "config": "sim/level7_orders.yaml",
+  "seed_start": 100000,
+  "git_sha": "f104cac",
+  "wall_time_s": 99.79943060874939
+}

@@ -240,6 +240,21 @@ def scene_xml(cfg: dict, object_overrides: dict | None = None, camera_override: 
         objs.append(
             f'<body name="{o["id"]}" pos="{_v(pos)}" quat="{q}"><freejoint name="{o["id"]}_free"/>{g}</body>'
         )
+    bins_xml = ""
+    for b in scfg.get("bins", []):
+        bx, by, bz = b["position"]
+        biw, bih = b["inner_size"]
+        bwh, bwt = b["wall_height"], b.get("wall_thickness", 0.004)
+        brgba = _v(b.get("color", [0.6, 0.45, 0.3, 1]))
+        bins_xml += (
+            f'<body name="{b["id"]}" pos="{bx:.4f} {by:.4f} {bz:.4f}">'
+            f'<geom name="{b["id"]}_floor" type="box" size="{biw/2+bwt:.4f} {bih/2+bwt:.4f} 0.002" pos="0 0 0.002" rgba="{brgba}"/>'
+            f'<geom name="{b["id"]}_w0" type="box" size="{bwt:.4f} {bih/2+bwt:.4f} {bwh/2:.4f}" pos="{biw/2+bwt/2:.4f} 0 {bwh/2:.4f}" rgba="{brgba}"/>'
+            f'<geom name="{b["id"]}_w1" type="box" size="{bwt:.4f} {bih/2+bwt:.4f} {bwh/2:.4f}" pos="{-(biw/2+bwt/2):.4f} 0 {bwh/2:.4f}" rgba="{brgba}"/>'
+            f'<geom name="{b["id"]}_w2" type="box" size="{biw/2+bwt:.4f} {bwt:.4f} {bwh/2:.4f}" pos="0 {bih/2+bwt/2:.4f} {bwh/2:.4f}" rgba="{brgba}"/>'
+            f'<geom name="{b["id"]}_w3" type="box" size="{biw/2+bwt:.4f} {bwt:.4f} {bwh/2:.4f}" pos="0 {-(bih/2+bwt/2):.4f} {bwh/2:.4f}" rgba="{brgba}"/>'
+            f'<site name="{b["id"]}_center" pos="0 0 0.004" size="0.003" rgba="0 0 1 0.3"/></body>'
+        )
     cam_q = camera_quat_lookat(ccfg["position"], ccfg["lookat"])
     light_dir = ccfg.get("light_diffuse", 0.7)
     xml = f"""
@@ -269,6 +284,7 @@ def scene_xml(cfg: dict, object_overrides: dict | None = None, camera_override: 
     <geom name="table" type="box" size="{ts_x/2:.4f} {ts_y/2:.4f} {ts_z/2:.4f}" pos="{ts_x/2 - 0.12:.4f} 0 {-ts_z/2:.4f}" material="table_mat" friction="0.8 0.01 0.0005"/>
     <body name="tray" pos="{tx:.4f} {ty:.4f} {tz:.4f}">{tray_geoms}<site name="tray_center" pos="0 0 0.004" size="0.003" rgba="0 0 1 0.3"/></body>
     {"".join(objs)}
+    {bins_xml}
     <camera name="{ccfg['name']}" pos="{_v(ccfg['position'])}" quat="{_v(cam_q)}" fovy="{ccfg['fovy_deg']}"/>
     <camera name="top_debug" pos="0.2 0 0.8" quat="1 0 0 0" fovy="50"/>
     {bodies}

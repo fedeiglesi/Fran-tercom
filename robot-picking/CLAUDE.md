@@ -25,8 +25,12 @@ uv run python -m pytest -q tests
 - Baseline 0 por percepción (color+depth+calibración, `policies/perception_scripted.py`): 1000/1000 nivel 1,
   1000/1000 nivel 2 (10 objetos), 90.8 % nivel 3 (24 geometrías + randomización). PASA el gate sim-to-real.
 - ACT visual (LeRobot 0.6.1, ResNet18 desde cero, CPU): 50–57 %. No aprende a leer la posición del objeto.
-- ACT de baja dimensión (`configs/policies/act_lowdim_level1.yaml`, features de percepción,
-  `outputs/act_lowdim_smooth_floor_v001`, n_action_steps=5): 87.2 % en 1000 episodios. Frágil entre runs.
+- ACT de baja dimensión (`configs/policies/act_lowdim_level1.yaml`, features de percepción): entrenado con demos
+  grabadas bajo servos randomizados (`outputs/act_lowdim_servo_v001`, nas=5) → **99.5 % nominal / 96.5 % con
+  servos imperfectos en 1000 episodios: pasa el gate**. Entrenado con demos nominales: 87 % y frágil. Regla:
+  grabar las demos con `*_servo.yaml`.
+- Nivel 7 (pedidos: caja origen con SKUs mezclados en caja/bolsa/suelto → caja de pedido con productos previos,
+  `configs/sim/level7_orders.yaml`, `scripts/evaluate_orders.py`): objetivo final; en construcción.
 - Nivel 4 (motopartes aproximadas): 93 % privilegiado, 82 % con detector por altura sin color (`detect_by_height`).
   Nivel 5 (4 objetos simultáneos): 98 %. Nivel 6 (clutter): 70 % (vecinos desplazados por el gripper al bajar;
   próximo paso: elegir el yaw de agarre con más holgura respecto a los vecinos). Nivel 7 (bin) pendiente.

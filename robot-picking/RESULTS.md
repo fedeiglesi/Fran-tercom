@@ -20,7 +20,9 @@ Entorno de medición: contenedor Linux x86_64, 4 vCPU, sin GPU, MuJoCo 3.17, LeR
 | 1 (cubo) | ACT visual (LeRobot 0.6.1, ResNet18 desde cero, 128×128), 200 demos, ckpt 500/1000/2000 | 30 c/u | 53 % / 50 % / 53 % | 60 % | 0 % | 10 % | ~45 % | — | no |
 | 1 (cubo) | ACT visual, recorte ajustado 160×90 (cubo ≈15 px), con/sin desplazamiento aleatorio | 30 c/u | 50–57 % | 57 % | 7–17 % | 0 % | 27–37 % | — | no |
 | 1 (cubo) | ACT visual sin VAE | 30 | 3 % | 60 % | 27 % | 7 % | 67 % | — | no |
-| 1 (cubo) | **ACT de baja dimensión** (estado + pose del objeto desde la percepción), experto suave + velocidad mínima, 200 demos, n_action_steps=5 | **1000** (seeds 101000+) | **87.2 %** | 99.7 % | 0.0 % | 3.8 % | 16.2 % | 13.6 / 14.8 | no |
+| 1 (cubo) | ACT de baja dimensión (estado + pose del objeto desde la percepción), experto suave + velocidad mínima, 200 demos nominales, n_action_steps=5 | 1000 (seeds 101000+) | 87.2 % | 99.7 % | 0.0 % | 3.8 % | 16.2 % | 13.6 / 14.8 | no |
+| 1 (cubo) | **ACT de baja dimensión entrenado con 300 demos bajo servos randomizados** (`act_lowdim_servo_v001`), nas=5 | **1000** (seeds 101000+) | **99.5 %** | 99.7 % | 0.0 % | 0.2 % | 0.5 % | 7.3 / 7.7 | **PASA** |
+| 1 (cubo) con servos imperfectos | idem | 1000 | 96.5 % | 97.4 % | 0.0 % | 0.1 % | 4.3 % | 10.0 / 14.7 | no (97 %) |
 
 Notas:
 * "Baseline 0 percepción" NO usa estado privilegiado: segmentación de color + profundidad + `T_base_camera`

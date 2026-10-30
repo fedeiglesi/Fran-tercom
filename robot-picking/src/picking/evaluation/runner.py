@@ -52,6 +52,11 @@ def build_observation(env: PickPlaceEnv, adapter: SimRobotAdapter, instruction: 
 
         i = env.camera_intrinsics()
         extra_cam = {"camera_intrinsics": Intrinsics(i["fx"], i["fy"], i["cx"], i["cy"], i["width"], i["height"]), "T_base_camera": env.T_base_camera if getattr(env, "T_base_camera", None) is not None else SimCamera(env).pose_cv_in_base(), "gripper_opening_m": env.gripper_opening(), "tray_pos": env.tray_center(), "tray_footprint": env.tray_footprint()}
+        if getattr(env, "order_task", None):
+            src = env.order_task["source_bin"]
+            extra_cam["source_bin_footprint"] = (env.bin_center(src)[:2].copy(), env.bin_inner_halfsize(src))
+            extra_cam["sku_true_positions"] = {o: env.object_pose(o)[:3, 3].copy() for o in env.objects_in_bin(src)}
+            extra_cam["sku_of_object"] = {o: env.object_specs[o].get("sku", o) for o in env.object_ids}
     elif with_images:
         rgb = env.render_rgb()
         crop = env.cfg["camera"].get("policy_crop")
@@ -126,16 +131,21 @@ def run_episode(
     settle_steps_after_done: int = 12,
     force_images: bool = False,
     full_frame: bool = False,
+    env_reset: bool = True,
+    target_override: str | None = None,
 ) -> EpisodeResult:
     cfg = env.cfg
     task_cfg = cfg["task"]
     episode_id = episode_id or f"ep_{seed}_{uuid.uuid4().hex[:8]}"
-    env.reset(seed=seed, randomize=randomize)
+    if env_reset:
+        env.reset(seed=seed, randomize=randomize)
+        adapter.reset_targets()
+    if target_override is not None:
+        env.current_target = target_override
     target = env.current_target
     spec = env.target_spec()
     instruction = instruction or env.instruction()
-    adapter.reset_targets()
-    policy.reset(instruction, {"target_object": target, "color": spec.get("color_name"), "name": spec.get("name", target), "half_height_m": env.object_half_extent_z(target)})
+    policy.reset(instruction, {"target_object": target, "color": spec.get("color_name"), "name": spec.get("name", target), "half_height_m": env.object_half_extent_z(target), "sku": spec.get("sku"), "packaging": spec.get("packaging")})
     safety.events.clear()
     safety.n_rejected = safety.n_clamped = 0
     evaluator = EpisodeEvaluator(target_object=target, lift_height=float(task_cfg["lift_height"]), max_steps=env.max_steps)
