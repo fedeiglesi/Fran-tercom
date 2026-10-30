@@ -75,7 +75,7 @@ def main() -> int:
     ap.add_argument("--color", default="red")
     ap.add_argument("--detector", default="color", choices=["color", "height"], help="perception policy: colour blob or colour-agnostic height-above-table")
     ap.add_argument("--orden", default=None, help="orden en español argentino; se traduce a la instrucción canónica en inglés y fija el objeto objetivo")
-    ap.add_argument("--grasp-offset", type=float, default=0.002, help="scripted policies: grasp height above the object centre [m] (pads are 40 mm tall; +2 mm avoids pad-table contact with servo lag)")
+    ap.add_argument("--grasp-offset", type=float, default=0.0, help="scripted policies: grasp height above the object centre [m]; 0 keeps flat objects graspable (level 2: +2 mm cost 5 %%), use 0.002 only with servo lag")
     ap.add_argument("--preshape", type=float, default=None, help="scripted policies: pre-shape gripper opening = object width + this margin [m] (clutter)")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--act-override", default=None, help='JSON of inference-time ACT config changes, e.g. {"n_action_steps": 5}')
